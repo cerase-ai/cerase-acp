@@ -19,7 +19,7 @@
 
 import { loadConfig, type BridgeConfig, type AgentConfig } from "./config.js";
 import { isAllowed } from "./allowlist.js";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, type TurnTelemetry } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { pickRefusalMessage } from "./dispatcher.js";
 import * as readline from "node:readline";
@@ -175,6 +175,7 @@ async function runOneTurn(
   userId: string,
   text: string,
   io: CliIO,
+  telemetrySink?: { last?: TurnTelemetry },
 ): Promise<number> {
   const DIM_IT = "\x1b[2;3m";
   const RESET = "\x1b[0m";
@@ -212,6 +213,18 @@ async function runOneTurn(
       io.stdoutWrite("(no direct reply from the agent — only the thought above)");
     }
     io.stdoutWrite("\n");
+    // M16: surface a once-per-turn marker when the shadow channel
+    // recovered text the ACP stream missed. Customer-trust signal:
+    // "we noticed transport dropped some content, we recovered it
+    // from the persisted audit record."
+    const last = telemetrySink?.last;
+    if (last && (last.reconciledTextBytes > 0 || last.reconciledReasoningBytes > 0)) {
+      const DIM = "\x1b[2m";
+      io.stderrWrite(
+        `${DIM}[recovered ${last.reconciledTextBytes}b text + ` +
+          `${last.reconciledReasoningBytes}b thought from audit log]${RESET}\n`,
+      );
+    }
     return 0;
   } catch (err) {
     endThoughtIfNeeded();
@@ -223,10 +236,13 @@ async function runOneTurn(
 async function runPrompt(args: PromptArgs, io: CliIO): Promise<number> {
   const validated = loadAndValidate(args, io, args.text);
   if ("exitCode" in validated) return validated.exitCode;
-  const mgr = new SessionManager(validated.cfg);
+  const telemetrySink: { last?: TurnTelemetry } = {};
+  const mgr = new SessionManager(validated.cfg, undefined, {
+    onTelemetry: (t) => (telemetrySink.last = t),
+  });
   const tracker = new TurnMetaTracker();
   try {
-    return await runOneTurn(mgr, tracker, args.agentId, args.userId, args.text, io);
+    return await runOneTurn(mgr, tracker, args.agentId, args.userId, args.text, io, telemetrySink);
   } finally {
     await mgr.shutdown();
   }
@@ -272,7 +288,10 @@ async function runRepl(args: CommonArgs, io: CliIO): Promise<number> {
   // is keyed off the first incoming line so we can detect the
   // language. Authorised path: persistent SessionManager + Tracker
   // across all turns of this REPL.
-  const mgr = new SessionManager(validated.cfg);
+  const telemetrySink: { last?: TurnTelemetry } = {};
+  const mgr = new SessionManager(validated.cfg, undefined, {
+    onTelemetry: (t) => (telemetrySink.last = t),
+  });
   const tracker = new TurnMetaTracker();
   const readLine = io.readLine ?? makeStdinReadLine();
   io.stderrWrite(`cerase-acp REPL — agent=${args.agentId} user=${args.userId}. Empty line or Ctrl-D to exit.\n`);
@@ -284,7 +303,7 @@ async function runRepl(args: CommonArgs, io: CliIO): Promise<number> {
         io.stderrWrite("\n");
         return 0;
       }
-      const rc = await runOneTurn(mgr, tracker, args.agentId, args.userId, line, io);
+      const rc = await runOneTurn(mgr, tracker, args.agentId, args.userId, line, io, telemetrySink);
       // A single failing turn doesn't kill the REPL — log and let the
       // user retry. Only return non-zero if the SessionManager itself
       // is no longer usable (would surface as the next prompt

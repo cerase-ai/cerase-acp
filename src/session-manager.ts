@@ -4,6 +4,13 @@ import * as acp from "@agentclientprotocol/sdk";
 import { makeLogger } from "./logger.js";
 import type { BridgeConfig, AgentConfig } from "./config.js";
 import { PromptQueue } from "./prompt-queue.js";
+import { reconcile, type SeenState } from "./reconciler.js";
+import {
+  defaultEndpointForAgent,
+  defaultFetcher,
+  type CanonicalFetcher,
+  type RestEndpoint,
+} from "./opencode-rest.js";
 
 const logger = makeLogger("cerase-acp.session-manager");
 
@@ -54,11 +61,36 @@ export interface TurnTelemetry {
    * POST_PROMPT_IDLE_MS in the typical idle-exit case.
    */
   lastChunkAgeMs: number;
+  /**
+   * Bytes of `agent_message_chunk` content recovered via M16 REST
+   * reconciliation after the drain loop. `0` is the happy path —
+   * the ACP stream delivered everything. Any non-zero value flags
+   * an upstream race that the M16 shadow channel just patched.
+   */
+  reconciledTextBytes: number;
+  /** Same as above but for `agent_thought_chunk` (reasoning) bytes. */
+  reconciledReasoningBytes: number;
 }
 
 export interface SessionManagerOptions {
   /** Subscribe to per-turn telemetry. Fires AFTER the drain loop. */
   onTelemetry?: (t: TurnTelemetry) => void;
+  /**
+   * Inject a canonical-message fetcher for M16 shadow-channel
+   * reconciliation. Tests use this to substitute a canned reply;
+   * production omits it and `defaultFetcher` (hits the opencode
+   * serve REST endpoint) is used.
+   */
+  canonicalFetcher?: CanonicalFetcher;
+  /**
+   * Inject an endpoint resolver. Tests use a fake endpoint;
+   * production defaults to `defaultEndpointForAgent(agent.id)`
+   * which reads `OPENCODE_SERVER_PASSWORD` from env and assumes
+   * the `cerase-agent-{id}` docker service-name convention.
+   * Returning `null` disables reconciliation for that agent
+   * (logged once, then quiet).
+   */
+  endpointResolver?: (agentId: string) => RestEndpoint | null;
 }
 
 /**
@@ -98,6 +130,8 @@ export class SessionManager {
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
   private onTelemetry?: (t: TurnTelemetry) => void;
+  private canonicalFetcher: CanonicalFetcher;
+  private endpointResolver: (agentId: string) => RestEndpoint | null;
 
   constructor(
     private config: BridgeConfig,
@@ -107,6 +141,8 @@ export class SessionManager {
     for (const a of config.agents) this.agentsById.set(a.id, a);
     this.idleMs = config.session.idle_timeout_minutes * 60 * 1000;
     this.onTelemetry = options?.onTelemetry;
+    this.canonicalFetcher = options?.canonicalFetcher ?? defaultFetcher;
+    this.endpointResolver = options?.endpointResolver ?? defaultEndpointForAgent;
   }
 
   activeSessionCount(): number {
@@ -147,17 +183,34 @@ export class SessionManager {
       let chunksReceived = 0;
       let textChunks = 0;
       let thoughtChunks = 0;
+      // M16 bookkeeping — accumulate everything the ACP delta stream
+      // gave us so the reconciler can diff against the REST snapshot.
+      // We also latch the first messageId we see; ACP attaches it to
+      // both agent_message_chunk and agent_thought_chunk updates.
+      const seen: SeenState = { textSeen: "", reasoningSeen: "" };
+      let assistantMessageId: string | undefined;
       entry!.onUpdate = (update) => {
         lastUpdateAt = Date.now();
         chunksReceived += 1;
-        if (update.sessionUpdate === "agent_message_chunk") textChunks += 1;
-        else if (update.sessionUpdate === "agent_thought_chunk") thoughtChunks += 1;
+        if (update.sessionUpdate === "agent_message_chunk") {
+          textChunks += 1;
+          if (update.content.type === "text") seen.textSeen += update.content.text;
+          const mid = (update as { messageId?: string }).messageId;
+          if (mid && !assistantMessageId) assistantMessageId = mid;
+        } else if (update.sessionUpdate === "agent_thought_chunk") {
+          thoughtChunks += 1;
+          if (update.content.type === "text") seen.reasoningSeen += update.content.text;
+          const mid = (update as { messageId?: string }).messageId;
+          if (mid && !assistantMessageId) assistantMessageId = mid;
+        }
         onUpdate?.(update);
       };
       this.resetIdleTimer(entry!);
       const t0 = Date.now();
       let t1 = 0;
       let drainExit: TurnTelemetry["drainExit"] = "idle";
+      let reconciledTextBytes = 0;
+      let reconciledReasoningBytes = 0;
       try {
         const response = await entry!.connection.prompt({
           sessionId: entry!.sessionId,
@@ -200,6 +253,48 @@ export class SessionManager {
           }
           await new Promise((r) => setTimeout(r, 50));
         }
+        // M16: shadow-channel reconciliation. After the drain has
+        // settled we ask opencode serve for the canonical assistant
+        // message and replay any text/reasoning the ACP delta stream
+        // missed as synthetic chunks. Failure modes (no messageId yet,
+        // no endpoint configured, fetch failure) all degrade silently
+        // to "no reconciliation" — the M15 drain alone still covered
+        // the majority of cases.
+        if (assistantMessageId) {
+          const endpoint = this.endpointResolver(agent.id);
+          if (endpoint) {
+            try {
+              const canonical = await this.canonicalFetcher(
+                endpoint,
+                entry!.sessionId,
+                assistantMessageId,
+              );
+              if (canonical) {
+                const deltas = reconcile(seen, canonical);
+                for (const d of deltas) {
+                  const update: SessionUpdate =
+                    d.kind === "text"
+                      ? ({
+                          sessionUpdate: "agent_message_chunk",
+                          content: { type: "text", text: d.text },
+                        } as SessionUpdate)
+                      : ({
+                          sessionUpdate: "agent_thought_chunk",
+                          content: { type: "text", text: d.text },
+                        } as SessionUpdate);
+                  onUpdate?.(update);
+                  if (d.kind === "text") reconciledTextBytes += d.text.length;
+                  else reconciledReasoningBytes += d.text.length;
+                }
+              }
+            } catch (err) {
+              logger.warn(
+                { agentId: agent.id, err: (err as Error).message },
+                "M16 reconciliation failed — skipped",
+              );
+            }
+          }
+        }
         return { stopReason: response.stopReason };
       } finally {
         const t2 = Date.now();
@@ -216,6 +311,8 @@ export class SessionManager {
           promptToEndTurnMs: t1 > 0 ? t1 - t0 : 0,
           endTurnToDrainDoneMs: t1 > 0 ? t2 - t1 : 0,
           lastChunkAgeMs: chunksReceived > 0 ? t2 - lastUpdateAt : 0,
+          reconciledTextBytes,
+          reconciledReasoningBytes,
         };
         logger.info({ ...telemetry, marker: "turn_telemetry" }, "[turn_telemetry]");
         try {

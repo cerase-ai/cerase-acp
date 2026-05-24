@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type TurnTelemetry } from "./session-manager.js";
 import type { BridgeConfig } from "./config.js";
+import type { CanonicalMessage } from "./reconciler.js";
+import type { RestEndpoint } from "./opencode-rest.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -12,6 +14,7 @@ function makeConfig(overrides?: {
   cwd?: string;
   lateBurstText?: string;
   lateBurstIntervalMs?: number;
+  messageId?: string;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -20,6 +23,8 @@ function makeConfig(overrides?: {
     env.push(`FAKE_LATE_BURST_TEXT=${overrides.lateBurstText}`);
   if (overrides?.lateBurstIntervalMs !== undefined)
     env.push(`FAKE_LATE_BURST_INTERVAL_MS=${overrides.lateBurstIntervalMs}`);
+  if (overrides?.messageId !== undefined)
+    env.push(`FAKE_MESSAGE_ID=${overrides.messageId}`);
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -178,6 +183,127 @@ describe("SessionManager", () => {
     expect(t.promptToEndTurnMs).toBeGreaterThanOrEqual(0);
     expect(t.endTurnToDrainDoneMs).toBeGreaterThanOrEqual(0);
     expect(t.lastChunkAgeMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("M16: reconciles missing text from REST snapshot and surfaces it via onUpdate", async () => {
+    // Simulate the upstream race: ACP only delivers "head=" but the
+    // canonical assistant message (per opencode serve REST) is
+    // "head=tail-from-rest". The reconciler must emit a synthetic
+    // agent_message_chunk with "tail-from-rest" so the visible reply
+    // is whole.
+    const fakeEndpoint: RestEndpoint = {
+      baseURL: "http://test",
+      username: "opencode",
+      password: "test",
+    };
+    const fakeCanonical: CanonicalMessage = {
+      id: "msg_test",
+      parts: [{ id: "prt_0", type: "text", text: "head=tail-from-rest" }],
+    };
+    let captured: TurnTelemetry | undefined;
+    mgr = new SessionManager(makeConfig({ reply: "head=" }), undefined, {
+      endpointResolver: () => fakeEndpoint,
+      canonicalFetcher: async () => fakeCanonical,
+      onTelemetry: (t) => (captured = t),
+    });
+    const chunks: string[] = [];
+    await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    // Note: the fake child currently emits no messageId in its chunks,
+    // so reconciliation is skipped — the test asserts the M16 path is
+    // INERT until ACP exposes a messageId. This is the correct
+    // behaviour: don't fetch when we can't address the message.
+    // The richer assertion lives in the next test.
+    expect(chunks.join("")).toBe("head=");
+    expect(captured?.reconciledTextBytes).toBe(0);
+  });
+
+  it("M16: with messageId present, reconciler appends the missing tail", async () => {
+    // To exercise the full reconciliation path we wire the fake child
+    // to attach a messageId to its chunks (FAKE_MESSAGE_ID). The
+    // canned REST fetcher returns a message that's strictly longer
+    // than what the ACP stream delivered, so reconcile() returns a
+    // single text delta the SessionManager replays via onUpdate.
+    const fakeEndpoint: RestEndpoint = {
+      baseURL: "http://test",
+      username: "opencode",
+      password: "test",
+    };
+    const fakeCanonical: CanonicalMessage = {
+      id: "msg_test_42",
+      parts: [{ id: "prt_0", type: "text", text: "ciao da fake-acpRECOVERED" }],
+    };
+    let captured: TurnTelemetry | undefined;
+    mgr = new SessionManager(
+      makeConfig({ reply: "ciao da fake-acp", messageId: "msg_test_42" }),
+      undefined,
+      {
+        endpointResolver: () => fakeEndpoint,
+        canonicalFetcher: async () => fakeCanonical,
+        onTelemetry: (t) => (captured = t),
+      },
+    );
+    const chunks: string[] = [];
+    await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(chunks.join("")).toBe("ciao da fake-acpRECOVERED");
+    expect(captured?.reconciledTextBytes).toBe("RECOVERED".length);
+    expect(captured?.reconciledReasoningBytes).toBe(0);
+  });
+
+  it("M16: skips reconciliation when endpointResolver returns null", async () => {
+    let fetcherCalls = 0;
+    let captured: TurnTelemetry | undefined;
+    mgr = new SessionManager(
+      makeConfig({ reply: "x", messageId: "msg_test_88" }),
+      undefined,
+      {
+        endpointResolver: () => null,
+        canonicalFetcher: async () => {
+          fetcherCalls += 1;
+          return null;
+        },
+        onTelemetry: (t) => (captured = t),
+      },
+    );
+    await mgr.prompt("doc-qa", "user-A", "ping");
+    expect(fetcherCalls).toBe(0);
+    expect(captured?.reconciledTextBytes).toBe(0);
+  });
+
+  it("M16: degrades gracefully when fetcher throws", async () => {
+    const fakeEndpoint: RestEndpoint = {
+      baseURL: "http://test",
+      username: "opencode",
+      password: "test",
+    };
+    let captured: TurnTelemetry | undefined;
+    mgr = new SessionManager(
+      makeConfig({ reply: "partial", messageId: "msg_test_99" }),
+      undefined,
+      {
+        endpointResolver: () => fakeEndpoint,
+        canonicalFetcher: async () => {
+          throw new Error("simulated REST timeout");
+        },
+        onTelemetry: (t) => (captured = t),
+      },
+    );
+    const chunks: string[] = [];
+    const result = await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(result.stopReason).toBe("end_turn");
+    expect(chunks.join("")).toBe("partial");
+    expect(captured?.reconciledTextBytes).toBe(0);
   });
 
   it("kills the child after idle_timeout_minutes of inactivity", async () => {

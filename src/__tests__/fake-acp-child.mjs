@@ -18,6 +18,11 @@
 //                              continue streaming after end_turn.
 //   FAKE_LATE_BURST_INTERVAL_MS — ms between successive late-burst
 //                              chunks (default 100).
+//   FAKE_MESSAGE_ID         — when set, attach this messageId to every
+//                              agent_message_chunk / agent_thought_chunk
+//                              update. Production opencode-acp always
+//                              includes a messageId; M16 reconciliation
+//                              needs it to address the canonical record.
 
 import readline from "node:readline";
 
@@ -34,6 +39,7 @@ const KIND = process.env.FAKE_KIND ?? "message";
 const UPDATE_KIND = KIND === "thought" ? "agent_thought_chunk" : "agent_message_chunk";
 const LATE_BURST_TEXT = process.env.FAKE_LATE_BURST_TEXT;
 const LATE_BURST_INTERVAL_MS = parseInt(process.env.FAKE_LATE_BURST_INTERVAL_MS ?? "100", 10);
+const MESSAGE_ID = process.env.FAKE_MESSAGE_ID;
 
 const send = (msg) => {
   process.stdout.write(JSON.stringify(msg) + "\n");
@@ -106,16 +112,15 @@ rl.on("line", async (line) => {
       pieces.push(REPLY.slice(i, i + chunkLen));
     }
     for (const text of pieces) {
+      const update = {
+        sessionUpdate: UPDATE_KIND,
+        content: { type: "text", text },
+      };
+      if (MESSAGE_ID) update.messageId = MESSAGE_ID;
       send({
         jsonrpc: "2.0",
         method: "session/update",
-        params: {
-          sessionId,
-          update: {
-            sessionUpdate: UPDATE_KIND,
-            content: { type: "text", text },
-          },
-        },
+        params: { sessionId, update },
       });
       if (DELAY_MS > 0) await sleep(DELAY_MS);
     }
@@ -131,16 +136,15 @@ rl.on("line", async (line) => {
     if (LATE_BURST_TEXT !== undefined && LATE_BURST_TEXT.length > 0) {
       for (const ch of LATE_BURST_TEXT) {
         await sleep(LATE_BURST_INTERVAL_MS);
+        const update = {
+          sessionUpdate: UPDATE_KIND,
+          content: { type: "text", text: ch },
+        };
+        if (MESSAGE_ID) update.messageId = MESSAGE_ID;
         send({
           jsonrpc: "2.0",
           method: "session/update",
-          params: {
-            sessionId,
-            update: {
-              sessionUpdate: UPDATE_KIND,
-              content: { type: "text", text: ch },
-            },
-          },
+          params: { sessionId, update },
         });
       }
     }
