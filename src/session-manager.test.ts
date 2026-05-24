@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { fileURLToPath } from "node:url";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, type TurnTelemetry } from "./session-manager.js";
 import type { BridgeConfig } from "./config.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -10,10 +10,16 @@ function makeConfig(overrides?: {
   crashAfterPrompt?: boolean;
   idleTimeoutMinutes?: number;
   cwd?: string;
+  lateBurstText?: string;
+  lateBurstIntervalMs?: number;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
   if (overrides?.crashAfterPrompt) env.push("FAKE_CRASH_AFTER_PROMPT=1");
+  if (overrides?.lateBurstText !== undefined)
+    env.push(`FAKE_LATE_BURST_TEXT=${overrides.lateBurstText}`);
+  if (overrides?.lateBurstIntervalMs !== undefined)
+    env.push(`FAKE_LATE_BURST_INTERVAL_MS=${overrides.lateBurstIntervalMs}`);
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -129,6 +135,49 @@ describe("SessionManager", () => {
     expect(mgr.activeSessionCount()).toBe(2);
     await mgr.shutdown();
     expect(mgr.activeSessionCount()).toBe(0);
+  });
+
+  it("captures a 3s burst of late chunks after end_turn (M15 ceiling bump)", async () => {
+    // Upstream opencode race #17505: session/update notifications
+    // continue streaming after the session/prompt RPC reply. Each chunk
+    // in the burst refreshes `lastUpdateAt`, so only the
+    // POST_PROMPT_MAX_DRAIN_MS ceiling cuts us off. With burst length
+    // 3000ms and the M15 ceiling bumped 2000→8000, we capture the full
+    // burst; pre-M15 we lost the last ~1000ms of content (visible reply
+    // truncated mid-sentence).
+    //
+    // Burst: 30 chars at 100ms intervals = 3000ms total post-end_turn.
+    const lateBurst = "abcdefghij" + "klmnopqrst" + "uvwxyz0123";
+    mgr = new SessionManager(
+      makeConfig({ reply: "head=", lateBurstText: lateBurst, lateBurstIntervalMs: 100 }),
+    );
+    const chunks: string[] = [];
+    const result = await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(result.stopReason).toBe("end_turn");
+    expect(chunks.join("")).toBe("head=" + lateBurst);
+  }, 10_000);
+
+  it("emits per-turn telemetry via the onTelemetry hook (M15)", async () => {
+    const captured: TurnTelemetry[] = [];
+    mgr = new SessionManager(makeConfig({ reply: "abc" }), undefined, {
+      onTelemetry: (t) => captured.push(t),
+    });
+    await mgr.prompt("doc-qa", "user-A", "ping");
+    expect(captured.length).toBe(1);
+    const t = captured[0]!;
+    expect(t.agentId).toBe("doc-qa");
+    expect(t.userId).toBe("user-A");
+    expect(t.chunksReceived).toBeGreaterThan(0);
+    expect(t.textChunks).toBeGreaterThan(0);
+    expect(t.thoughtChunks).toBe(0);
+    expect(["idle", "ceiling", "closed"]).toContain(t.drainExit);
+    expect(t.promptToEndTurnMs).toBeGreaterThanOrEqual(0);
+    expect(t.endTurnToDrainDoneMs).toBeGreaterThanOrEqual(0);
+    expect(t.lastChunkAgeMs).toBeGreaterThanOrEqual(0);
   });
 
   it("kills the child after idle_timeout_minutes of inactivity", async () => {

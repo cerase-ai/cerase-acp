@@ -23,6 +23,45 @@ export interface PromptResult {
 }
 
 /**
+ * Per-turn telemetry captured by `prompt()`. Emitted both as a `pino`
+ * info-level log line (`[turn_telemetry] …`) and via the optional
+ * `onTelemetry` hook so operators / metrics layers can subscribe
+ * without parsing log output.
+ *
+ * Used to dimension the upstream opencode race (#17505 / #25421) in
+ * production: if `drainExit === "ceiling"` or `lastChunkAgeMs` is
+ * near `POST_PROMPT_MAX_DRAIN_MS` we know the drain bound needs more
+ * room or the M16 reconciler should kick in.
+ */
+export interface TurnTelemetry {
+  agentId: string;
+  userId: string;
+  /** Total session/update notifications received during the turn. */
+  chunksReceived: number;
+  /** Subset of `chunksReceived` that were `agent_message_chunk`. */
+  textChunks: number;
+  /** Subset of `chunksReceived` that were `agent_thought_chunk`. */
+  thoughtChunks: number;
+  /** Why the drain loop exited: idle window / ceiling / child closed. */
+  drainExit: "idle" | "ceiling" | "closed";
+  /** Wall-clock ms from `connection.prompt()` call → its resolution. */
+  promptToEndTurnMs: number;
+  /** Wall-clock ms from end_turn → drain loop exit. */
+  endTurnToDrainDoneMs: number;
+  /**
+   * Wall-clock ms between the last update received and drain exit.
+   * Near 0 when a chunk landed right before exit; near
+   * POST_PROMPT_IDLE_MS in the typical idle-exit case.
+   */
+  lastChunkAgeMs: number;
+}
+
+export interface SessionManagerOptions {
+  /** Subscribe to per-turn telemetry. Fires AFTER the drain loop. */
+  onTelemetry?: (t: TurnTelemetry) => void;
+}
+
+/**
  * Optional injection point so tests can swap real `child_process.spawn`
  * for a custom spawner. Production code uses the default.
  */
@@ -58,13 +97,16 @@ export class SessionManager {
   private entries = new Map<string, SessionEntry>();
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
+  private onTelemetry?: (t: TurnTelemetry) => void;
 
   constructor(
     private config: BridgeConfig,
     private spawnFn: SpawnFn = defaultSpawn,
+    options?: SessionManagerOptions,
   ) {
     for (const a of config.agents) this.agentsById.set(a.id, a);
     this.idleMs = config.session.idle_timeout_minutes * 60 * 1000;
+    this.onTelemetry = options?.onTelemetry;
   }
 
   activeSessionCount(): number {
@@ -97,17 +139,31 @@ export class SessionManager {
       // Without draining, the caller (CLI / Discord adapter) sees
       // the final delta as missing and the reply appears empty or
       // truncated.
+      //
+      // Counters fuel the M15 `[turn_telemetry]` line: operators
+      // grep these to dimension the race in production and decide
+      // whether the M16 reconciler needs to fire.
       let lastUpdateAt = Date.now();
+      let chunksReceived = 0;
+      let textChunks = 0;
+      let thoughtChunks = 0;
       entry!.onUpdate = (update) => {
         lastUpdateAt = Date.now();
+        chunksReceived += 1;
+        if (update.sessionUpdate === "agent_message_chunk") textChunks += 1;
+        else if (update.sessionUpdate === "agent_thought_chunk") thoughtChunks += 1;
         onUpdate?.(update);
       };
       this.resetIdleTimer(entry!);
+      const t0 = Date.now();
+      let t1 = 0;
+      let drainExit: TurnTelemetry["drainExit"] = "idle";
       try {
         const response = await entry!.connection.prompt({
           sessionId: entry!.sessionId,
           prompt: [{ type: "text", text }],
         });
+        t1 = Date.now();
         // Debug-log the stopReason for forensic visibility into
         // why a turn ended (end_turn, max_tokens, refusal, …).
         logger.debug(
@@ -118,22 +174,55 @@ export class SessionManager {
         // POST_PROMPT_IDLE_MS, or until POST_PROMPT_MAX_DRAIN_MS
         // elapses as a safety ceiling. Captures the post-RPC
         // notifications that opencode acp emits asynchronously.
+        //
+        // Ceiling raised 2000 → 8000 in M15 after end-to-end tests
+        // showed turns with tool-call intermediates emitting their
+        // final agent_message_chunk ~3s after end_turn. 8s is
+        // generous — turns that haven't streamed in 300ms exit
+        // early via the idle branch anyway.
         const POST_PROMPT_IDLE_MS = 300;
-        const POST_PROMPT_MAX_DRAIN_MS = 2000;
+        const POST_PROMPT_MAX_DRAIN_MS = 8000;
         const drainStart = Date.now();
+        // Default exit reason if we run out of budget without ever
+        // going idle. Updated below on each branch.
+        drainExit = "ceiling";
         while (Date.now() - drainStart < POST_PROMPT_MAX_DRAIN_MS) {
           // Short-circuit: if the child already exited, no more
           // chunks will ever arrive — exit the drain immediately.
-          if (entry!.closed) break;
+          if (entry!.closed) {
+            drainExit = "closed";
+            break;
+          }
           const sinceLastUpdate = Date.now() - lastUpdateAt;
-          if (sinceLastUpdate >= POST_PROMPT_IDLE_MS) break;
+          if (sinceLastUpdate >= POST_PROMPT_IDLE_MS) {
+            drainExit = "idle";
+            break;
+          }
           await new Promise((r) => setTimeout(r, 50));
         }
         return { stopReason: response.stopReason };
       } finally {
+        const t2 = Date.now();
         entry!.onUpdate = undefined;
-        entry!.lastTurnAt = Date.now();
+        entry!.lastTurnAt = t2;
         this.resetIdleTimer(entry!);
+        const telemetry: TurnTelemetry = {
+          agentId: agent.id,
+          userId,
+          chunksReceived,
+          textChunks,
+          thoughtChunks,
+          drainExit,
+          promptToEndTurnMs: t1 > 0 ? t1 - t0 : 0,
+          endTurnToDrainDoneMs: t1 > 0 ? t2 - t1 : 0,
+          lastChunkAgeMs: chunksReceived > 0 ? t2 - lastUpdateAt : 0,
+        };
+        logger.info({ ...telemetry, marker: "turn_telemetry" }, "[turn_telemetry]");
+        try {
+          this.onTelemetry?.(telemetry);
+        } catch (err) {
+          logger.warn({ err }, "onTelemetry hook threw — ignored");
+        }
       }
     });
   }

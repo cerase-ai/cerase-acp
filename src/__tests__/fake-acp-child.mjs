@@ -10,6 +10,14 @@
 //   FAKE_CRASH_AFTER_PROMPT — set to "1" to exit(0) after responding to
 //                              one prompt. Used to test crash-respawn.
 //   FAKE_DELAY_MS_PER_CHUNK — sleep ms between chunks (default 0)
+//   FAKE_LATE_BURST_TEXT    — extra text emitted AFTER the prompt RPC
+//                              reply, split into one-char chunks each
+//                              FAKE_LATE_BURST_INTERVAL_MS apart.
+//                              Simulates opencode upstream race #17505
+//                              where session/update notifications
+//                              continue streaming after end_turn.
+//   FAKE_LATE_BURST_INTERVAL_MS — ms between successive late-burst
+//                              chunks (default 100).
 
 import readline from "node:readline";
 
@@ -24,6 +32,8 @@ const DELAY_MS = parseInt(process.env.FAKE_DELAY_MS_PER_CHUNK ?? "0", 10);
 //                         in M11 surfaces them when no message exists)
 const KIND = process.env.FAKE_KIND ?? "message";
 const UPDATE_KIND = KIND === "thought" ? "agent_thought_chunk" : "agent_message_chunk";
+const LATE_BURST_TEXT = process.env.FAKE_LATE_BURST_TEXT;
+const LATE_BURST_INTERVAL_MS = parseInt(process.env.FAKE_LATE_BURST_INTERVAL_MS ?? "100", 10);
 
 const send = (msg) => {
   process.stdout.write(JSON.stringify(msg) + "\n");
@@ -111,6 +121,30 @@ rl.on("line", async (line) => {
     }
     send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
     promptsHandled += 1;
+
+    // Simulate upstream opencode race #17505: emit a burst of
+    // session/update notifications AFTER the prompt RPC reply, each
+    // separated by LATE_BURST_INTERVAL_MS. The parent's drain loop
+    // must keep its window open for the full burst duration; the
+    // (interval < idle_ms) shape means lastUpdateAt is refreshed
+    // each tick so only the ceiling cuts us off.
+    if (LATE_BURST_TEXT !== undefined && LATE_BURST_TEXT.length > 0) {
+      for (const ch of LATE_BURST_TEXT) {
+        await sleep(LATE_BURST_INTERVAL_MS);
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: UPDATE_KIND,
+              content: { type: "text", text: ch },
+            },
+          },
+        });
+      }
+    }
+
     if (CRASH_AFTER_PROMPT && promptsHandled >= 1) {
       // Flush + exit cleanly. From the parent's perspective the child
       // disconnected mid-conversation — exactly the path the session
