@@ -80,9 +80,7 @@ describe("runCli", () => {
     expect(out.stdout.replace(/\n+$/u, "")).toBe("ciao da fake-acp");
   });
 
-  it("happy path: thought chunks alongside message chunks are NOT surfaced", async () => {
-    // Default `kind=message` only — no thoughts emitted. Stdout sees
-    // the message text, stderr has no fallback preamble.
+  it("message-only: reply on stdout, no `thinking:` block on stderr", async () => {
     const cfg = writeSampleConfig(dir, "regular reply");
     const out = await capture([
       "prompt",
@@ -96,12 +94,15 @@ describe("runCli", () => {
     ]);
     expect(out.exitCode).toBe(0);
     expect(out.stdout.replace(/\n+$/u, "")).toBe("regular reply");
-    expect(out.stderr).not.toMatch(/surfacing the agent/);
+    expect(out.stderr).not.toMatch(/thinking:/);
+    expect(out.stdout).not.toMatch(/no direct reply/);
   });
 
-  it("fallback: when only agent_thought_chunk arrives, the thought is surfaced on stdout with a stderr preamble", async () => {
-    // FAKE_KIND=thought → the fake child emits the reply as thought
-    // chunks. Without the fallback the user would see an empty line.
+  it("thought-only (opencode-acp drops the content): thought streams to stderr, stdout shows the empty-reply note", async () => {
+    // FAKE_KIND=thought → the fake child emits text as
+    // agent_thought_chunk, mirroring what opencode-acp does to
+    // reasoning-model `content` fields. User-facing stdout would
+    // otherwise be empty.
     const cfg = writeSampleConfig(dir, "this is a thought", ["111"], "thought");
     const out = await capture([
       "prompt",
@@ -114,8 +115,12 @@ describe("runCli", () => {
       "ping",
     ]);
     expect(out.exitCode).toBe(0);
-    expect(out.stdout.replace(/\n+$/u, "")).toBe("this is a thought");
-    expect(out.stderr).toMatch(/surfacing the agent.*thought process/i);
+    // Stderr carries the thinking block (label + content)
+    expect(out.stderr).toMatch(/thinking:/);
+    expect(out.stderr).toMatch(/this is a thought/);
+    // Stdout flags the empty reply explicitly so stdout-only consumers
+    // know the agent didn't speak (rather than thinking everything is fine)
+    expect(out.stdout).toMatch(/no direct reply from the agent/i);
   });
 
   it("prints the polite refusal and still exits 0 for an unauthorised user", async () => {
