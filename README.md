@@ -113,9 +113,30 @@ To silence the pino logs that interleave with the streamed reply:
 CERASE_ACP_LOG_LEVEL=silent ./scripts/cerase-acp-cli prompt ...
 ```
 
+Note: pino logs go to stderr (M10), so you can also just `2>/dev/null`
+to drop them without touching the log level.
+
 The bash wrapper keeps the TypeScript surface lean — TS handles only
 the one-shot path; the REPL loop and the remote-daemon HTTP dance live
 in the wrapper (`scripts/cerase-acp-cli`), out of the compiled bundle.
+
+### Thought-fallback (M11)
+
+When the agent burns its output budget entirely on chain-of-thought
+reasoning and emits zero `agent_message_chunk` (observed with
+deepseek-v4-flash on short conversational prompts via `opencode acp`),
+the CLI surfaces the accumulated `agent_thought_chunk` content on
+stdout, prefixed by a one-line preamble on stderr:
+
+```
+$ ./scripts/cerase-acp-cli prompt … "ciao amico, come stai?"
+(no direct reply — surfacing the agent's thought process instead)   ← stderr
+The user greeted me in Italian: "Hello friend, how are you?" I should …   ← stdout
+```
+
+The same model in `opencode`'s interactive shell does produce a
+message chunk for the same prompt — this is an opencode-acp-mode
+quirk we work around at the CLI layer.
 
 ## Tests
 

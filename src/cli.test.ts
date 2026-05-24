@@ -7,7 +7,12 @@ import { runCli } from "./cli.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
-function writeSampleConfig(dir: string, reply: string, allowed: string[] = ["111"]): string {
+function writeSampleConfig(
+  dir: string,
+  reply: string,
+  allowed: string[] = ["111"],
+  kind: "message" | "thought" = "message",
+): string {
   const path = join(dir, "agents.yaml");
   writeFileSync(
     path,
@@ -18,7 +23,7 @@ agents:
     allowed_users: ${JSON.stringify(allowed)}
     spawn:
       command: env
-      args: ["--", "FAKE_REPLY=${reply}", "node", "${FAKE_CHILD}"]
+      args: ["--", "FAKE_REPLY=${reply}", "FAKE_KIND=${kind}", "node", "${FAKE_CHILD}"]
 session:
   idle_timeout_minutes: 60
   max_concurrent: 16
@@ -73,6 +78,44 @@ describe("runCli", () => {
     expect(out.exitCode).toBe(0);
     // chunks may interleave but the concatenation must be exact
     expect(out.stdout.replace(/\n+$/u, "")).toBe("ciao da fake-acp");
+  });
+
+  it("happy path: thought chunks alongside message chunks are NOT surfaced", async () => {
+    // Default `kind=message` only — no thoughts emitted. Stdout sees
+    // the message text, stderr has no fallback preamble.
+    const cfg = writeSampleConfig(dir, "regular reply");
+    const out = await capture([
+      "prompt",
+      "--config",
+      cfg,
+      "--agent",
+      "demo",
+      "--user",
+      "111",
+      "ping",
+    ]);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout.replace(/\n+$/u, "")).toBe("regular reply");
+    expect(out.stderr).not.toMatch(/surfacing the agent/);
+  });
+
+  it("fallback: when only agent_thought_chunk arrives, the thought is surfaced on stdout with a stderr preamble", async () => {
+    // FAKE_KIND=thought → the fake child emits the reply as thought
+    // chunks. Without the fallback the user would see an empty line.
+    const cfg = writeSampleConfig(dir, "this is a thought", ["111"], "thought");
+    const out = await capture([
+      "prompt",
+      "--config",
+      cfg,
+      "--agent",
+      "demo",
+      "--user",
+      "111",
+      "ping",
+    ]);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout.replace(/\n+$/u, "")).toBe("this is a thought");
+    expect(out.stderr).toMatch(/surfacing the agent.*thought process/i);
   });
 
   it("prints the polite refusal and still exits 0 for an unauthorised user", async () => {

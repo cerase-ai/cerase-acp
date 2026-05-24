@@ -113,12 +113,36 @@ async function runPrompt(args: PromptArgs, io: CliIO): Promise<number> {
   const mgr = new SessionManager(cfg);
   const turnMeta = new TurnMetaTracker();
   const prefix = turnMeta.prefix(args.agentId, args.userId, args.text);
+  // Track both kinds of streamed content. The happy path emits
+  // `agent_message_chunk` (the user-facing reply). When the model
+  // burns its output budget entirely on reasoning and emits
+  // `agent_thought_chunk` only — observed reproducibly with
+  // deepseek-v4-flash on short conversational prompts via opencode
+  // acp — surfacing the thought is better than handing the user a
+  // blank screen. Same model in opencode's interactive shell does
+  // produce a message, so this is an opencode-acp-mode quirk we
+  // work around at the CLI layer.
+  let messageBytes = 0;
+  let thoughtFallback = "";
   try {
     await mgr.prompt(args.agentId, args.userId, prefix + args.text, (update) => {
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
         io.stdoutWrite(update.content.text);
+        messageBytes += update.content.text.length;
+      } else if (update.sessionUpdate === "agent_thought_chunk" && update.content.type === "text") {
+        thoughtFallback += update.content.text;
       }
     });
+    if (messageBytes === 0 && thoughtFallback.length > 0) {
+      // Preamble goes to STDERR so `./cli.sh prompt … | jq` and
+      // similar pipelines ingest only the model-emitted text, not
+      // our annotation. The thought content itself goes to stdout
+      // so it round-trips as the "reply" for the user.
+      io.stderrWrite(
+        "(no direct reply — surfacing the agent's thought process instead)\n",
+      );
+      io.stdoutWrite(thoughtFallback);
+    }
     io.stdoutWrite("\n");
     return 0;
   } catch (err) {

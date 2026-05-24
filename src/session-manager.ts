@@ -95,6 +95,14 @@ export class SessionManager {
           sessionId: entry!.sessionId,
           prompt: [{ type: "text", text }],
         });
+        // Debug-log the stopReason so we can tell apart "model finished
+        // naturally" (`end_turn`) from "model hit a limit"
+        // (`max_tokens`, `refusal`, `cancelled`) when investigating
+        // truncated replies.
+        logger.debug(
+          { agentId: agent.id, userId, stopReason: response.stopReason },
+          "session/prompt resolved",
+        );
         return { stopReason: response.stopReason };
       } finally {
         entry!.onUpdate = undefined;
@@ -157,6 +165,14 @@ export class SessionManager {
     const connection = new acp.ClientSideConnection(
       (_agentConn) => ({
         async sessionUpdate(params: acp.SessionNotification) {
+          // Debug-only visibility into every notification kind we
+          // receive. Useful when investigating "where did the reply
+          // go?" — non-text or non-agent_message_chunk updates that
+          // the CLI silently drops show up here.
+          logger.debug(
+            { agentId: agent.id, userId, update: params.update },
+            "sessionUpdate received",
+          );
           entryRef?.onUpdate?.(params.update);
         },
         async requestPermission(_params: acp.RequestPermissionRequest) {

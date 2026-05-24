@@ -17,6 +17,13 @@ const REPLY = process.env.FAKE_REPLY ?? "hello world";
 const CHUNKS = parseInt(process.env.FAKE_CHUNKS ?? "3", 10);
 const CRASH_AFTER_PROMPT = process.env.FAKE_CRASH_AFTER_PROMPT === "1";
 const DELAY_MS = parseInt(process.env.FAKE_DELAY_MS_PER_CHUNK ?? "0", 10);
+// FAKE_KIND chooses which session/update kind to emit:
+//   "message" (default) → agent_message_chunk (user-visible reply)
+//   "thought"           → agent_thought_chunk (chain-of-thought; the
+//                         CLI normally hides these, fallback path
+//                         in M11 surfaces them when no message exists)
+const KIND = process.env.FAKE_KIND ?? "message";
+const UPDATE_KIND = KIND === "thought" ? "agent_thought_chunk" : "agent_message_chunk";
 
 const send = (msg) => {
   process.stdout.write(JSON.stringify(msg) + "\n");
@@ -95,7 +102,7 @@ rl.on("line", async (line) => {
         params: {
           sessionId,
           update: {
-            sessionUpdate: "agent_message_chunk",
+            sessionUpdate: UPDATE_KIND,
             content: { type: "text", text },
           },
         },
