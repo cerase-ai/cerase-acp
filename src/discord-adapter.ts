@@ -54,6 +54,15 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       if (msg.channel.isDMBased() && msg.channel.type !== undefined) {
         dmChannels.set(userId, msg.channel as DMChannel);
       }
+      // M18 — 👀 read-receipt as soon as the bot picks up the DM,
+      // before any LLM work starts. Persistent (we never remove it):
+      // the typing indicator below carries the "actively working"
+      // signal during the turn; the eye marker remains afterwards
+      // as a "I saw this message" trace in the conversation history.
+      // `.catch` swallows the rare case where Discord refuses the
+      // reaction (user blocked the bot mid-flight, channel deleted,
+      // etc.) — never crash the message handler over a UX detail.
+      void msg.react("👀").catch(() => {});
       // M18 — "Claudia is typing…" while the turn is in flight.
       // Refreshes every 7s (Discord's indicator auto-stops at ~10s),
       // self-terminates after ~5 min as a defensive ceiling, and is
