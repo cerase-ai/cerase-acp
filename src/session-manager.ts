@@ -11,6 +11,7 @@ import {
   type CanonicalFetcher,
   type RestEndpoint,
 } from "./opencode-rest.js";
+import { decidePermissionOutcome } from "./permission-policy.js";
 
 const logger = makeLogger("cerase-acp.session-manager");
 
@@ -387,18 +388,27 @@ export class SessionManager {
           );
           entryRef?.onUpdate?.(params.update);
         },
-        async requestPermission(_params: acp.RequestPermissionRequest) {
-          // PoC: in-DM permission UI is forbidden (M2 UX rules). Auto-
-          // cancel any permission request. This is NORMAL behaviour
-          // in scope — the agent retrying a blocked tool is part of
-          // the LLM loop, not an operator-actionable event. Logged at
-          // INFO so default CLI/daemon runs at warn-level stay quiet;
-          // operators investigating can `--log info` to see retries.
+        async requestPermission(params: acp.RequestPermissionRequest) {
+          // M19 supersedes M14's auto-cancel: DM-only agents trust
+          // the container sandbox + non-root uid as the real security
+          // boundary, not the per-tool permission UI. Auto-cancelling
+          // was causing the LLM to read "user rejected" as "stop" and
+          // go silent — the bug we hunted on 2026-05-24. See
+          // src/permission-policy.ts for the rationale.
+          const outcome = decidePermissionOutcome(params);
           logger.info(
-            { agentId: agent.id, userId },
-            "agent requested permission in-DM — auto-cancelled (PoC policy)",
+            {
+              agentId: agent.id,
+              userId,
+              toolCallId: params.toolCall?.toolCallId,
+              outcome:
+                outcome.outcome === "selected"
+                  ? `selected:${outcome.optionId}`
+                  : outcome.outcome,
+            },
+            "agent requested permission in-DM — auto-decided via permission-policy",
           );
-          return { outcome: { outcome: "cancelled" } };
+          return { outcome };
         },
       }),
       stream,
