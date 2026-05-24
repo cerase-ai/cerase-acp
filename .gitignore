@@ -1,0 +1,24 @@
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Test artefacts
+coverage/
+.nyc_output/
+
+# Local agents.yaml (operators copy agents.yaml.example → agents.yaml and edit)
+agents.yaml
