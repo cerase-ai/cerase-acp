@@ -16,6 +16,7 @@ import {
 import { makeLogger } from "./logger.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
@@ -53,7 +54,22 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       if (msg.channel.isDMBased() && msg.channel.type !== undefined) {
         dmChannels.set(userId, msg.channel as DMChannel);
       }
-      await dispatcher.handleMessage(agent.id, userId, text);
+      // M18 — "Claudia is typing…" while the turn is in flight.
+      // Refreshes every 7s (Discord's indicator auto-stops at ~10s),
+      // self-terminates after ~5 min as a defensive ceiling, and is
+      // stopped explicitly in `finally` so it never outlives the
+      // dispatcher call (success, allowlist refusal, dispatch throw).
+      // Skip on PartialGroupDMChannel (bots can't be in group DMs
+      // anyway, but the type union forces a narrow). DM and TextChannel
+      // both expose `sendTyping`.
+      const typingChannel: { sendTyping(): Promise<unknown> } | null =
+        "sendTyping" in msg.channel ? (msg.channel as unknown as { sendTyping(): Promise<unknown> }) : null;
+      const stopTyping = typingChannel ? startTypingKeepalive(typingChannel) : () => {};
+      try {
+        await dispatcher.handleMessage(agent.id, userId, text);
+      } finally {
+        stopTyping();
+      }
     } catch (err) {
       logger.error({ err, agentId: agent.id }, "MessageCreate handler threw");
     }
@@ -85,6 +101,14 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
           dmChannels.set(userId, channel);
         }
         await channel.send(chunk);
+        // M18 — re-trigger typing right after each intermediate send.
+        // Discord auto-clears the indicator on message arrival; this
+        // closes the visual gap until the next 7s keepalive tick. The
+        // trailing typing after the FINAL send is acceptable: it
+        // auto-stops after ~10s and matches the UX users already see
+        // when humans start typing then send (typing momentarily
+        // reappears, then clears).
+        await channel.sendTyping().catch(() => {});
       };
     },
   };
