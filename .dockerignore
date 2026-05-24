@@ -1,0 +1,15 @@
+node_modules
+dist
+.git
+.github
+.gitignore
+.DS_Store
+*.log
+.env
+.env.local
+coverage
+.nyc_output
+agents.yaml
+README.md
+devplan
+vitest.config.ts
