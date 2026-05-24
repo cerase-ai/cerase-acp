@@ -22,10 +22,10 @@ const AgentSchema = z.object({
   // process.cwd() leaks the host/bridge path into a context where it
   // means nothing (the agent has no view of the host filesystem).
   // Default is the canonical Cerase workspace under the container's
-  // HOME (`~/.cerase/workspace`), namespaced consistently with
-  // `~/.cerase/data` for OpenCode's SQLite WAL. Override if your
+  // HOME (`~/cerase/workspace`), namespaced consistently with
+  // `~/cerase/data` for OpenCode's SQLite WAL. Override if your
   // agent image mounts the workspace elsewhere.
-  cwd: z.string().min(1).default("/root/.cerase/workspace"),
+  cwd: z.string().min(1).default("/home/agent/cerase/workspace"),
   spawn: z.object({
     command: z.string().min(1),
     args: z.array(z.string()),

@@ -23,7 +23,7 @@ function makeConfig(overrides?: {
         id: "doc-qa",
         bot_token: "irrelevant-for-acp-tests",
         allowed_users: ["111"],
-        cwd: overrides?.cwd ?? "/root/.cerase/workspace",
+        cwd: overrides?.cwd ?? "/home/agent/cerase/workspace",
         spawn: { command: "env", args },
       },
     ],

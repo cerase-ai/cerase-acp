@@ -83,14 +83,14 @@ describe("loadConfig", () => {
     expect(cfg.session.max_concurrent).toBe(16);
   });
 
-  it("defaults agent.cwd to /root/.cerase/workspace when absent", () => {
+  it("defaults agent.cwd to /home/agent/cerase/workspace when absent", () => {
     writeFileSync(path, VALID_YAML);
     const cfg = loadConfig(path, {
       DISCORD_BOT_TOKEN_DOC_QA: "tok-doc",
       DISCORD_BOT_TOKEN_POLICY_QA: "tok-pol",
     });
-    expect(cfg.agents[0]!.cwd).toBe("/root/.cerase/workspace");
-    expect(cfg.agents[1]!.cwd).toBe("/root/.cerase/workspace");
+    expect(cfg.agents[0]!.cwd).toBe("/home/agent/cerase/workspace");
+    expect(cfg.agents[1]!.cwd).toBe("/home/agent/cerase/workspace");
   });
 
   it("respects an explicit agent.cwd override", () => {
