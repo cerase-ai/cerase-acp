@@ -13,6 +13,16 @@
 #   - Discord user_ids (snowflake strings). Empty list = no one can DM
 #     this bot (useful for parking a template before opening it up).
 #
+# cwd: (optional, default /root/.cerase/workspace)
+#   - Working directory advertised to the ACP child via session/new.
+#     This is the path INSIDE the agent container — passing the
+#     bridge's process.cwd() would leak a host/container-runtime path
+#     into a context where it means nothing. The default matches the
+#     Cerase agent image's workspace mount (`~/.cerase/workspace`,
+#     namespaced consistently with `~/.cerase/data` for OpenCode's
+#     SQLite WAL). Override only if your agent image mounts the
+#     persistent "shared desk" workspace at a different path.
+#
 # spawn:
 #   - the command + args the bridge runs to start one ACP child per
 #     (user, agent) session. In PoC this is `docker exec -i

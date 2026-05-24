@@ -83,6 +83,35 @@ describe("loadConfig", () => {
     expect(cfg.session.max_concurrent).toBe(16);
   });
 
+  it("defaults agent.cwd to /root/.cerase/workspace when absent", () => {
+    writeFileSync(path, VALID_YAML);
+    const cfg = loadConfig(path, {
+      DISCORD_BOT_TOKEN_DOC_QA: "tok-doc",
+      DISCORD_BOT_TOKEN_POLICY_QA: "tok-pol",
+    });
+    expect(cfg.agents[0]!.cwd).toBe("/root/.cerase/workspace");
+    expect(cfg.agents[1]!.cwd).toBe("/root/.cerase/workspace");
+  });
+
+  it("respects an explicit agent.cwd override", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: doc-qa
+    bot_token: tok
+    allowed_users: []
+    cwd: /custom/workspace
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.cwd).toBe("/custom/workspace");
+  });
+
   it("throws a clear error when the config file does not exist", () => {
     expect(() => loadConfig("/nonexistent/path/agents.yaml", {})).toThrow(/agents\.yaml/);
   });

@@ -9,6 +9,7 @@ function makeConfig(overrides?: {
   reply?: string;
   crashAfterPrompt?: boolean;
   idleTimeoutMinutes?: number;
+  cwd?: string;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -22,6 +23,7 @@ function makeConfig(overrides?: {
         id: "doc-qa",
         bot_token: "irrelevant-for-acp-tests",
         allowed_users: ["111"],
+        cwd: overrides?.cwd ?? "/root/.cerase/workspace",
         spawn: { command: "env", args },
       },
     ],
@@ -90,6 +92,22 @@ describe("SessionManager", () => {
     expect(r1.stopReason).toBe("end_turn");
     expect(r2.stopReason).toBe("end_turn");
     expect(mgr.activeSessionCount()).toBe(1);
+  });
+
+  it("passes agent.cwd to the ACP child via session/new (not process.cwd())", async () => {
+    // fake-acp-child.mjs echoes back the cwd it received in its sessionId
+    // (`fake-session-cwd=<cwd>`). We can't observe the sessionId directly
+    // from the public SessionManager API, but we CAN exfiltrate it
+    // through the FAKE_REPLY: rig the child so the reply contains the
+    // cwd. Simpler approach: spy via the internal map.
+    mgr = new SessionManager(makeConfig({ reply: "ok", cwd: "/expected/path" }));
+    await mgr.prompt("doc-qa", "user-A", "ping");
+    // Reach into the private entries map for the assertion. Test-only,
+    // accepted: it's the only path to the live sessionId without
+    // changing the production API.
+    const entry = (mgr as unknown as { entries: Map<string, { sessionId: string }> }).entries
+      .get("doc-qa:user-A");
+    expect(entry?.sessionId).toBe("fake-session-cwd=/expected/path");
   });
 
   it("throws when prompting an unknown agent id", async () => {

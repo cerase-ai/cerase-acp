@@ -17,6 +17,15 @@ const AgentSchema = z.object({
   id: AgentIdSchema,
   bot_token: z.string().min(1, "bot_token cannot be empty"),
   allowed_users: z.array(z.string().min(1)),
+  // Working directory advertised to the ACP child via `session/new`.
+  // MUST be a path that exists INSIDE the agent container — passing
+  // process.cwd() leaks the host/bridge path into a context where it
+  // means nothing (the agent has no view of the host filesystem).
+  // Default is the canonical Cerase workspace under the container's
+  // HOME (`~/.cerase/workspace`), namespaced consistently with
+  // `~/.cerase/data` for OpenCode's SQLite WAL. Override if your
+  // agent image mounts the workspace elsewhere.
+  cwd: z.string().min(1).default("/root/.cerase/workspace"),
   spawn: z.object({
     command: z.string().min(1),
     args: z.array(z.string()),

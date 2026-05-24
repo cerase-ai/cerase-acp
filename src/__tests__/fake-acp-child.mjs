@@ -63,10 +63,13 @@ rl.on("line", async (line) => {
   }
 
   if (msg.method === "session/new") {
+    // Echo the cwd we received back in the sessionId so the session-
+    // manager test can assert on what the bridge actually passed.
+    const cwd = msg.params?.cwd ?? "<none>";
     send({
       jsonrpc: "2.0",
       id: msg.id,
-      result: { sessionId: `fake-session-${Date.now()}` },
+      result: { sessionId: `fake-session-cwd=${cwd}` },
     });
     return;
   }

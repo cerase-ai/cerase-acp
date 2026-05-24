@@ -189,8 +189,12 @@ export class SessionManager {
       },
     });
 
+    // `agent.cwd` is the path inside the agent container — DON'T use
+    // process.cwd() here, that would leak the host/bridge cwd into the
+    // ACP child's session state. Default `/root/.cerase/workspace`
+    // comes from the config schema.
     const { sessionId } = await connection.newSession({
-      cwd: process.cwd(),
+      cwd: agent.cwd,
       mcpServers: [],
     });
 
