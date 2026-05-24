@@ -70,16 +70,23 @@ describe("SessionManager", () => {
   });
 
   it("respawns transparently after the child crashes", async () => {
+    // With the post-prompt drain (workaround for opencode upstream
+    // #17505), prompt() resolves only after the stream has been
+    // idle — which means a fake-child with FAKE_CRASH_AFTER_PROMPT=1
+    // has already exited by the time prompt() returns. Both r1 and
+    // r2 therefore see activeSessionCount()==0 right after they
+    // resolve. The respawn invariant we still care about: r2 doesn't
+    // throw, doesn't reuse a dead child, and produces an end_turn
+    // response (= a fresh spawn happened internally).
     mgr = new SessionManager(makeConfig({ reply: "first", crashAfterPrompt: true }));
     const r1 = await mgr.prompt("doc-qa", "user-A", "ping");
     expect(r1.stopReason).toBe("end_turn");
-    // give the child time to exit and the manager to notice
-    await new Promise((r) => setTimeout(r, 100));
     expect(mgr.activeSessionCount()).toBe(0);
     // next prompt must respawn transparently
     const r2 = await mgr.prompt("doc-qa", "user-A", "ping again");
     expect(r2.stopReason).toBe("end_turn");
-    expect(mgr.activeSessionCount()).toBe(1);
+    // r2 also crashes after its single prompt → already gone
+    expect(mgr.activeSessionCount()).toBe(0);
   });
 
   it("serialises concurrent prompts to the same session (FIFO, no overlap)", async () => {

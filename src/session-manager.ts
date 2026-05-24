@@ -88,21 +88,47 @@ export class SessionManager {
     }
 
     return entry.queue.enqueue(async () => {
-      entry!.onUpdate = onUpdate;
+      // Track when the last sessionUpdate landed so we can drain
+      // post-resolve chunks. Workaround for opencode upstream issue
+      // #17505 / #25421: ACP `agent_message_chunk` frames sometimes
+      // arrive AFTER the `session/prompt` RPC response with
+      // stopReason: end_turn — a server-side race between
+      // event-subscription and prompt-RPC reply in opencode acp.
+      // Without draining, the caller (CLI / Discord adapter) sees
+      // the final delta as missing and the reply appears empty or
+      // truncated.
+      let lastUpdateAt = Date.now();
+      entry!.onUpdate = (update) => {
+        lastUpdateAt = Date.now();
+        onUpdate?.(update);
+      };
       this.resetIdleTimer(entry!);
       try {
         const response = await entry!.connection.prompt({
           sessionId: entry!.sessionId,
           prompt: [{ type: "text", text }],
         });
-        // Debug-log the stopReason so we can tell apart "model finished
-        // naturally" (`end_turn`) from "model hit a limit"
-        // (`max_tokens`, `refusal`, `cancelled`) when investigating
-        // truncated replies.
+        // Debug-log the stopReason for forensic visibility into
+        // why a turn ended (end_turn, max_tokens, refusal, …).
         logger.debug(
           { agentId: agent.id, userId, stopReason: response.stopReason },
           "session/prompt resolved",
         );
+        // Drain: wait until the stream has been idle for
+        // POST_PROMPT_IDLE_MS, or until POST_PROMPT_MAX_DRAIN_MS
+        // elapses as a safety ceiling. Captures the post-RPC
+        // notifications that opencode acp emits asynchronously.
+        const POST_PROMPT_IDLE_MS = 300;
+        const POST_PROMPT_MAX_DRAIN_MS = 2000;
+        const drainStart = Date.now();
+        while (Date.now() - drainStart < POST_PROMPT_MAX_DRAIN_MS) {
+          // Short-circuit: if the child already exited, no more
+          // chunks will ever arrive — exit the drain immediately.
+          if (entry!.closed) break;
+          const sinceLastUpdate = Date.now() - lastUpdateAt;
+          if (sinceLastUpdate >= POST_PROMPT_IDLE_MS) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
         return { stopReason: response.stopReason };
       } finally {
         entry!.onUpdate = undefined;
