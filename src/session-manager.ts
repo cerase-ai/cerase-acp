@@ -203,10 +203,12 @@ export class SessionManager {
         },
         async requestPermission(_params: acp.RequestPermissionRequest) {
           // PoC: in-DM permission UI is forbidden (M2 UX rules). Auto-
-          // cancel any permission request. The agent should never reach
-          // here if opencode.json's permission block is correct; if it
-          // does, surface a warning log so operators see it.
-          logger.warn(
+          // cancel any permission request. This is NORMAL behaviour
+          // in scope — the agent retrying a blocked tool is part of
+          // the LLM loop, not an operator-actionable event. Logged at
+          // INFO so default CLI/daemon runs at warn-level stay quiet;
+          // operators investigating can `--log info` to see retries.
+          logger.info(
             { agentId: agent.id, userId },
             "agent requested permission in-DM — auto-cancelled (PoC policy)",
           );
