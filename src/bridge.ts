@@ -12,7 +12,7 @@
 //   - `bridgeE2eTest: false` (production) → no test server; adapter
 //     starts run in Promise.all; any rejection bubbles up as fail-fast.
 
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
@@ -20,10 +20,7 @@ import { Dispatcher } from "./dispatcher.js";
 import { createDiscordAdapter, type DiscordAdapter } from "./discord-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 
-const logger = pino({
-  name: "cerase-acp.bridge",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp.bridge");
 
 export interface RunBridgeOptions {
   config: BridgeConfig;

@@ -12,13 +12,10 @@
 
 import { createServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 import type { Dispatcher } from "./dispatcher.js";
 
-const logger = pino({
-  name: "cerase-acp.test-injection",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp.test-injection");
 
 export interface TestInjectionServer {
   url(): string;

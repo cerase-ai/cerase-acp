@@ -2,12 +2,9 @@
 //   - the 2000-character per-message limit (split on nice boundaries)
 //   - the rate-limit (~5 messages/sec on DMs; we space sends ≥100ms)
 
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 
-const logger = pino({
-  name: "cerase-acp.send-queue",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp.send-queue");
 
 // Discord's per-message limit is 2000. We target 1990 to leave room for
 // the " ⏎" continuation marker (4 bytes UTF-8) on non-final chunks.

@@ -2,14 +2,11 @@
 // be unit-tested with injected adapter factories. This file just reads
 // env, calls runBridge, and wires signals to the shutdown handle.
 
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 import { loadConfig } from "./config.js";
 import { runBridge } from "./bridge.js";
 
-const logger = pino({
-  name: "cerase-acp",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp");
 
 async function main(): Promise<void> {
   const cfgPath = process.env.CERASE_ACP_CONFIG ?? "/etc/cerase-acp/agents.yaml";

@@ -4,7 +4,7 @@
 // buffer → send-queue. Knows nothing about Discord — that's what
 // `resolveSendTarget` is for.
 
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 import type { BridgeConfig } from "./config.js";
 import { isAllowed } from "./allowlist.js";
 import { SessionManager } from "./session-manager.js";
@@ -12,10 +12,7 @@ import { TurnMetaTracker, detectLanguage } from "./turn-meta.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import { SendQueue } from "./send-queue.js";
 
-const logger = pino({
-  name: "cerase-acp.dispatcher",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp.dispatcher");
 
 type SendTarget = (chunk: string) => Promise<void>;
 

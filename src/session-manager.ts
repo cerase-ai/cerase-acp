@@ -1,17 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 import type { BridgeConfig, AgentConfig } from "./config.js";
 import { PromptQueue } from "./prompt-queue.js";
 
-// `level: silent` is honoured when CERASE_ACP_LOG_LEVEL is unset OR set
-// to "silent". Tests set it to silent via vitest's setup; production
-// startup (M5 src/index.ts) lifts it to "info".
-const logger = pino({
-  name: "cerase-acp.session-manager",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp.session-manager");
 
 /**
  * Streaming session-update events the caller cares about. We forward the

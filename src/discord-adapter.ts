@@ -13,14 +13,11 @@ import {
   type Message,
   type DMChannel,
 } from "discord.js";
-import pino from "pino";
+import { makeLogger } from "./logger.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 
-const logger = pino({
-  name: "cerase-acp.discord",
-  level: process.env.CERASE_ACP_LOG_LEVEL ?? "info",
-});
+const logger = makeLogger("cerase-acp.discord");
 
 export interface DiscordAdapter {
   agentId: string;
