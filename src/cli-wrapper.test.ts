@@ -106,10 +106,13 @@ describe("cerase-acp-cli (bash wrapper)", () => {
     expect(r.stdout).toContain("hello from wrapper");
   });
 
-  it("`repl` reads stdin lines and prints a reply per line", async () => {
+  it("`repl` delegates to the TS in-process REPL and replies per line", async () => {
+    // Two stdin lines + EOF. M13: bash `cmd_repl` is now `exec node
+    // dist/cli.js repl` — the loop lives in TS, so a single ACP
+    // child (fake-acp-child here) handles BOTH lines from one
+    // SessionManager. Reply count == 2; the wrapper's job is just
+    // to invoke the TS subcommand correctly.
     const cfg = writeSampleConfig(dir);
-    // Two lines + EOF → two replies. Each is a fresh CLI invocation, so
-    // the reply is the same for both turns (deterministic fake-child).
     const r = await runWrapper(
       ["repl", "--config", cfg, "--agent", "demo", "--user", "111"],
       { input: "ciao\nciao ancora\n" },

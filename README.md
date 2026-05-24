@@ -98,7 +98,9 @@ npm run build
 ./scripts/cerase-acp-cli prompt \
   --config agents.yaml --agent doc-qa --user 123456789012345678 "ciao"
 
-# interactive REPL — each stdin line fires one prompt, prints one reply
+# interactive REPL — single ACP child kept alive across all turns
+# (M13: mirrors the production Discord daemon's lifecycle, so
+# conversation history works just like a real DM thread)
 ./scripts/cerase-acp-cli repl \
   --config agents.yaml --agent doc-qa --user 123456789012345678
 

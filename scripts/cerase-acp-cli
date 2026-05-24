@@ -82,13 +82,14 @@ cmd_prompt() {
 
 cmd_repl() {
   require_ts_cli
-  echo -e "${DIM}cerase-acp REPL — each line = one round-trip. Empty line or Ctrl-D to exit.${NC}" >&2
-  local line
-  while IFS= read -r -p "> " line; do
-    [[ -z "$line" ]] && break
-    node "$_TS_CLI" prompt "$@" "$line" || die "prompt failed"
-  done
-  echo -e "${DIM}bye.${NC}" >&2
+  # M13: REPL lives in the TS CLI now — single SessionManager +
+  # TurnMetaTracker + opencode-acp child kept alive across all
+  # turns, mirroring the production Discord daemon's `(agent,user)`
+  # lifecycle. Previously this wrapper spawned a fresh `node prompt`
+  # per stdin line, which created a new ACP session each turn and
+  # broke conversation continuity ("the agent thinks every turn
+  # is the first").
+  exec node "$_TS_CLI" repl "$@"
 }
 
 cmd_inject() {
