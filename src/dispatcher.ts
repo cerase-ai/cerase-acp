@@ -35,6 +35,15 @@ const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   unknown: "I'm not authorised to talk to you yet — ask your admin.",
 };
 
+/**
+ * Picks the polite-refusal copy matching the language detected in
+ * `text`. Exported so the CLI (M7) uses the same source of truth as
+ * the Discord adapter / test-injection ingress.
+ */
+export function pickRefusalMessage(text: string): string {
+  return REFUSAL[detectLanguage(text)];
+}
+
 export class Dispatcher {
   constructor(private deps: DispatcherDeps) {}
 
@@ -44,7 +53,7 @@ export class Dispatcher {
     if (!isAllowed(this.deps.config, agentId, userId)) {
       logger.info({ agentId, userId }, "rejected DM: user not in allowlist");
       const send = this.deps.resolveSendTarget(agentId, userId);
-      await send(REFUSAL[detectLanguage(text)]);
+      await send(pickRefusalMessage(text));
       return;
     }
 

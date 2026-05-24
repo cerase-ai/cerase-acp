@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# cerase-acp-cli — thin bash wrapper around the standalone TS CLI.
+#
+# Subcommands:
+#   prompt …                                 → one-shot via the TS CLI
+#   repl  --config X --agent Y --user Z      → interactive loop (one TS
+#                                              invocation per line; each
+#                                              turn spawns its own ACP
+#                                              child, which mirrors the
+#                                              bridge's crash-recovery
+#                                              path against real OpenCode)
+#   inject --remote URL --agent X --user Y "text"
+#                                            → POST /_test/inject then
+#                                              GET /_test/last-reply
+#                                              against a running daemon
+#
+# This wrapper keeps the TS surface lean — TS only handles one-shot
+# prompts; the loop and the remote-daemon HTTP dance live here so they
+# don't bloat the compiled bundle.
+
+set -euo pipefail
+
+_BASH_WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_REPO_ROOT="$(cd "$_BASH_WRAPPER_DIR/.." && pwd)"
+_TS_CLI="$_REPO_ROOT/dist/cli.js"
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+# ANSI-C $'...' quoting so the escape bytes are actual control chars, not
+# the literal "\033[..." strings (heredoc would pass them through as text).
+RED=$'\033[0;31m'
+DIM=$'\033[2m'
+BOLD=$'\033[1m'
+NC=$'\033[0m'
+
+usage() {
+  cat <<EOF
+${BOLD}cerase-acp-cli${NC} — thin wrapper around the cerase-acp standalone CLI.
+
+Usage:
+  cerase-acp-cli <subcommand> [options]
+
+Subcommands:
+  prompt --config <path> --agent <id> --user <id> "<text>"
+                              Run one round-trip and stream the reply
+                              to stdout.
+  repl   --config <path> --agent <id> --user <id>
+                              Interactive REPL — each stdin line fires
+                              one prompt and prints one reply. Ctrl-D
+                              or empty line to exit.
+  inject --remote <url> --agent <id> --user <id> "<text>"
+                              POST /_test/inject + GET /_test/last-reply
+                              against a running bridge daemon (env flag
+                              BRIDGE_E2E_TEST=1 must be set on the
+                              daemon).
+
+  --help, -h                  Print this message.
+
+Exit codes:
+  0  success (also: polite refusal for unauthorised user)
+  1  config / argv / network / ACP failure
+EOF
+}
+
+die() {
+  echo -e "${RED}error:${NC} $1" >&2
+  exit "${2:-1}"
+}
+
+require_ts_cli() {
+  if [[ ! -f "$_TS_CLI" ]]; then
+    die "compiled CLI not found at $_TS_CLI — run \`npm run build\` first" 1
+  fi
+}
+
+# ── Subcommands ───────────────────────────────────────────────────────────────
+
+cmd_prompt() {
+  require_ts_cli
+  node "$_TS_CLI" prompt "$@"
+}
+
+cmd_repl() {
+  require_ts_cli
+  echo -e "${DIM}cerase-acp REPL — each line = one round-trip. Empty line or Ctrl-D to exit.${NC}" >&2
+  local line
+  while IFS= read -r -p "> " line; do
+    [[ -z "$line" ]] && break
+    node "$_TS_CLI" prompt "$@" "$line" || die "prompt failed"
+  done
+  echo -e "${DIM}bye.${NC}" >&2
+}
+
+cmd_inject() {
+  local remote="" agent="" user="" text=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --remote) remote="$2"; shift 2 ;;
+      --agent)  agent="$2";  shift 2 ;;
+      --user)   user="$2";   shift 2 ;;
+      --help|-h) usage; exit 0 ;;
+      --*)      die "unknown flag: $1" ;;
+      *)        text="$1"; shift ;;
+    esac
+  done
+  [[ -z "$remote" ]] && die "--remote <url> is required"
+  [[ -z "$agent"  ]] && die "--agent <id> is required"
+  [[ -z "$user"   ]] && die "--user <id> is required"
+  [[ -z "$text"   ]] && die "prompt text (positional) is required"
+
+  command -v curl >/dev/null 2>&1 || die "curl is required for \`inject\`"
+  command -v jq   >/dev/null 2>&1 || die "jq is required for \`inject\`"
+
+  local inject_body
+  inject_body="$(jq -nc \
+    --arg a "$agent" --arg u "$user" --arg t "$text" \
+    '{agent_id:$a, user_id:$u, text:$t}')"
+
+  local inject_http
+  inject_http="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "$remote/_test/inject" \
+    -H 'content-type: application/json' \
+    --data "$inject_body")" || die "POST /_test/inject failed (network)"
+  if [[ "$inject_http" != "202" ]]; then
+    die "POST /_test/inject returned HTTP $inject_http"
+  fi
+
+  local reply_out
+  reply_out="$(curl -sS \
+    "$remote/_test/last-reply?agent_id=$(_urlencode "$agent")&user_id=$(_urlencode "$user")")" \
+    || die "GET /_test/last-reply failed (network)"
+
+  local err
+  err="$(printf '%s' "$reply_out" | jq -r '.error // empty')"
+  if [[ -n "$err" ]]; then
+    die "remote reported: $err"
+  fi
+  printf '%s\n' "$reply_out" | jq -r '.text'
+}
+
+# Tiny URL-encoder for agent_id / user_id query params. We don't need
+# the full RFC 3986 surface — Discord ids are decimals and our agent
+# ids are alphanumeric + '-' (enforced by zod in config.ts).
+_urlencode() {
+  local s="$1" i c out=""
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~-]) out+="$c" ;;
+      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# ── Dispatcher ────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  ""|--help|-h) usage; exit 0 ;;
+  prompt) shift; cmd_prompt "$@" ;;
+  repl)   shift; cmd_repl   "$@" ;;
+  inject) shift; cmd_inject "$@" ;;
+  *)      die "unknown subcommand: $1\n\n$(usage)" ;;
+esac

@@ -83,6 +83,40 @@ For container builds:
 docker build -t cerase-acp:0.1.0-dev .
 ```
 
+## Debug CLI
+
+A standalone CLI exercises the bridge pipeline (allowlist → turn-meta
+→ session-manager) for a single round-trip — no Discord, no compose,
+no test-injection HTTP server. Useful for isolated debugging against
+either the fake-acp-child fixture or a real `opencode acp`.
+
+```bash
+# build first
+npm run build
+
+# one-shot prompt (uses agents.yaml in cwd by default; override with --config)
+./scripts/cerase-acp-cli prompt \
+  --config agents.yaml --agent doc-qa --user 123456789012345678 "ciao"
+
+# interactive REPL — each stdin line fires one prompt, prints one reply
+./scripts/cerase-acp-cli repl \
+  --config agents.yaml --agent doc-qa --user 123456789012345678
+
+# poke a running bridge daemon's BRIDGE_E2E_TEST endpoint
+./scripts/cerase-acp-cli inject \
+  --remote http://localhost:7474 --agent doc-qa --user 123456789012345678 "test"
+```
+
+To silence the pino logs that interleave with the streamed reply:
+
+```bash
+CERASE_ACP_LOG_LEVEL=silent ./scripts/cerase-acp-cli prompt ...
+```
+
+The bash wrapper keeps the TypeScript surface lean — TS handles only
+the one-shot path; the REPL loop and the remote-daemon HTTP dance live
+in the wrapper (`scripts/cerase-acp-cli`), out of the compiled bundle.
+
 ## Tests
 
 ```bash
