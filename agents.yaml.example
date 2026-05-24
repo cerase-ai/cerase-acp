@@ -1,0 +1,44 @@
+# cerase-acp — bridge config.
+#
+# Copy to agents.yaml and mount read-only at /etc/cerase-acp/agents.yaml.
+# ${env:VAR} tokens are resolved against the process environment at boot;
+# a missing variable surfaces as a clear error at startup, not at first
+# DM dispatch.
+#
+# Agent ids:
+#   - must be alphanumeric + '-' (used in container names and `docker exec`)
+#   - must be unique across the file
+#
+# allowed_users:
+#   - Discord user_ids (snowflake strings). Empty list = no one can DM
+#     this bot (useful for parking a template before opening it up).
+#
+# spawn:
+#   - the command + args the bridge runs to start one ACP child per
+#     (user, agent) session. In PoC this is `docker exec -i
+#     cerase-agent-<id> opencode acp`; in Tier-0 it becomes `kubectl
+#     exec ...`. Anything that reads ACP NDJSON on stdin and writes it
+#     on stdout works.
+
+agents:
+  - id: doc-qa
+    bot_token: ${env:DISCORD_BOT_TOKEN_DOC_QA}
+    allowed_users:
+      - "REPLACE_WITH_DISCORD_USER_ID"
+    spawn:
+      command: docker
+      args: [exec, -i, cerase-agent-doc-qa, opencode, acp]
+
+  - id: policy-qa
+    bot_token: ${env:DISCORD_BOT_TOKEN_POLICY_QA}
+    allowed_users:
+      - "REPLACE_WITH_DISCORD_USER_ID"
+    spawn:
+      command: docker
+      args: [exec, -i, cerase-agent-policy-qa, opencode, acp]
+
+session:
+  # Kill an idle ACP child after this many minutes; respawn on next DM.
+  idle_timeout_minutes: 60
+  # Safety ceiling on concurrent (user, agent) sessions per appliance.
+  max_concurrent: 16
