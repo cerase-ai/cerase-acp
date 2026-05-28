@@ -1,4 +1,5 @@
 import { watch, type FSWatcher } from "node:fs";
+import { basename, dirname } from "node:path";
 import { makeLogger } from "./logger.js";
 import { loadConfig, type BridgeConfig } from "./config.js";
 
@@ -41,9 +42,23 @@ export class ConfigReloader {
     if (this.watcher) return;
     this.stopped = false;
     const debounceMs = this.options.debounceMs ?? 50;
+    // We watch the PARENT DIRECTORY instead of the file itself:
+    // the cerase regen does `write tmp + rename`, which gives the
+    // target file a new inode. A file-level fs.watch handle stays
+    // tied to the old inode and stops firing after the first
+    // rename — the bridge would silently miss every config update.
+    // Watching the directory + filtering by basename catches every
+    // rename + write event regardless of inode churn.
+    //
+    // persistent: true so the watcher keeps the Node event loop
+    // alive when there are zero agents wired up (otherwise the
+    // bridge process exits and docker restart-loops).
+    const watchDir = dirname(this.path);
+    const targetName = basename(this.path);
     try {
-      this.watcher = watch(this.path, { persistent: false }, () => {
+      this.watcher = watch(watchDir, { persistent: true }, (_event, filename) => {
         if (this.stopped) return;
+        if (filename && filename !== targetName) return;
         if (this.debounceTimer) clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(() => this.tryReload(), debounceMs);
       });

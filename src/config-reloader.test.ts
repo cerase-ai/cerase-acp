@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ConfigReloader } from "./config-reloader.js";
@@ -110,6 +110,27 @@ describe("ConfigReloader", () => {
 
     expect(events.length).toBe(1);
     expect(events[0]!.agents[0]!.allowed_users).toEqual(["u-1", "u-2"]);
+  });
+
+  it("fires onChange when the file is replaced via atomic rename (tmp + rename pattern)", async () => {
+    // This is THE pattern Cerase regen uses: write a `.tmp.<pid>` file
+    // next to agents.yaml, then rename() over the target. A
+    // file-level fs.watch handle ties to the old inode and stops
+    // firing after the first rename; a dir-level watcher captures
+    // the rename. Without this guarantee, the bridge silently
+    // misses every config update past the first one.
+    writeFileSync(cfgPath, VALID_YAML_A);
+    const events: BridgeConfig[] = [];
+    reloader = new ConfigReloader(cfgPath, (cfg) => events.push(cfg), { debounceMs: 20 });
+    reloader.start();
+
+    const tmpPath = `${cfgPath}.tmp.replace`;
+    writeFileSync(tmpPath, VALID_YAML_B);
+    renameSync(tmpPath, cfgPath);
+    await wait(120);
+
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events[events.length - 1]!.agents[0]!.allowed_users).toEqual(["u-1", "u-2"]);
   });
 
   it("stop() detaches the watcher and prevents further onChange calls", async () => {
