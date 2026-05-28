@@ -19,6 +19,8 @@ import { TurnMetaTracker } from "./turn-meta.js";
 import { Dispatcher } from "./dispatcher.js";
 import { createDiscordAdapter, type DiscordAdapter } from "./discord-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
+import { ConfigReloader } from "./config-reloader.js";
+import { diffConfigs, type ConfigDiff } from "./config-diff.js";
 
 const logger = makeLogger("cerase-acp.bridge");
 
@@ -29,6 +31,129 @@ export interface RunBridgeOptions {
   testInjectionPort?: number;
   /** Adapter factory for dependency injection in tests. Defaults to the real discord.js wiring. */
   createAdapter?: (agent: AgentConfig, dispatcher: Dispatcher) => DiscordAdapter;
+  /**
+   * Path of the agents.yaml the bridge should watch for live updates
+   * (M-auto-reload v0.2). When set, runBridge instantiates a
+   * ConfigReloader; on each successful reload the diff is applied to
+   * the live adapters table + SessionManager. Unset → no watcher
+   * (legacy behaviour, used by the test suite and the CLI prompt mode).
+   */
+  configPath?: string;
+}
+
+/**
+ * Hot-ops surface that SessionManager exposes to the auto-reload
+ * handler. Declared as an interface (rather than imported directly
+ * from session-manager.ts) so tests can substitute a fake without
+ * dragging the full SessionManager in.
+ */
+export interface SessionManagerHotOps {
+  addAgent(agent: AgentConfig): void;
+  removeAgent(agentId: string): void;
+  killAgentSessions(agentId: string): void;
+  updateAllowlist(agentId: string, allowed_users: string[]): void;
+}
+
+export interface ApplyConfigDiffDeps {
+  /** The NEW bridge config (post-reload). Diff-handler needs it to
+   * resolve the AgentConfig for `bot_token_or_spawn` respawns. */
+  next: BridgeConfig;
+  sessionManager: SessionManagerHotOps;
+  adapters: Map<string, DiscordAdapter>;
+  createAdapter: (agent: AgentConfig, dispatcher: Dispatcher) => DiscordAdapter;
+  dispatcher: Dispatcher;
+}
+
+/**
+ * Applies a ConfigDiff to the live bridge state. Pure side-effects on
+ * SessionManager + the adapters Map; no IO besides what those callees
+ * perform. Exported for unit testing — runBridge wires it as the
+ * onChange handler of ConfigReloader.
+ */
+export async function applyConfigDiff(
+  diff: ConfigDiff,
+  deps: ApplyConfigDiffDeps,
+): Promise<void> {
+  // 1. Remove old agents first (frees adapter resources before any
+  //    same-id add would collide). Stops the adapter, then asks the
+  //    SessionManager to terminate ACP children and drop the agent
+  //    from its agentsById map.
+  for (const id of diff.removed) {
+    const adapter = deps.adapters.get(id);
+    if (adapter) {
+      try {
+        await adapter.stop();
+      } catch (err) {
+        logger.error({ err, agentId: id }, "auto-reload: adapter.stop() failed during remove");
+      }
+      deps.adapters.delete(id);
+    }
+    deps.sessionManager.removeAgent(id);
+  }
+
+  // 2. Apply per-agent mutations.
+  for (const mod of diff.modified) {
+    if (mod.classification === "allowed_users_only") {
+      const next = deps.next.agents.find((a) => a.id === mod.agentId);
+      if (next) {
+        deps.sessionManager.updateAllowlist(mod.agentId, next.allowed_users);
+        logger.info(
+          { agentId: mod.agentId, allowed_users: next.allowed_users },
+          "auto-reload: allowed_users updated in place",
+        );
+      }
+    } else {
+      // bot_token_or_spawn OR mixed → respawn this agent's adapter.
+      const oldAdapter = deps.adapters.get(mod.agentId);
+      if (oldAdapter) {
+        try {
+          await oldAdapter.stop();
+        } catch (err) {
+          logger.error(
+            { err, agentId: mod.agentId },
+            "auto-reload: adapter.stop() failed during respawn",
+          );
+        }
+        deps.adapters.delete(mod.agentId);
+      }
+      deps.sessionManager.killAgentSessions(mod.agentId);
+
+      const fresh = deps.next.agents.find((a) => a.id === mod.agentId);
+      if (fresh) {
+        const adapter = deps.createAdapter(fresh, deps.dispatcher);
+        deps.adapters.set(mod.agentId, adapter);
+        try {
+          await adapter.start();
+          logger.info(
+            { agentId: mod.agentId, classification: mod.classification },
+            "auto-reload: agent respawned",
+          );
+        } catch (err) {
+          logger.error(
+            { err, agentId: mod.agentId },
+            "auto-reload: respawned adapter.start() failed — agent will not receive DMs",
+          );
+        }
+      }
+    }
+  }
+
+  // 3. Add new agents. Done last so any same-id removal above is
+  //    already settled.
+  for (const agent of diff.added) {
+    deps.sessionManager.addAgent(agent);
+    const adapter = deps.createAdapter(agent, deps.dispatcher);
+    deps.adapters.set(agent.id, adapter);
+    try {
+      await adapter.start();
+      logger.info({ agentId: agent.id }, "auto-reload: new agent attached");
+    } catch (err) {
+      logger.error(
+        { err, agentId: agent.id },
+        "auto-reload: new adapter.start() failed — agent will not receive DMs",
+      );
+    }
+  }
 }
 
 export interface RunBridgeHandle {
@@ -132,14 +257,77 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     "cerase-acp bridge ready",
   );
 
+  // M-auto-reload v0.2: watch agents.yaml for live updates.
+  // Snapshot the current config so the next reload can compute a diff
+  // against a stable reference (the sessionManager mutates the shared
+  // `config` object in place once we apply each diff).
+  let currentSnapshot: BridgeConfig = cloneConfig(config);
+  let reloader: ConfigReloader | undefined;
+  if (opts.configPath) {
+    reloader = new ConfigReloader(opts.configPath, (nextConfig) => {
+      const diff = diffConfigs(currentSnapshot, nextConfig);
+      if (
+        diff.added.length === 0 &&
+        diff.removed.length === 0 &&
+        diff.modified.length === 0
+      ) {
+        return;
+      }
+      logger.info(
+        {
+          added: diff.added.map((a) => a.id),
+          removed: diff.removed,
+          modified: diff.modified,
+        },
+        "auto-reload: applying config diff",
+      );
+      // Best-effort: the handler swallows individual adapter errors so
+      // a flaky start doesn't crash the bridge. Anything escaping
+      // applyConfigDiff itself indicates a bug.
+      applyConfigDiff(diff, {
+        next: nextConfig,
+        sessionManager,
+        adapters,
+        createAdapter,
+        dispatcher: discordDispatcher,
+      })
+        .then(() => {
+          currentSnapshot = cloneConfig(nextConfig);
+        })
+        .catch((err) => {
+          logger.error({ err }, "auto-reload: applyConfigDiff threw — snapshot NOT advanced");
+        });
+    });
+    reloader.start();
+    logger.info({ configPath: opts.configPath }, "auto-reload: ConfigReloader started");
+  }
+
   return {
     testInjectionUrl: testServer?.url(),
     async shutdown() {
-      // Order: stop discord clients → close test server → kill ACP children.
+      // Order: stop reloader → stop discord clients → close test server → kill ACP children.
       // Reverse of startup so dependents go first.
+      if (reloader) reloader.stop();
       await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
       if (testServer) await testServer.close();
       await sessionManager.shutdown();
     },
+  };
+}
+
+/**
+ * Deep clone of BridgeConfig so the auto-reload's "previous snapshot"
+ * doesn't share array references with the shared config (which
+ * SessionManager mutates in place via updateAllowlist / addAgent /
+ * removeAgent).
+ */
+function cloneConfig(c: BridgeConfig): BridgeConfig {
+  return {
+    agents: c.agents.map((a) => ({
+      ...a,
+      allowed_users: [...a.allowed_users],
+      spawn: { command: a.spawn.command, args: [...a.spawn.args] },
+    })),
+    session: { ...c.session },
   };
 }

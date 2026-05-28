@@ -39,7 +39,14 @@ const SessionSchema = z.object({
 
 const BridgeConfigSchema = z
   .object({
-    agents: z.array(AgentSchema).min(1, "at least one agent must be configured"),
+    // M-auto-reload (v0.2): zero agents is a valid bootstrap state.
+    // The bridge starts idle and ConfigReloader brings in agents as
+    // the operator wires them up — no more "first you have to seed an
+    // agent.yaml entry to make the bridge boot" friction. The cerase
+    // appliance always renders `agents: []` when there are no
+    // renderable Agents (RegenAgentsYaml), and the bridge must
+    // tolerate this without crash-looping.
+    agents: z.array(AgentSchema),
     session: SessionSchema,
   })
   .superRefine((cfg, ctx) => {

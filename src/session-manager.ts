@@ -150,6 +150,80 @@ export class SessionManager {
     return this.entries.size;
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // Hot ops — invoked by ConfigReloader (M-auto-reload v0.2) when
+  // `agents.yaml` changes on disk. All four mutate the shared
+  // BridgeConfig in place so downstream consumers reading from the
+  // same reference (Dispatcher, allowlist.isAllowed) see the new
+  // state without a config-passing refactor.
+
+  /**
+   * Register a new Agent so subsequent prompts addressed to it
+   * spawn an ACP child. Idempotency: throws if the agent id is
+   * already known — the reloader treats "added in diff" and
+   * "modified in diff" as separate paths and never calls addAgent
+   * twice for the same id.
+   */
+  addAgent(agent: AgentConfig): void {
+    if (this.agentsById.has(agent.id)) {
+      throw new Error(`agent id "${agent.id}" is already registered`);
+    }
+    this.agentsById.set(agent.id, agent);
+    this.config.agents.push(agent);
+  }
+
+  /**
+   * Remove an Agent: kill all its in-flight ACP children, then
+   * drop it from agentsById + the shared config. No-op when the
+   * id is not registered (idempotent — the reloader can fire
+   * concurrent diffs without races).
+   */
+  removeAgent(agentId: string): void {
+    if (!this.agentsById.has(agentId)) {
+      return;
+    }
+    this.killAgentSessions(agentId);
+    this.agentsById.delete(agentId);
+    this.config.agents = this.config.agents.filter((a) => a.id !== agentId);
+  }
+
+  /**
+   * Terminate every (user, agentId) ACP child for one agent without
+   * removing the agent itself — used when the diff classifies a
+   * mutation as `bot_token_or_spawn` (the adapter and children
+   * must be torn down, but the agent is still in the config).
+   * Subsequent prompts respawn under the updated AgentConfig.
+   */
+  killAgentSessions(agentId: string): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.agentId !== agentId) continue;
+      if (entry.idleTimer) clearTimeout(entry.idleTimer);
+      if (!entry.closed && !entry.child.killed) {
+        try {
+          entry.child.kill("SIGTERM");
+        } catch {
+          // already gone
+        }
+      }
+      this.entries.delete(key);
+    }
+  }
+
+  /**
+   * Swap the `allowed_users` array for one agent without disturbing
+   * its sessions. Used when the diff classifies a mutation as
+   * `allowed_users_only`. The mutation lands on the SHARED
+   * AgentConfig reference so allowlist.isAllowed (which reads from
+   * the BridgeConfig) picks up the new set on the next DM.
+   */
+  updateAllowlist(agentId: string, allowedUsers: string[]): void {
+    const agent = this.agentsById.get(agentId);
+    if (!agent) {
+      throw new Error(`unknown agent id "${agentId}"`);
+    }
+    agent.allowed_users = [...allowedUsers];
+  }
+
   async prompt(
     agentId: string,
     userId: string,

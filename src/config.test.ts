@@ -129,6 +129,20 @@ session:
     );
   });
 
+  it("accepts an empty agents array (zero-Agent boot is valid since v0.2)", () => {
+    writeFileSync(
+      path,
+      `
+agents: []
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents).toEqual([]);
+  });
+
   it("throws when the schema is violated (missing required field)", () => {
     writeFileSync(
       path,

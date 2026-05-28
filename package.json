@@ -1,6 +1,6 @@
 {
   "name": "cerase-acp",
-  "version": "0.1.0-dev",
+  "version": "0.2.0-dev",
   "description": "In-house Discord-to-ACP bridge for Cerase. DM-only, one long-lived ACP session per (user, agent), colleague-style UX.",
   "private": true,
   "type": "module",
