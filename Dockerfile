@@ -18,7 +18,9 @@
 #     in-cluster-API; only the spawn command in agents.yaml changes.
 
 # ---------- build stage ----------
-FROM node:20 AS build
+# OPT-22: bumped from node:20 — Node 22 LTS active, no reason to stay
+# on 20 on Ubuntu 26.04. Pure TypeScript build, no native deps.
+FROM node:22 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -29,7 +31,8 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ---------- runtime stage ----------
-FROM node:20-slim AS runtime
+# OPT-22: bumped from node:20-slim (see build-stage comment).
+FROM node:22-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini docker.io \
  && rm -rf /var/lib/apt/lists/*
