@@ -197,4 +197,88 @@ session:
     );
     expect(() => loadConfig(path, {})).toThrow(/duplicate|unique/i);
   });
+
+  // CHANNEL-1 schema cases (OPT-21 D3). Verifies the per-channel
+  // superRefine matrix in config.ts: discord/telegram need bot_token,
+  // slack additionally needs slack_app_token, workspace_chat needs
+  // workspace_chat_credentials_path. Legacy YAMLs without `channel`
+  // default to 'discord' for back-compat.
+
+  it("CHANNEL-1: legacy YAML without `channel` defaults to discord", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: doc-qa
+    bot_token: tok
+    allowed_users: []
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.channel).toBe("discord");
+  });
+
+  it("CHANNEL-1: channel=telegram + bot_token is valid", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: tg-agent
+    channel: telegram
+    bot_token: TG_TOKEN
+    allowed_users: ["123456789"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.channel).toBe("telegram");
+    expect(cfg.agents[0]!.bot_token).toBe("TG_TOKEN");
+  });
+
+  it("CHANNEL-1: channel=slack rejected without slack_app_token", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: sl-agent
+    channel: slack
+    bot_token: xoxb-foo
+    allowed_users: ["U_ABCDEF"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    expect(() => loadConfig(path, {})).toThrow(/slack_app_token/i);
+  });
+
+  it("CHANNEL-1: channel=workspace_chat + workspace_chat_credentials_path is valid", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: wc-agent
+    channel: workspace_chat
+    workspace_chat_credentials_path: /var/cerase/workspace-chat-creds/wc-agent.json
+    allowed_users: ["ops@guidance.studio"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.channel).toBe("workspace_chat");
+    expect(cfg.agents[0]!.workspace_chat_credentials_path).toBe(
+      "/var/cerase/workspace-chat-creds/wc-agent.json",
+    );
+  });
 });
