@@ -4,7 +4,7 @@ import { runBridge, type RunBridgeHandle } from "./bridge.js";
 import type { BridgeConfig } from "./config.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import type { DiscordAdapter } from "./discord-adapter.js";
+import type { ChatAdapter } from "./chat-adapter.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -28,7 +28,7 @@ function makeConfig(): BridgeConfig {
   };
 }
 
-interface FakeAdapter extends DiscordAdapter {
+interface FakeAdapter extends ChatAdapter {
   startCalls: number;
   stopCalls: number;
 }
@@ -70,7 +70,7 @@ describe("runBridge", () => {
       config: cfg,
       bridgeE2eTest: true,
       testInjectionPort: 0, // ephemeral port for tests
-      createAdapter: (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
+      createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
     });
     expect(handle.testInjectionUrl).toBeDefined();
     // The test server must respond — even 404 to a stub path is fine,
@@ -86,7 +86,7 @@ describe("runBridge", () => {
       config: cfg,
       bridgeE2eTest: true,
       testInjectionPort: 0,
-      createAdapter: (agent, dispatcher) => {
+      createAdapter: async (agent, dispatcher) => {
         const behaviour = i++ === 0 ? "ok" : "fail";
         return makeFakeAdapter(agent, dispatcher, behaviour);
       },
@@ -100,7 +100,7 @@ describe("runBridge", () => {
       runBridge({
         config: cfg,
         bridgeE2eTest: false,
-        createAdapter: (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
+        createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
       }),
     ).rejects.toThrow();
   });
@@ -110,7 +110,7 @@ describe("runBridge", () => {
     handle = await runBridge({
       config: cfg,
       bridgeE2eTest: false,
-      createAdapter: (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "ok"),
+      createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "ok"),
     });
     expect(handle.testInjectionUrl).toBeUndefined();
   });
@@ -142,7 +142,7 @@ describe("runBridge", () => {
       config: cfg,
       bridgeE2eTest: true,
       testInjectionPort: 0,
-      createAdapter: (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
+      createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
     });
     const url = handle.testInjectionUrl!;
 
@@ -178,7 +178,7 @@ describe("runBridge", () => {
       config: cfg,
       bridgeE2eTest: true,
       testInjectionPort: 0,
-      createAdapter: (agent, dispatcher) => {
+      createAdapter: async (agent, dispatcher) => {
         const a = makeFakeAdapter(agent, dispatcher, "ok");
         adapters.push(a);
         return a;

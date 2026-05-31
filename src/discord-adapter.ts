@@ -17,18 +17,17 @@ import { makeLogger } from "./logger.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
+import type { ChatAdapter } from "./chat-adapter.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
-export interface DiscordAdapter {
-  agentId: string;
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  /** The function the dispatcher uses to send a chunk to this user's DM. */
-  makeSendTarget(userId: string): (chunk: string) => Promise<void>;
-}
+// CHANNEL-1 (2026-05-31): the standalone `DiscordAdapter` interface
+// was generalised into `ChatAdapter` (see ./chat-adapter.ts). Kept
+// here as a deprecated alias for any caller that imports it by name
+// (mostly the test suite). New code should import ChatAdapter.
+export type DiscordAdapter = ChatAdapter;
 
-export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher): DiscordAdapter {
+export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   // Cache per-user DM channels so we don't re-resolve on every chunk
   // of a multi-chunk reply.
   const dmChannels = new Map<string, DMChannel>();
@@ -91,6 +90,14 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
   return {
     agentId: agent.id,
     async start() {
+      // bot_token is validated as required for channel='discord' in
+      // config.ts superRefine, so the optional-string type assertion
+      // is safe here.
+      if (!agent.bot_token) {
+        throw new Error(
+          `agent "${agent.id}" channel='discord' has no bot_token (should have been caught at config load)`,
+        );
+      }
       await client.login(agent.bot_token);
       logger.info({ agentId: agent.id }, "discord.js client ready");
     },

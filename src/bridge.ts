@@ -17,7 +17,7 @@ import type { AgentConfig, BridgeConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { Dispatcher } from "./dispatcher.js";
-import { createDiscordAdapter, type DiscordAdapter } from "./discord-adapter.js";
+import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { diffConfigs, type ConfigDiff } from "./config-diff.js";
@@ -29,8 +29,15 @@ export interface RunBridgeOptions {
   bridgeE2eTest: boolean;
   /** Port for the test-injection server (only when bridgeE2eTest=true). 7474 in prod, 0 in tests. */
   testInjectionPort?: number;
-  /** Adapter factory for dependency injection in tests. Defaults to the real discord.js wiring. */
-  createAdapter?: (agent: AgentConfig, dispatcher: Dispatcher) => DiscordAdapter;
+  /**
+   * Adapter factory for dependency injection in tests. Defaults to the
+   * real cross-channel factory (`createChatAdapter`), which dispatches
+   * on `agent.channel`. Returns a Promise to support lazy-loading of
+   * the per-channel transport library (discord.js / telegraf / @slack/bolt
+   * / @google-apis/chat). Tests typically supply a synchronous fake and
+   * wrap it in Promise.resolve.
+   */
+  createAdapter?: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
   /**
    * Path of the agents.yaml the bridge should watch for live updates
    * (M-auto-reload v0.2). When set, runBridge instantiates a
@@ -59,8 +66,8 @@ export interface ApplyConfigDiffDeps {
    * resolve the AgentConfig for `bot_token_or_spawn` respawns. */
   next: BridgeConfig;
   sessionManager: SessionManagerHotOps;
-  adapters: Map<string, DiscordAdapter>;
-  createAdapter: (agent: AgentConfig, dispatcher: Dispatcher) => DiscordAdapter;
+  adapters: Map<string, ChatAdapter>;
+  createAdapter: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
   dispatcher: Dispatcher;
 }
 
@@ -120,7 +127,7 @@ export async function applyConfigDiff(
 
       const fresh = deps.next.agents.find((a) => a.id === mod.agentId);
       if (fresh) {
-        const adapter = deps.createAdapter(fresh, deps.dispatcher);
+        const adapter = await deps.createAdapter(fresh, deps.dispatcher);
         deps.adapters.set(mod.agentId, adapter);
         try {
           await adapter.start();
@@ -142,7 +149,7 @@ export async function applyConfigDiff(
   //    already settled.
   for (const agent of diff.added) {
     deps.sessionManager.addAgent(agent);
-    const adapter = deps.createAdapter(agent, deps.dispatcher);
+    const adapter = await deps.createAdapter(agent, deps.dispatcher);
     deps.adapters.set(agent.id, adapter);
     try {
       await adapter.start();
@@ -164,7 +171,7 @@ export interface RunBridgeHandle {
 
 export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle> {
   const { config, bridgeE2eTest } = opts;
-  const createAdapter = opts.createAdapter ?? createDiscordAdapter;
+  const createAdapter = opts.createAdapter ?? createChatAdapter;
 
   const sessionManager = new SessionManager(config);
   const turnMeta = new TurnMetaTracker();
@@ -178,25 +185,26 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // swallowed by the send-queue's error handler and the test sees
   // 404 on /_test/last-reply.
 
-  // Build the adapter table BEFORE the discord dispatcher so
-  // resolveSendTarget can look up the right adapter.
-  const adapters = new Map<string, DiscordAdapter>();
+  // Build the adapter table BEFORE the production dispatcher so
+  // resolveSendTarget can look up the right adapter. Map is shared by
+  // both dispatchers (production + test-mode) below.
+  const adapters = new Map<string, ChatAdapter>();
 
-  const discordDispatcher = new Dispatcher({
+  const productionDispatcher = new Dispatcher({
     config,
     sessionManager,
     turnMeta,
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {
-        throw new Error(`no Discord adapter registered for agent "${agentId}"`);
+        throw new Error(`no chat adapter registered for agent "${agentId}"`);
       }
       return adapter.makeSendTarget(userId);
     },
   });
 
   for (const agent of config.agents) {
-    adapters.set(agent.id, createAdapter(agent, discordDispatcher));
+    adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
   }
 
   // Test-mode: start the test server BEFORE the adapters so it's
@@ -289,7 +297,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         sessionManager,
         adapters,
         createAdapter,
-        dispatcher: discordDispatcher,
+        dispatcher: productionDispatcher,
       })
         .then(() => {
           currentSnapshot = cloneConfig(nextConfig);

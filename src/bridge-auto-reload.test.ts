@@ -10,11 +10,11 @@
 import { describe, it, expect } from "vitest";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import type { DiscordAdapter } from "./discord-adapter.js";
+import type { ChatAdapter } from "./chat-adapter.js";
 import { diffConfigs } from "./config-diff.js";
 import { applyConfigDiff } from "./bridge.js";
 
-interface FakeAdapter extends DiscordAdapter {
+interface FakeAdapter extends ChatAdapter {
   startCalls: number;
   stopCalls: number;
 }
@@ -103,7 +103,7 @@ describe("applyConfigDiff", () => {
       next,
       sessionManager: sm,
       adapters,
-      createAdapter: (a, d) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 
@@ -123,7 +123,7 @@ describe("applyConfigDiff", () => {
       next,
       sessionManager: sm,
       adapters,
-      createAdapter: (a) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 
@@ -143,7 +143,7 @@ describe("applyConfigDiff", () => {
       next,
       sessionManager: sm,
       adapters,
-      createAdapter: (a) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 
@@ -168,7 +168,7 @@ describe("applyConfigDiff", () => {
       next,
       sessionManager: sm,
       adapters,
-      createAdapter: (a) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 
@@ -191,7 +191,7 @@ describe("applyConfigDiff", () => {
       next,
       sessionManager: sm,
       adapters,
-      createAdapter: (a) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 
@@ -210,7 +210,7 @@ describe("applyConfigDiff", () => {
       next: same,
       sessionManager: sm,
       adapters,
-      createAdapter: (a) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 
@@ -241,7 +241,7 @@ describe("applyConfigDiff", () => {
       next,
       sessionManager: sm,
       adapters,
-      createAdapter: (a) => makeFakeAdapter(a),
+      createAdapter: async (a) => makeFakeAdapter(a),
       dispatcher: fakeDispatcher,
     });
 

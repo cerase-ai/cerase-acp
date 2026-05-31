@@ -13,24 +13,92 @@ const AgentIdSchema = z
     message: "agent id must be alphanumeric + '-' (no spaces, no leading dash)",
   });
 
-const AgentSchema = z.object({
-  id: AgentIdSchema,
-  bot_token: z.string().min(1, "bot_token cannot be empty"),
-  allowed_users: z.array(z.string().min(1)),
-  // Working directory advertised to the ACP child via `session/new`.
-  // MUST be a path that exists INSIDE the agent container — passing
-  // process.cwd() leaks the host/bridge path into a context where it
-  // means nothing (the agent has no view of the host filesystem).
-  // Default is the canonical Cerase workspace under the container's
-  // HOME (`~/cerase/workspace`), namespaced consistently with
-  // `~/cerase/data` for OpenCode's SQLite WAL. Override if your
-  // agent image mounts the workspace elsewhere.
-  cwd: z.string().min(1).default("/home/agent/cerase/workspace"),
-  spawn: z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()),
-  }),
-});
+// CHANNEL-1 (2026-05-31): the bridge is no longer Discord-only. Each
+// agent declares which chat channel it speaks via `channel` (default
+// 'discord' for back-compat with every existing agents.yaml). Per-channel
+// credential fields are flat on the agent (rather than nested under a
+// `<channel>:` block) so the env-substitution helper continues to work
+// without nesting awareness, and zod's superRefine validates that the
+// fields required by the selected channel are present.
+//
+// The substitution / refinement matrix:
+//   channel='discord'        → bot_token required (Discord bot token)
+//   channel='telegram'       → bot_token required (BotFather token)
+//   channel='slack'          → bot_token + slack_app_token required
+//                              (bot token = xoxb-…, app token = xapp-…
+//                              for Socket Mode)
+//   channel='workspace_chat' → workspace_chat_credentials_path required
+//                              (path inside the bridge container to a
+//                              Google Cloud service-account JSON)
+//
+// allowed_users semantics per channel:
+//   discord  → snowflake user id (numeric string)
+//   telegram → numeric chat_id (string)
+//   slack    → "U…" workspace user id
+//   workspace_chat → email address (must match Workspace domain)
+export const ChatChannelSchema = z.enum([
+  "discord",
+  "telegram",
+  "slack",
+  "workspace_chat",
+]);
+export type ChatChannel = z.infer<typeof ChatChannelSchema>;
+
+const AgentSchema = z
+  .object({
+    id: AgentIdSchema,
+    channel: ChatChannelSchema.default("discord"),
+    bot_token: z.string().optional(),
+    slack_app_token: z.string().optional(),
+    workspace_chat_credentials_path: z.string().optional(),
+    allowed_users: z.array(z.string().min(1)),
+    // Working directory advertised to the ACP child via `session/new`.
+    // MUST be a path that exists INSIDE the agent container — passing
+    // process.cwd() leaks the host/bridge path into a context where it
+    // means nothing (the agent has no view of the host filesystem).
+    // Default is the canonical Cerase workspace under the container's
+    // HOME (`~/cerase/workspace`), namespaced consistently with
+    // `~/cerase/data` for OpenCode's SQLite WAL. Override if your
+    // agent image mounts the workspace elsewhere.
+    cwd: z.string().min(1).default("/home/agent/cerase/workspace"),
+    spawn: z.object({
+      command: z.string().min(1),
+      args: z.array(z.string()),
+    }),
+  })
+  .superRefine((agent, ctx) => {
+    const need = (field: keyof typeof agent, reason: string) => {
+      const v = agent[field];
+      if (typeof v !== "string" || v.length === 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: reason,
+        });
+      }
+    };
+    switch (agent.channel) {
+      case "discord":
+        need("bot_token", "channel='discord' requires bot_token (Discord bot token)");
+        break;
+      case "telegram":
+        need("bot_token", "channel='telegram' requires bot_token (BotFather token)");
+        break;
+      case "slack":
+        need("bot_token", "channel='slack' requires bot_token (xoxb-… bot token)");
+        need(
+          "slack_app_token",
+          "channel='slack' requires slack_app_token (xapp-… app-level token for Socket Mode)",
+        );
+        break;
+      case "workspace_chat":
+        need(
+          "workspace_chat_credentials_path",
+          "channel='workspace_chat' requires workspace_chat_credentials_path (path inside the container to the Google service-account JSON)",
+        );
+        break;
+    }
+  });
 
 const SessionSchema = z.object({
   idle_timeout_minutes: z.number().int().positive(),
