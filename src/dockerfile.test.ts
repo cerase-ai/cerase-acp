@@ -19,10 +19,10 @@ describe("Dockerfile", () => {
     expect(fromLines.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("runtime stage is node:20-slim", () => {
+  it("runtime stage is node:22-slim (OPT-22 LTS bump)", () => {
     const fromLines = dockerfile.split("\n").filter((l) => /^FROM\s/i.test(l));
     const last = fromLines.at(-1)!;
-    expect(last).toMatch(/node:20-slim/);
+    expect(last).toMatch(/node:22-slim/);
   });
 
   it("installs tini and runs it as PID 1", () => {

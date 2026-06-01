@@ -127,6 +127,15 @@ export async function applyConfigDiff(
 
       const fresh = deps.next.agents.find((a) => a.id === mod.agentId);
       if (fresh) {
+        // OPT-35 fix: the SessionManager keeps an internal AgentConfig
+        // reference per agentId; for `mixed` (token + allowed_users
+        // both changed) and `bot_token_or_spawn`, we previously only
+        // respawned the adapter and left the allowlist stale, so the
+        // dispatcher kept rejecting DMs from users that the new
+        // agents.yaml WAS authorising. Sync the allowlist here too so
+        // every classification path lands at a coherent state.
+        deps.sessionManager.updateAllowlist(mod.agentId, fresh.allowed_users);
+
         const adapter = await deps.createAdapter(fresh, deps.dispatcher);
         deps.adapters.set(mod.agentId, adapter);
         try {
