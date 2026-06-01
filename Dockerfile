@@ -47,5 +47,13 @@ ENV CERASE_ACP_CONFIG=/etc/cerase-acp/agents.yaml
 ENV NODE_ENV=production
 ENV CERASE_ACP_LOG_LEVEL=info
 
+# OPT-26 (tech-audit 2026-06-01 D4): drop privileges to the bundled
+# non-root `node` user (uid 1000) so the bridge process doesn't run
+# as root in production. Reads agents.yaml read-only via the
+# host-side bind mount; doesn't need root for anything else.
+# Re-take ownership of /app so any future writable subdir works.
+RUN chown -R node:node /app
+USER node
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "/app/dist/index.js"]
