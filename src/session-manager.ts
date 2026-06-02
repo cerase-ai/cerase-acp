@@ -85,13 +85,13 @@ export interface SessionManagerOptions {
   canonicalFetcher?: CanonicalFetcher;
   /**
    * Inject an endpoint resolver. Tests use a fake endpoint;
-   * production defaults to `defaultEndpointForAgent(agent.id)`
-   * which reads `OPENCODE_SERVER_PASSWORD` from env and assumes
-   * the `cerase-agent-{id}` docker service-name convention.
-   * Returning `null` disables reconciliation for that agent
-   * (logged once, then quiet).
+   * production passes the agent's container name (derived from
+   * `spawn.args` in agents.yaml) to `defaultEndpointForAgent`
+   * which reads `OPENCODE_SERVER_PASSWORD` from env. Returning
+   * `null` disables reconciliation for that agent (logged once,
+   * then quiet).
    */
-  endpointResolver?: (agentId: string) => RestEndpoint | null;
+  endpointResolver?: (containerName: string) => RestEndpoint | null;
 }
 
 /**
@@ -132,7 +132,7 @@ export class SessionManager {
   private idleMs: number;
   private onTelemetry?: (t: TurnTelemetry) => void;
   private canonicalFetcher: CanonicalFetcher;
-  private endpointResolver: (agentId: string) => RestEndpoint | null;
+  private endpointResolver: (containerName: string) => RestEndpoint | null;
 
   constructor(
     private config: BridgeConfig,
@@ -336,7 +336,14 @@ export class SessionManager {
         // to "no reconciliation" — the M15 drain alone still covered
         // the majority of cases.
         if (assistantMessageId) {
-          const endpoint = this.endpointResolver(agent.id);
+          // Container name is the third spawn arg in the canonical
+          // `docker exec -i <container> opencode acp` shape — the
+          // same name the bridge talks to over the docker socket.
+          // Falls back to `cerase-agent-${agent.id}` for legacy
+          // (pre-slot-pool) agents.yaml shapes where args[2] isn't
+          // a container name.
+          const containerName = agent.spawn.args[2] ?? `cerase-agent-${agent.id}`;
+          const endpoint = this.endpointResolver(containerName);
           if (endpoint) {
             try {
               const canonical = await this.canonicalFetcher(

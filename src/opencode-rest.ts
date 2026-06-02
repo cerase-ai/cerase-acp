@@ -38,18 +38,25 @@ export type CanonicalFetcher = (
 ) => Promise<CanonicalMessage | null>;
 
 /**
- * Derive an endpoint for the standard cerase-agent-{id} container
- * naming convention. Bridge and agent containers live on the same
- * docker network so the service name resolves; password comes from
- * the env var shared via docker-compose. Returns `null` when the
- * password isn't configured (test environments, host shell), in
- * which case M16 reconciliation is skipped quietly.
+ * Build an endpoint for a known agent container name. Bridge and
+ * agent containers live on the same docker network so the service
+ * name resolves; password comes from the env var shared via
+ * docker-compose. Returns `null` when the password isn't configured
+ * (test environments, host shell), in which case M16 reconciliation
+ * is skipped quietly.
+ *
+ * Caller passes the container name directly (e.g. `cerase-agent-1`).
+ * Older versions of this function accepted an `agentId` string and
+ * prefixed it with `cerase-agent-`, which produced a double-prefix
+ * (`cerase-agent-agent-1`) once the slot-pool naming landed in
+ * cerase-core (Agent ids became `agent-N`). Session-manager now
+ * derives the container name from `spawn.args[2]` of agents.yaml.
  */
-export function defaultEndpointForAgent(agentId: string): RestEndpoint | null {
+export function defaultEndpointForAgent(containerName: string): RestEndpoint | null {
   const password = process.env.OPENCODE_SERVER_PASSWORD;
   if (!password) return null;
   return {
-    baseURL: `http://cerase-agent-${agentId}:3284`,
+    baseURL: `http://${containerName}:3284`,
     username: "opencode",
     password,
   };
