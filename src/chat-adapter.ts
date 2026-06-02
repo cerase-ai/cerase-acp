@@ -20,7 +20,35 @@ export interface ChatAdapter {
   agentId: string;
   start(): Promise<void>;
   stop(): Promise<void>;
-  /** The function the dispatcher uses to send a chunk to this user's DM. */
+  /**
+   * The function the dispatcher uses to send a chunk to this user's DM.
+   *
+   * **OPT-67 typing-indicator contract (applies to ALL adapters that
+   * surface a "is typing…" UX):**
+   *
+   *   1. Typing should be visible WHILE chunks are streaming (signals
+   *      "still working").
+   *   2. Typing must STOP cleanly after the final chunk — no ghost
+   *      indicator lingering 5-10s past the actual reply.
+   *
+   * The pattern used by the Discord adapter (see `discord-adapter.ts`
+   * + `typing-keepalive.ts`):
+   *
+   *   - On MessageCreate: start an interval-based keepalive
+   *     (`startTypingKeepalive` → `setInterval` calling the channel's
+   *     typing API every 7s). Returns a `stopFn`.
+   *   - Inside `makeSendTarget`, **do NOT** call the typing API after
+   *     each `channel.send(chunk)`. The keepalive interval already
+   *     covers the streaming window; an extra post-send typing call
+   *     re-prolongs the indicator past the final chunk → ghost.
+   *   - Wrap the dispatcher call in a `try { … } finally { stopFn(); }`
+   *     block so the interval is cancelled the moment streaming ends.
+   *
+   * Telegram (`sendChatAction('typing')`), Slack (assistant.threads.
+   * setStatus or similar), Workspace Chat (any future "thinking…"
+   * affordance): same shape — keepalive in the message handler, NO
+   * per-chunk re-trigger.
+   */
   makeSendTarget(userId: string): (chunk: string) => Promise<void>;
 }
 

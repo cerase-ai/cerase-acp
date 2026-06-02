@@ -41,3 +41,43 @@ describe("discord-adapter (OPT-67 invariants)", () => {
     expect(adapter).toMatch(/finally\s*\{[\s\S]*?stopTyping\(\)/);
   });
 });
+
+// Cross-adapter invariant (per chat-adapter.ts OPT-67 contract). Any
+// adapter that EVER adds a typing-indicator pattern (Discord
+// `sendTyping`, Telegram `sendChatAction('typing')`, Slack assistant
+// thread status, Workspace Chat) must follow the same shape:
+//   - keepalive started in the message handler
+//   - NO per-chunk re-trigger inside makeSendTarget
+//   - stop invoked in a finally block
+// This test scans each adapter file structurally. It does NOT require
+// the typing affordance to exist (slack/telegram/workspace can skip
+// the indicator entirely); it only fires when an adapter DOES use one.
+describe("cross-adapter typing invariants (OPT-67)", () => {
+  const adapterFiles = [
+    "telegram-adapter.ts",
+    "slack-adapter.ts",
+    "workspace-chat-adapter.ts",
+  ];
+
+  for (const fname of adapterFiles) {
+    it(`${fname}: if a typing API is used, it is NOT called inside makeSendTarget`, () => {
+      const src = readFileSync(join(here, fname), "utf8");
+      const typingApis = [
+        /sendTyping\s*\(/,
+        /sendChatAction\s*\(\s*['"]typing['"]/,
+        /setStatus\s*\(\s*\{[^}]*typing/i,
+      ];
+      const usesTyping = typingApis.some((rx) => rx.test(src));
+      if (!usesTyping) {
+        // No typing UX in this adapter yet — nothing to enforce.
+        return;
+      }
+      const start = src.indexOf("makeSendTarget(");
+      if (start < 0) return;
+      const block = src.slice(start, start + 1500);
+      for (const rx of typingApis) {
+        expect(block).not.toMatch(rx);
+      }
+    });
+  }
+});
