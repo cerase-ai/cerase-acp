@@ -117,14 +117,18 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
           dmChannels.set(userId, channel);
         }
         await channel.send(chunk);
-        // M18 — re-trigger typing right after each intermediate send.
-        // Discord auto-clears the indicator on message arrival; this
-        // closes the visual gap until the next 7s keepalive tick. The
-        // trailing typing after the FINAL send is acceptable: it
-        // auto-stops after ~10s and matches the UX users already see
-        // when humans start typing then send (typing momentarily
-        // reappears, then clears).
-        await channel.sendTyping().catch(() => {});
+        // OPT-67 (2026-06-02): post-send sendTyping removed. Was added
+        // in M18 to close the visual gap until the next 7s keepalive
+        // tick — but it leaves a ghost typing indicator visible for
+        // ~10s after the FINAL chunk of a turn (Discord auto-stop
+        // window), which reads as "still thinking" when the agent
+        // is actually done. The keepalive setInterval running in
+        // parallel from `startTypingKeepalive` covers intermediate
+        // chunks just fine (worst-case 7s gap between Discord auto-
+        // clear on send and the next keepalive sendTyping). The
+        // bridge's MessageCreate `finally` block calls stopTyping()
+        // immediately when handleMessage returns, so no tick fires
+        // after the last channel.send → typing clears cleanly.
       };
     },
   };
