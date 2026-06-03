@@ -1,6 +1,6 @@
 {
   "name": "cerase-acp",
-  "version": "0.3.0-dev",
+  "version": "0.4.0-dev",
   "description": "In-house multi-channel chat bridge for Cerase. DM-only across Discord / Telegram / Slack / Google Workspace Chat. One long-lived ACP session per (user, agent), colleague-style UX.",
   "private": true,
   "type": "module",

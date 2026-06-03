@@ -44,6 +44,17 @@ export function pickRefusalMessage(text: string): string {
 export class Dispatcher {
   constructor(private deps: DispatcherDeps) {}
 
+  /**
+   * SCHED-2 — post a plain, deterministic message to the agent's
+   * channel WITHOUT running a model turn (e.g. the scheduled-message
+   * heads-up "🕐 È scattato un messaggio programmato…"). Uses the same
+   * send target the reply pipeline uses.
+   */
+  async sendSystemMessage(agentId: string, userId: string, text: string): Promise<void> {
+    const send = this.deps.resolveSendTarget(agentId, userId);
+    await send(text);
+  }
+
   async handleMessage(agentId: string, userId: string, text: string): Promise<void> {
     // Allowlist gate. isAllowed throws on unknown agent id — let that
     // propagate so the adapter logs it as a wiring bug.

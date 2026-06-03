@@ -19,6 +19,8 @@ import { TurnMetaTracker } from "./turn-meta.js";
 import { Dispatcher } from "./dispatcher.js";
 import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
+import { startInternalServer, type InternalServer } from "./internal-server.js";
+import { needsApprovalLink, applyApprovalLink, fetchPendingApprovalLink } from "./approval-link.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { diffConfigs, type ConfigDiff } from "./config-diff.js";
 
@@ -199,6 +201,17 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // both dispatchers (production + test-mode) below.
   const adapters = new Map<string, ChatAdapter>();
 
+  // HITL-3/4 — control-plane internal channel for fetching the
+  // server-minted approval link to inject via {{APPROVAL_LINK}}.
+  const controlPlaneUrl = process.env.CERASE_CONTROL_PLANE_URL ?? "http://cerase-control-plane:8000";
+  // Two distinct secrets:
+  //  - controlPlaneSecret: the CONTROL-PLANE internal bearer (same the
+  //    gateway uses) — to CALL control-plane internal endpoints.
+  //  - acpInjectSecret: guards acp's OWN /internal/inject endpoint;
+  //    must match the control-plane's cerase.acp.internal_secret.
+  const controlPlaneSecret = process.env.CERASE_INTERNAL_SECRET ?? "";
+  const acpInjectSecret = process.env.CERASE_ACP_INTERNAL_SECRET ?? "";
+
   const productionDispatcher = new Dispatcher({
     config,
     sessionManager,
@@ -208,12 +221,39 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       if (!adapter) {
         throw new Error(`no chat adapter registered for agent "${agentId}"`);
       }
-      return adapter.makeSendTarget(userId);
+      const inner = adapter.makeSendTarget(userId);
+      // HITL-3: substitute {{APPROVAL_LINK}} in outgoing chunks with the
+      // signed link (fetched over the internal channel — never given to
+      // the agent). Only acts on chunks carrying the placeholder, so the
+      // common path pays no extra HTTP.
+      return async (chunk: string) => {
+        if (controlPlaneSecret && needsApprovalLink(chunk)) {
+          const link = await fetchPendingApprovalLink(agentId, {
+            controlPlaneUrl,
+            internalSecret: controlPlaneSecret,
+          });
+          return inner(applyApprovalLink(chunk, link));
+        }
+        return inner(chunk);
+      };
     },
   });
 
   for (const agent of config.agents) {
     adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
+  }
+
+  // SCHED-2 — productionised injection endpoint the control-plane
+  // scheduled-message dispatcher POSTs to (shared-secret). Started when
+  // the internal secret is configured.
+  let internalServer: InternalServer | undefined;
+  if (acpInjectSecret) {
+    internalServer = await startInternalServer({
+      dispatcher: productionDispatcher,
+      internalSecret: acpInjectSecret,
+      port: Number(process.env.CERASE_ACP_INTERNAL_PORT ?? "7476"),
+    });
+    logger.info({ port: internalServer.port() }, "internal injection endpoint started (/internal/inject)");
   }
 
   // Test-mode: start the test server BEFORE the adapters so it's
@@ -327,6 +367,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       if (reloader) reloader.stop();
       await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
       if (testServer) await testServer.close();
+      if (internalServer) await internalServer.close();
       await sessionManager.shutdown();
     },
   };
