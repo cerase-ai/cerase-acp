@@ -31,7 +31,9 @@ export interface InternalServerOptions {
 
 /** The heads-up posted before processing when surface_in_chat is set. */
 export function headsUpText(body: string): string {
-  return `🕐 È scattato un messaggio programmato: «${body}». Procedo.`;
+  // SCHED-5: the user must see exactly which scheduled message fired and
+  // that the agent is taking it on. Body rendered as a code block.
+  return `🕐 Ricevuto messaggio temporizzato:\n\`\`\`\n${body}\n\`\`\`\nora lo prendo in carico.`;
 }
 
 export async function startInternalServer(opts: InternalServerOptions): Promise<InternalServer> {

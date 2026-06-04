@@ -61,6 +61,13 @@ describe("internal-server /internal/inject", () => {
     expect(calls.system).toEqual([["a1", "u1", headsUpText("manda la rassegna")]]);
   });
 
+  it("SCHED-5: headsUpText acks the scheduled message with the body in a code block", () => {
+    const t = headsUpText("manda la rassegna");
+    expect(t).toContain("Ricevuto messaggio temporizzato");
+    expect(t).toContain("```\nmanda la rassegna\n```");
+    expect(t).toContain("ora lo prendo in carico");
+  });
+
   it("skips the heads-up when surface_in_chat is false", async () => {
     const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", surface_in_chat: false });
     expect(resp.status).toBe(202);
