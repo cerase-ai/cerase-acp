@@ -108,6 +108,20 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         logger.warn({ err, agentId: agent.id }, "error during discord client destroy");
       }
     },
+    async sendFile(userId: string, file: { name: string; bytes: Buffer; caption?: string }) {
+      let channel = dmChannels.get(userId);
+      if (!channel) {
+        const user = await client.users.fetch(userId);
+        channel = (await user.createDM()) as DMChannel;
+        dmChannels.set(userId, channel);
+      }
+      // CHAT-UX / ATTACH-1: upload the workspace file as a real Discord
+      // attachment. `attachment` accepts a Buffer directly.
+      await channel.send({
+        content: file.caption,
+        files: [{ attachment: file.bytes, name: file.name }],
+      });
+    },
     makeSendTarget(userId: string) {
       return async (chunk: string) => {
         let channel = dmChannels.get(userId);

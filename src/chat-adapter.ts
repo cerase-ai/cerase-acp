@@ -50,6 +50,22 @@ export interface ChatAdapter {
    * per-chunk re-trigger.
    */
   makeSendTarget(userId: string): (chunk: string) => Promise<void>;
+
+  /**
+   * CHAT-UX / ATTACH-1 — upload a workspace file as a chat attachment to
+   * `userId`. Optional: an adapter that doesn't implement it signals
+   * "attachments not supported on this channel" and the bridge degrades
+   * to a text note. Discord uses `channel.send({ files })`; Telegram
+   * `sendDocument`; Slack `filesUploadV2`; Workspace Chat media upload.
+   */
+  sendFile?(userId: string, file: OutgoingFile): Promise<void>;
+}
+
+/** A file the agent attaches to its chat reply (read from its workspace). */
+export interface OutgoingFile {
+  name: string;
+  bytes: Buffer;
+  caption?: string;
 }
 
 /**

@@ -21,6 +21,8 @@ import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { startInternalServer, type InternalServer } from "./internal-server.js";
 import { needsApprovalLink, applyApprovalLink, fetchPendingApprovalLink } from "./approval-link.js";
+import { parseAttachments, hasAttachments } from "./attachment.js";
+import { readAgentWorkspaceFile } from "./workspace-files.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { diffConfigs, type ConfigDiff } from "./config-diff.js";
 
@@ -227,14 +229,41 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // the agent). Only acts on chunks carrying the placeholder, so the
       // common path pays no extra HTTP.
       return async (chunk: string) => {
-        if (controlPlaneSecret && needsApprovalLink(chunk)) {
+        let text = chunk;
+        // HITL-3: approval link substitution (unchanged).
+        if (controlPlaneSecret && needsApprovalLink(text)) {
           const link = await fetchPendingApprovalLink(agentId, {
             controlPlaneUrl,
             internalSecret: controlPlaneSecret,
           });
-          return inner(applyApprovalLink(chunk, link));
+          text = applyApprovalLink(text, link);
         }
-        return inner(chunk);
+        // ATTACH-1: upload workspace files referenced by [[attach: <path>]].
+        // The agent emits the marker; we read the file from its slot
+        // container's workspace and send it as a channel attachment, never
+        // showing the raw marker. Container name follows the cerase-<id>
+        // convention (agents.yaml id `agent-1` → container `cerase-agent-1`).
+        if (hasAttachments(text)) {
+          const parsed = parseAttachments(text);
+          const containerName = `cerase-${agentId}`;
+          for (const relPath of parsed.attachments) {
+            try {
+              const file = await readAgentWorkspaceFile(containerName, relPath);
+              if (adapter.sendFile) {
+                await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
+              } else {
+                await inner(`📎 (allegati non supportati su questo canale: ${file.name})`);
+              }
+            } catch (err) {
+              logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
+              await inner(`⚠️ Non sono riuscito ad allegare \`${relPath}\`.`);
+            }
+          }
+          text = parsed.text;
+          // If the reply was only the marker, don't send an empty message.
+          if (!text) return;
+        }
+        return inner(text);
       };
     },
   });
