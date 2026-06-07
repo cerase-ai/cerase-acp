@@ -68,6 +68,20 @@ describe("internal-server /internal/inject", () => {
     expect(t).toContain("ora lo prendo in carico");
   });
 
+  it("C1-4: a caller-supplied heads_up overrides the default scheduled wording", async () => {
+    const custom = "💬 **Paolo** (dal pannello):\n```\nciao\n```";
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "ciao", heads_up: custom });
+    expect(resp.status).toBe(202);
+    expect(calls.system).toEqual([["a1", "u1", custom]]);
+    expect(calls.handled).toEqual([["a1", "u1", "ciao"]]);
+  });
+
+  it("C1-4: an empty heads_up falls back to the default scheduled wording", async () => {
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", heads_up: "" });
+    expect(resp.status).toBe(202);
+    expect(calls.system).toEqual([["a1", "u1", headsUpText("x")]]);
+  });
+
   it("skips the heads-up when surface_in_chat is false", async () => {
     const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", surface_in_chat: false });
     expect(resp.status).toBe(202);

@@ -92,13 +92,21 @@ async function handleRequest(
     return;
   }
   const surfaceInChat = rec.surface_in_chat !== false; // default true
+  // C1-4: an optional caller-supplied heads-up overrides the default
+  // scheduled-message wording (the in-admin chat echo passes its own
+  // attribution marker, e.g. "💬 Paolo (dal pannello): …"). Absent → the
+  // scheduled dispatcher's existing heads-up is used, so it is unaffected.
+  const headsUp =
+    typeof rec.heads_up === "string" && rec.heads_up.length > 0
+      ? rec.heads_up
+      : headsUpText(text);
 
   try {
     if (surfaceInChat) {
       // Deterministic heads-up before the model turn (best-effort — a
       // heads-up failure must not block the actual injection).
       try {
-        await opts.dispatcher.sendSystemMessage(agentId, userId, headsUpText(text));
+        await opts.dispatcher.sendSystemMessage(agentId, userId, headsUp);
       } catch (err) {
         logger.warn({ err, agentId }, "heads-up send failed; continuing with injection");
       }
