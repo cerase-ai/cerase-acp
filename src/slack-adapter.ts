@@ -22,6 +22,8 @@ import { makeLogger } from "./logger.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import { extractSlackFiles } from "./channel-attachments.js";
 
 const logger = makeLogger("cerase-acp.slack");
 
@@ -58,11 +60,23 @@ export function createSlackAdapter(
         try {
           const m = args.message;
           if (m.channel_type !== "im") return;
-          if (m.subtype) return; // edited / deleted / bot reply etc.
+          // C4-4 — allow the `file_share` subtype (it carries the uploaded
+          // files); still drop edited/deleted/bot-reply subtypes.
+          if (m.subtype && m.subtype !== "file_share") return;
           const userId = typeof m.user === "string" ? m.user : undefined;
           const text = typeof m.text === "string" ? m.text : "";
-          if (!userId || !text) return;
-          await dispatcher.handleMessage(agent.id, userId, text);
+          const slackFiles = extractSlackFiles(m);
+          if (!userId || (!text && slackFiles.length === 0)) return;
+
+          // Slack file URLs (url_private) require the bot token to download.
+          let outText = text;
+          if (slackFiles.length > 0) {
+            const relPaths = await ingestInboundAttachments(`cerase-${agent.id}`, slackFiles, {
+              headers: { Authorization: `Bearer ${agent.bot_token}` },
+            });
+            outText = prependUploadMarker(text, relPaths);
+          }
+          await dispatcher.handleMessage(agent.id, userId, outText);
         } catch (err) {
           logger.error({ err, agentId: agent.id }, "slack message handler threw");
         }

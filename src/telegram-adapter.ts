@@ -19,6 +19,8 @@ import { makeLogger } from "./logger.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import { extractTelegramFiles } from "./channel-attachments.js";
 
 const logger = makeLogger("cerase-acp.telegram");
 
@@ -63,12 +65,42 @@ export function createTelegramAdapter(
         }
       });
 
-      // Attachment handling lives entirely in the
-      // `message-attachment-receiver` skill on the agent side; the
-      // bridge forwards the Telegram file_id reference in the same
-      // shape the Discord adapter forwards an attachment URL. The
-      // per-channel parity is handled in the upload-receiver skill,
-      // not here.
+      // C4-4 — inbound attachments. Telegram delivers media as separate
+      // update types (document/photo/voice/audio/video), each carrying a
+      // file_id we resolve to a download URL via getFileLink, then run through
+      // the shared ingest + the [Uploaded files: …] marker the
+      // message-attachment-receiver skill reads. The caption is the body text.
+      const mediaHandler = async (ctx: {
+        from?: { id: number };
+        chat?: { id: number };
+        message?: Record<string, unknown> & { caption?: string };
+        telegram: { getFileLink(fileId: string): Promise<URL> };
+      }) => {
+        try {
+          if (!ctx.from || !ctx.chat || ctx.from.id !== ctx.chat.id) return;
+          const userId = String(ctx.from.id);
+          const caption = ctx.message?.caption ?? "";
+          const refs = extractTelegramFiles(ctx.message);
+          const files: { name: string; url: string }[] = [];
+          for (const ref of refs) {
+            try {
+              const link = await ctx.telegram.getFileLink(ref.fileId);
+              files.push({ name: ref.name, url: link.href });
+            } catch (err) {
+              logger.warn({ err, agentId: agent.id, fileId: ref.fileId }, "telegram getFileLink failed — skipped");
+            }
+          }
+          const relPaths = await ingestInboundAttachments(`cerase-${agent.id}`, files);
+          const text = prependUploadMarker(caption, relPaths);
+          if (!text) return; // nothing downloaded and no caption
+          await dispatcher.handleMessage(agent.id, userId, text);
+        } catch (err) {
+          logger.error({ err, agentId: agent.id }, "telegram media handler threw");
+        }
+      };
+      for (const kind of ["document", "photo", "voice", "audio", "video"]) {
+        bot.on(kind, mediaHandler);
+      }
 
       bot.catch((err: unknown) => {
         logger.error({ err, agentId: agent.id }, "telegraf reported error");

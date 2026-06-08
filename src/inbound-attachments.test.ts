@@ -3,6 +3,7 @@ import {
   sanitizeFilename,
   prependUploadMarker,
   ingestInboundAttachments,
+  ingestInboundBuffers,
 } from "./inbound-attachments.js";
 
 describe("sanitizeFilename", () => {
@@ -90,5 +91,31 @@ describe("ingestInboundAttachments", () => {
     );
 
     expect(stored).toEqual(["uploads/9-1/good.pdf"]);
+  });
+
+  it("forwards auth headers to the fetcher (Slack url_private needs the bot token)", async () => {
+    const fetcher = vi.fn(async () => Buffer.from("x"));
+    const writer = vi.fn(async () => {});
+    await ingestInboundAttachments(
+      "c",
+      [{ name: "a.pdf", url: "https://slack/x" }],
+      { fetcher, writer, now: () => 1, headers: { Authorization: "Bearer xoxb-1" } },
+    );
+    expect(fetcher).toHaveBeenCalledWith("https://slack/x", { Authorization: "Bearer xoxb-1" });
+  });
+});
+
+describe("ingestInboundBuffers", () => {
+  it("stores pre-fetched bytes (Workspace Chat media) without a fetcher", async () => {
+    const writer = vi.fn(async () => {});
+    const stored = await ingestInboundBuffers(
+      "cerase-agent-2",
+      [{ name: "doc.pdf", bytes: Buffer.from("PDF") }],
+      { writer, now: () => 5 },
+    );
+    expect(stored).toEqual(["uploads/5-0/doc.pdf"]);
+    const [argv, bytes] = writer.mock.calls[0]!;
+    expect((argv as string[]).join(" ")).toContain("uploads/5-0/doc.pdf");
+    expect((bytes as Buffer).toString()).toBe("PDF");
   });
 });
