@@ -101,6 +101,11 @@ export async function createChatAdapter(
       );
       return createWorkspaceChatAdapter(agent, dispatcher);
     }
+    case "web": {
+      // C2-0 — panel-only null-sink channel (maintainer assistant).
+      const { createWebAdapter } = await import("./web-adapter.js");
+      return createWebAdapter(agent, dispatcher);
+    }
     default: {
       // Exhaustiveness guard — TypeScript narrows the union, so any new
       // channel added to ChatChannelSchema without a case here is a

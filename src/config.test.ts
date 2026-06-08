@@ -112,6 +112,25 @@ session:
     expect(cfg.agents[0]!.cwd).toBe("/custom/workspace");
   });
 
+  it("C2-0: accepts channel 'web' with NO credential fields (panel-only agent)", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: maintainer-1
+    channel: web
+    allowed_users: ["maintainer:org-123"]
+    spawn: { command: docker, args: [exec, -i, cerase-agent-9, opencode, acp] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.channel).toBe("web");
+    expect(cfg.agents[0]!.allowed_users).toEqual(["maintainer:org-123"]);
+  });
+
   it("throws a clear error when the config file does not exist", () => {
     expect(() => loadConfig("/nonexistent/path/agents.yaml", {})).toThrow(/agents\.yaml/);
   });

@@ -30,17 +30,24 @@ const AgentIdSchema = z
 //   channel='workspace_chat' → workspace_chat_credentials_path required
 //                              (path inside the bridge container to a
 //                              Google Cloud service-account JSON)
+//   channel='web'            → NO credentials (C2-0). A panel-only agent
+//                              (e.g. the maintainer assistant): turns arrive
+//                              via /internal/inject and the reply is read
+//                              from the opencode timeline in Filament — no
+//                              external chat client, a null-sink adapter.
 //
 // allowed_users semantics per channel:
 //   discord  → snowflake user id (numeric string)
 //   telegram → numeric chat_id (string)
 //   slack    → "U…" workspace user id
 //   workspace_chat → email address (must match Workspace domain)
+//   web      → a synthetic, deterministic user id (e.g. "maintainer:<orgId>")
 export const ChatChannelSchema = z.enum([
   "discord",
   "telegram",
   "slack",
   "workspace_chat",
+  "web",
 ]);
 export type ChatChannel = z.infer<typeof ChatChannelSchema>;
 
