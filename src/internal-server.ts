@@ -3,10 +3,13 @@
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, label? }  → 202
+//     { agent_id, user_id, text, surface_in_chat?, label?, system_message_only? }  → 202
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first.
+// E3: when `system_message_only` is true it instead delivers `text` straight
+// to the DM as a system message and runs NO model turn (the E2 bind-time
+// connect nudge — a notification, not a prompt the agent should answer).
 // This is the productionised counterpart of the BRIDGE_E2E_TEST-gated
 // /_test/inject (test-injection.ts).
 
@@ -92,6 +95,11 @@ async function handleRequest(
     return;
   }
   const surfaceInChat = rec.surface_in_chat !== false; // default true
+  // E3: a notification-only injection (the E2 bind-time connect nudge) delivers
+  // the text straight to the DM as a system message and must NOT run a model
+  // turn — otherwise the agent would "reply" to its own nudge. When set, we send
+  // `text` verbatim via sendSystemMessage and skip handleMessage entirely.
+  const systemMessageOnly = rec.system_message_only === true;
   // C1-4: an optional caller-supplied heads-up overrides the default
   // scheduled-message wording (the in-admin chat echo passes its own
   // attribution marker, e.g. "💬 Paolo (dal pannello): …"). Absent → the
@@ -100,6 +108,18 @@ async function handleRequest(
     typeof rec.heads_up === "string" && rec.heads_up.length > 0
       ? rec.heads_up
       : headsUpText(text);
+
+  if (systemMessageOnly) {
+    try {
+      await opts.dispatcher.sendSystemMessage(agentId, userId, text);
+    } catch (err) {
+      logger.error({ err, agentId, userId }, "system-message-only inject failed");
+      sendJson(res, 500, { error: "dispatch failed" });
+      return;
+    }
+    sendJson(res, 202, { status: "accepted" });
+    return;
+  }
 
   try {
     if (surfaceInChat) {

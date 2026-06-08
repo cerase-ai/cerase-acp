@@ -89,6 +89,14 @@ describe("internal-server /internal/inject", () => {
     expect(calls.handled).toHaveLength(1);
   });
 
+  it("E3: system_message_only delivers the text as a system message and runs NO model turn", async () => {
+    const text = "Per usare Gmail collega il tuo account: https://x/connect/tok";
+    const resp = await post({ agent_id: "a1", user_id: "u1", text, system_message_only: true });
+    expect(resp.status).toBe(202);
+    expect(calls.system).toEqual([["a1", "u1", text]]);
+    expect(calls.handled).toHaveLength(0);
+  });
+
   it("404s for any other path", async () => {
     const resp = await fetch(`${base}/nope`, { headers: { authorization: `Bearer ${SECRET}` } });
     expect(resp.status).toBe(404);
