@@ -18,6 +18,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
@@ -47,8 +48,13 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       // DMs only — drop everything posted in guild channels.
       if (msg.guildId !== null) return;
       const userId = msg.author.id;
-      const text = msg.content ?? "";
-      if (!text) return;
+      let text = msg.content ?? "";
+      // C4-2 — inbound attachments: a file with no caption must NOT be dropped.
+      const inbound = [...msg.attachments.values()].map((a) => ({
+        name: a.name ?? "file",
+        url: a.url,
+      }));
+      if (!text && inbound.length === 0) return;
       // Cache the channel for future replies.
       if (msg.channel.isDMBased() && msg.channel.type !== undefined) {
         dmChannels.set(userId, msg.channel as DMChannel);
@@ -74,6 +80,12 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         "sendTyping" in msg.channel ? (msg.channel as unknown as { sendTyping(): Promise<unknown> }) : null;
       const stopTyping = typingChannel ? startTypingKeepalive(typingChannel) : () => {};
       try {
+        // C4-2 — download inbound files into the agent workspace + prepend the
+        // [Uploaded files: …] marker the message-attachment-receiver skill reads.
+        if (inbound.length > 0) {
+          const relPaths = await ingestInboundAttachments(`cerase-${agent.id}`, inbound);
+          text = prependUploadMarker(text, relPaths);
+        }
         await dispatcher.handleMessage(agent.id, userId, text);
       } finally {
         stopTyping();

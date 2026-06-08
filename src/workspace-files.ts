@@ -7,7 +7,7 @@
 // The path is workspace-relative and traversal-guarded upstream
 // (isSafeWorkspacePath) — re-checked here as a hard boundary.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { isSafeWorkspacePath } from "./attachment.js";
 
 export interface WorkspaceFile {
@@ -77,4 +77,80 @@ export async function readAgentWorkspaceFile(
     throw new Error(`workspace file too large (${bytes.length} > ${maxBytes} bytes): ${relPath}`);
   }
   return { name: basename(relPath), bytes };
+}
+
+// C4-1 — WRITE side: persist an inbound chat attachment into the agent's
+// workspace so the `message-attachment-receiver` skill (which routes files to
+// the OCR / transcribe / docreader recipes) can read it. Symmetric to the read
+// above: `docker exec -i <container> sh -c 'mkdir -p <dir> && cat > <full>'`
+// with the bytes on stdin. The relPath is bridge-built (`uploads/<ts>/<name>`
+// with a sanitised name), so it is traversal-safe AND shell-safe (no quotes /
+// metacharacters can appear) — re-checked here as a hard boundary.
+
+/** Injectable for tests: writes `bytes` to the process spawned for `argv`. */
+export type FileWriter = (argv: string[], bytes: Buffer) => Promise<void>;
+
+const realWriter: FileWriter = (argv, bytes) =>
+  new Promise<void>((resolve, reject) => {
+    const [bin, ...args] = argv;
+    if (!bin) {
+      reject(new Error("empty argv for file writer"));
+      return;
+    }
+    const child = spawn(bin, args, { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code: number | null) => {
+      if (code === 0) resolve();
+      else reject(new Error(`workspace write failed (exit ${code}): ${stderr.trim()}`));
+    });
+    child.stdin.write(bytes);
+    child.stdin.end();
+  });
+
+export interface WriteWorkspaceOptions {
+  workspaceRoot?: string;
+  maxBytes?: number;
+  writer?: FileWriter;
+}
+
+/**
+ * Write `bytes` to `relPath` inside `containerName`'s workspace, creating the
+ * parent dir. Throws on an unsafe path, a path with a single-quote (would break
+ * the `sh -c` quoting — never happens for a sanitised `uploads/…` path, guarded
+ * anyway), or a file over the cap.
+ */
+export async function writeAgentWorkspaceFile(
+  containerName: string,
+  relPath: string,
+  bytes: Buffer,
+  opts?: WriteWorkspaceOptions,
+): Promise<void> {
+  if (!isSafeWorkspacePath(relPath)) {
+    throw new Error(`unsafe workspace path: ${relPath}`);
+  }
+  if (relPath.includes("'")) {
+    throw new Error(`unsafe workspace path (quote): ${relPath}`);
+  }
+  const root = opts?.workspaceRoot ?? DEFAULT_WORKSPACE_ROOT;
+  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+  const writer = opts?.writer ?? realWriter;
+  if (bytes.length > maxBytes) {
+    throw new Error(`workspace file too large (${bytes.length} > ${maxBytes} bytes): ${relPath}`);
+  }
+  const full = `${root}/${relPath}`;
+  const dir = full.slice(0, full.lastIndexOf("/"));
+  const argv = [
+    "docker",
+    "exec",
+    "-i",
+    containerName,
+    "sh",
+    "-c",
+    `mkdir -p '${dir}' && cat > '${full}'`,
+  ];
+  await writer(argv, bytes);
 }
