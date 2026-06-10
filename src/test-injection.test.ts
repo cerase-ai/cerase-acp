@@ -69,7 +69,9 @@ describe("test-injection server", () => {
     expect(inject.status).toBe(202);
     const reply = await fetchJson(`${url}/_test/last-reply?agent_id=doc-qa&user_id=111`);
     expect(reply.status).toBe(200);
-    expect((reply.body as { text: string }).text).toBe("salve, è un test");
+    // M-LEGAL-1: the first-contact AI disclosure precedes the reply.
+    expect((reply.body as { text: string }).text).toMatch(/assistente AI|AI assistant/);
+    expect((reply.body as { text: string }).text).toContain("salve, è un test");
   });
 
   it("returns 404 from /_test/last-reply when no reply has been recorded yet", async () => {

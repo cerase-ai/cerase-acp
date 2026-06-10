@@ -156,7 +156,9 @@ describe("runBridge", () => {
     const replyRes = await fetch(`${url}/_test/last-reply?agent_id=demo&user_id=111`);
     expect(replyRes.status).toBe(200);
     const reply = (await replyRes.json()) as { text: string };
-    expect(reply.text).toBe("test injection works!");
+    // M-LEGAL-1: the first-contact AI disclosure precedes the reply.
+    expect(reply.text).toMatch(/assistente AI|AI assistant/);
+    expect(reply.text).toContain("test injection works!");
 
     // Unauthorised user → polite refusal recorded (not a 500)
     const refusalInject = await fetch(`${url}/_test/inject`, {

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import { Dispatcher, pickErrorMessage, pickEmptyMessage } from "./dispatcher.js";
+import { Dispatcher, pickErrorMessage, pickEmptyMessage, pickDisclosureMessage } from "./dispatcher.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import type { BridgeConfig } from "./config.js";
@@ -42,9 +42,11 @@ describe("Dispatcher", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
-    expect(sent.length).toBeGreaterThanOrEqual(1);
+    // M-LEGAL-1: first contact prepends the one-time AI disclosure.
+    expect(sent.length).toBeGreaterThanOrEqual(2);
+    expect(sent[0].text).toBe(pickDisclosureMessage("ping"));
     // After joining + trimming the marker we should reconstruct the full reply.
-    const joined = sent.map((s) => s.text.replace(/ ⏎$/u, "")).join("");
+    const joined = sent.slice(1).map((s) => s.text.replace(/ ⏎$/u, "")).join("");
     expect(joined).toBe("ciao da fake-acp, tutto bene?");
   });
 
@@ -134,9 +136,10 @@ describe("Dispatcher", () => {
     });
     // Italian input → Italian error copy, and the promise resolves (no throw).
     await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toBeUndefined();
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toBe(pickErrorMessage("ciao, come va?"));
-    expect(sent[0]).toMatch(/riprova|errore/i);
+    // sent[0] is the M-LEGAL-1 first-contact disclosure.
+    expect(sent.length).toBe(2);
+    expect(sent[1]).toBe(pickErrorMessage("ciao, come va?"));
+    expect(sent[1]).toMatch(/riprova|errore/i);
   });
 
   it("M-ACP-1: a turn that produced zero text chunks sends an empty-reply fallback", async () => {
@@ -152,8 +155,9 @@ describe("Dispatcher", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toBe(pickEmptyMessage("ping"));
+    // sent[0] is the M-LEGAL-1 first-contact disclosure.
+    expect(sent.length).toBe(2);
+    expect(sent[1]).toBe(pickEmptyMessage("ping"));
   });
 
   it("M-ACP-1: a normal turn sends neither error nor empty fallback", async () => {
@@ -174,5 +178,85 @@ describe("Dispatcher", () => {
     expect(joined).not.toBe(pickErrorMessage("ping"));
     expect(joined).not.toBe(pickEmptyMessage("ping"));
     expect(joined).toContain("hi");
+  });
+});
+
+// M-LEGAL-1 — AI Act Art. 50 first-contact transparency (deadline
+// 2026-08-02): the first turn of a (agent, user) pair must be preceded
+// by a localized "you are talking to an AI" disclosure carrying the
+// configured privacy-notice link. State is the in-memory turn-meta
+// tracker: a bridge restart re-discloses (over-disclosure is fine).
+describe("AI-Act first-contact disclosure (M-LEGAL-1)", () => {
+  function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
+    return { prompt } as unknown as SessionManager;
+  }
+  const okTurn: SessionManager["prompt"] = async (_a, _u, _t, onUpdate) => {
+    onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } as never);
+  };
+
+  it("sends a localized disclosure with the privacy link before the first reply", async () => {
+    const cfg = { ...makeConfig("x"), privacy_notice_url: "https://example.org/privacy" };
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(okTurn),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ciao, mi puoi aiutare?");
+    expect(sent[0]).toMatch(/assistente AI/i);
+    expect(sent[0]).toContain("https://example.org/privacy");
+    expect(sent.join("")).toContain("ok");
+  });
+
+  it("does not repeat the disclosure on subsequent turns", async () => {
+    const cfg = { ...makeConfig("x"), privacy_notice_url: "https://example.org/privacy" };
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(okTurn),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ciao, mi puoi aiutare?");
+    await d.handleMessage("doc-qa", "111", "e adesso?");
+    const disclosures = sent.filter((t) => t.includes("https://example.org/privacy"));
+    expect(disclosures.length).toBe(1);
+  });
+
+  it("omits the privacy link cleanly when not configured", async () => {
+    const cfg = makeConfig("x"); // no privacy_notice_url
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(okTurn),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "hello, can you help me?");
+    expect(sent[0]).toMatch(/AI assistant/i);
+    expect(sent[0]).not.toContain("undefined");
+  });
+
+  it("is not sent to users refused by the allowlist", async () => {
+    const cfg = { ...makeConfig("x"), privacy_notice_url: "https://example.org/privacy" };
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(okTurn),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "999-not-allowed", "hi");
+    expect(sent.length).toBe(1);
+    expect(sent[0]).not.toContain("https://example.org/privacy");
   });
 });

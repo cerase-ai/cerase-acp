@@ -58,6 +58,15 @@ export class TurnMetaTracker {
   private state = new Map<string, TurnState>();
 
   /**
+   * True once prefix() has recorded at least one turn for the
+   * (agent, user) pair. M-LEGAL-1 keys the one-time AI-transparency
+   * disclosure on this, so first-ness has a single source of truth.
+   */
+  hasSeen(agentId: string, userId: string): boolean {
+    return this.state.has(key(agentId, userId));
+  }
+
+  /**
    * Computes the meta block for `text` and records this turn's
    * timestamp for the (agent, user) key. The recording happens AFTER
    * the gap is computed so the prefix reflects the gap-since-previous,

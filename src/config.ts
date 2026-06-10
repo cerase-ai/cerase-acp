@@ -123,6 +123,11 @@ const BridgeConfigSchema = z
     // tolerate this without crash-looping.
     agents: z.array(AgentSchema),
     session: SessionSchema,
+    // M-LEGAL-1 (AI Act Art. 50): link appended to the first-contact
+    // AI-transparency disclosure. Rendered by the control-plane's
+    // RegenAgentsYaml from CERASE_PRIVACY_NOTICE_URL; when absent the
+    // disclosure is sent without a link.
+    privacy_notice_url: z.string().url().optional(),
   })
   .superRefine((cfg, ctx) => {
     const seen = new Set<string>();

@@ -73,6 +73,32 @@ export function pickEmptyMessage(text: string): string {
   return TURN_EMPTY[detectLanguage(text)];
 }
 
+// M-LEGAL-1 — AI Act Art. 50 transparency (deadline 2026-08-02): the
+// employee must be told, at the latest on first interaction, that they
+// are talking to an AI system — with a pointer to the privacy notice.
+const DISCLOSURE: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "ℹ️ Stai interagendo con un assistente AI (un sistema automatizzato), non con una persona.",
+  en: "ℹ️ You are interacting with an AI assistant (an automated system), not a human.",
+  es: "ℹ️ Estás interactuando con un asistente de IA (un sistema automatizado), no con una persona.",
+  fr: "ℹ️ Tu interagis avec un assistant IA (un système automatisé), pas avec une personne.",
+  unknown: "ℹ️ You are interacting with an AI assistant (an automated system), not a human.",
+};
+
+const DISCLOSURE_PRIVACY: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "Informativa privacy:",
+  en: "Privacy notice:",
+  es: "Aviso de privacidad:",
+  fr: "Notice de confidentialité :",
+  unknown: "Privacy notice:",
+};
+
+/** M-LEGAL-1: localized first-contact AI disclosure (+ optional link). */
+export function pickDisclosureMessage(text: string, privacyNoticeUrl?: string): string {
+  const lang = detectLanguage(text);
+  const base = DISCLOSURE[lang];
+  return privacyNoticeUrl ? `${base} ${DISCLOSURE_PRIVACY[lang]} ${privacyNoticeUrl}` : base;
+}
+
 export class Dispatcher {
   constructor(private deps: DispatcherDeps) {}
 
@@ -98,6 +124,17 @@ export class Dispatcher {
     }
 
     const send = this.deps.resolveSendTarget(agentId, userId);
+
+    // M-LEGAL-1: one-time AI-transparency disclosure on first contact.
+    // Keyed on the in-memory turn-meta state (checked BEFORE prefix()
+    // records this turn): a bridge restart re-discloses, which is
+    // harmless over-disclosure — silence would be the violation.
+    if (!this.deps.turnMeta.hasSeen(agentId, userId)) {
+      await send(pickDisclosureMessage(text, this.deps.config.privacy_notice_url)).catch((err) =>
+        logger.error({ err, agentId, userId }, "failed to deliver AI-disclosure message"),
+      );
+    }
+
     const queue = new SendQueue({ send });
     const buffer = new StreamBuffer({
       onFlush: (chunk) => queue.enqueue(chunk),
