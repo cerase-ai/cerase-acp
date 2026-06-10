@@ -1,7 +1,8 @@
 # cerase-acp
 
-In-house Discord-to-[ACP](https://agentclientprotocol.com/) bridge for
-[Cerase](https://gitlab.com/guidance-studio/software/cerase).
+In-house chat-to-[ACP](https://agentclientprotocol.com/) DM bridge for
+[Cerase](https://github.com/cerase-ai/cerase-core) — Discord, Telegram,
+Slack, and Google Workspace Chat.
 
 This is the **single TypeScript artefact** in the Cerase stack. It lives
 in its own repository so its build pipeline (npm, tsc, vitest) does not
@@ -12,10 +13,13 @@ it consumes OpenCode and LiteLLM.
 ## What it does
 
 For each configured agent template:
-- Connects a `discord.js` Client (DM intent only — no guild channels,
-  no slash commands, no buttons) with the bot token bound to that
-  template.
-- On `messageCreate` (DM): checks the per-agent `user_id` allowlist;
+- Connects the chat adapter selected by the agent's `channel:` key in
+  `agents.yaml` — `discord` (default; `discord.js` Client, DM intent
+  only — no guild channels, no slash commands, no buttons), `telegram`
+  (`telegraf`), `slack` (`@slack/bolt`), `workspace_chat` (Google
+  Workspace Chat via `googleapis`), or `web` — with the bot
+  token / credentials bound to that template.
+- On an inbound DM: checks the per-agent `user_id` allowlist;
   authorised → routes to a long-lived ACP session for the
   `(user, agent)` pair; unauthorised → polite refusal.
 - Spawns `opencode acp` lazily on first DM via the configured spawn
