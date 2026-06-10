@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { fileURLToPath } from "node:url";
-import { SessionManager, type TurnTelemetry } from "./session-manager.js";
+import { spawn } from "node:child_process";
+import { SessionManager, type TurnTelemetry, type SpawnFn } from "./session-manager.js";
 import type { BridgeConfig } from "./config.js";
 import type { CanonicalMessage } from "./reconciler.js";
 import type { RestEndpoint } from "./opencode-rest.js";
@@ -79,6 +80,32 @@ describe("SessionManager", () => {
     await mgr.prompt("doc-qa", "user-B", "ping");
     expect(mgr.activeSessionCount()).toBe(2);
   });
+
+  // M-ACP-2: two concurrent FIRST prompts for the same (agent,user) must
+  // not double-spawn the ACP child — the second would overwrite the first
+  // in the map and leak one orphan process + split the conversation.
+  it("M-ACP-2: concurrent first prompts spawn the child exactly once", async () => {
+    let spawnCount = 0;
+    const countingSpawn: SpawnFn = (command, args) => {
+      spawnCount += 1;
+      return spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+    };
+    mgr = new SessionManager(makeConfig({ reply: "x" }), countingSpawn);
+    await Promise.all([
+      mgr.prompt("doc-qa", "user-A", "first"),
+      mgr.prompt("doc-qa", "user-A", "also-first"),
+    ]);
+    expect(spawnCount).toBe(1);
+    expect(mgr.activeSessionCount()).toBe(1);
+  });
+
+  // M-ACP-2 (kill-on-failed-handshake) is covered by the production catch
+  // in spawnAndInit: a thrown initialize()/newSession() kills the child
+  // before rethrowing. A focused test is omitted because the only ways to
+  // force a handshake failure in this harness (instant-exit / missing
+  // binary) write to a closed pipe and surface a library-level EPIPE
+  // unhandled rejection that would dirty the suite — not worth the noise
+  // for a one-line guard.
 
   it("respawns transparently after the child crashes", async () => {
     // With the post-prompt drain (workaround for opencode upstream

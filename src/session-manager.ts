@@ -128,6 +128,9 @@ const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
  */
 export class SessionManager {
   private entries = new Map<string, SessionEntry>();
+  // M-ACP-2: in-flight spawn promises, keyed by session key, so
+  // concurrent first prompts share one spawn instead of double-spawning.
+  private inFlightSpawns = new Map<string, Promise<SessionEntry>>();
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
   private onTelemetry?: (t: TurnTelemetry) => void;
@@ -236,7 +239,20 @@ export class SessionManager {
     const key = sessionKey(agentId, userId);
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = await this.spawnAndInit(agent, userId);
+      // M-ACP-2: dedup concurrent first prompts. Without memoizing the
+      // in-flight spawn, two near-simultaneous DMs both pass the
+      // `!entry` check, both spawn a child, and the second `set`
+      // overwrites the first — leaking one orphan process and splitting
+      // the conversation across two sessions.
+      let pending = this.inFlightSpawns.get(key);
+      if (!pending) {
+        pending = this.spawnAndInit(agent, userId);
+        this.inFlightSpawns.set(key, pending);
+        pending.finally(() => {
+          if (this.inFlightSpawns.get(key) === pending) this.inFlightSpawns.delete(key);
+        });
+      }
+      entry = await pending;
       this.entries.set(key, entry);
     }
 
@@ -445,6 +461,18 @@ export class SessionManager {
       );
     }
 
+    // M-ACP-2: a child that dies mid-handshake (or mid-turn) leaves the
+    // ACP stream writing to a closed pipe → EPIPE. Swallow those at the
+    // child/stdin level so they surface as a rejected handshake/turn
+    // (handled below) instead of an unhandled process-level rejection
+    // that could crash the bridge.
+    child.on("error", (err) => {
+      logger.warn({ err, agentId: agent.id, userId }, "ACP child process error");
+    });
+    child.stdin.on("error", (err) => {
+      logger.warn({ err, agentId: agent.id, userId }, "ACP child stdin error (likely child exited)");
+    });
+
     // Wire the ACP client. The client handler implements the Client
     // interface: it forwards sessionUpdate notifications to the current
     // entry's onUpdate callback (the active prompt() invocation), and
@@ -495,23 +523,36 @@ export class SessionManager {
       stream,
     );
 
-    // ACP handshake
-    await connection.initialize({
-      protocolVersion: acp.PROTOCOL_VERSION,
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-    });
+    // ACP handshake. M-ACP-2: if initialize()/newSession() throws, the
+    // spawned child is still alive and unreferenced — kill it before
+    // rethrowing so repeated failed spawns don't accumulate orphans.
+    let sessionId: string;
+    try {
+      await connection.initialize({
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+      });
 
-    // `agent.cwd` is the path inside the agent container — DON'T use
-    // process.cwd() here, that would leak the host/bridge cwd into the
-    // ACP child's session state. Default `/root/cerase/workspace`
-    // comes from the config schema.
-    const { sessionId } = await connection.newSession({
-      cwd: agent.cwd,
-      mcpServers: [],
-    });
+      // `agent.cwd` is the path inside the agent container — DON'T use
+      // process.cwd() here, that would leak the host/bridge cwd into the
+      // ACP child's session state. Default `/root/cerase/workspace`
+      // comes from the config schema.
+      ({ sessionId } = await connection.newSession({
+        cwd: agent.cwd,
+        mcpServers: [],
+      }));
+    } catch (err) {
+      logger.error({ err, agentId: agent.id, userId }, "ACP handshake failed — killing child");
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // already gone
+      }
+      throw err;
+    }
 
     const entry: SessionEntry = {
       agentId: agent.id,
