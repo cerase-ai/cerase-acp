@@ -1,0 +1,18 @@
+# M-DEPS-1: weekly dependency updates for the DM bridge.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    labels: [deps, js]
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+    labels: [deps, docker]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 3
+    labels: [deps, ci]
