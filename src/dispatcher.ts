@@ -32,6 +32,28 @@ const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   unknown: "I'm not authorised to talk to you yet — ask your admin.",
 };
 
+// M-ACP-1: a turn that throws (opencode crash, ACP rejection, gateway
+// abort) must not leave the user staring at 👀 + a stopped typing
+// indicator. Localized so non-Italian users aren't replied to in mixed
+// language (same detectLanguage source as the refusal copy).
+const TURN_ERROR: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "⚠️ Si è verificato un errore, riprova tra poco.",
+  en: "⚠️ Something went wrong, please try again shortly.",
+  es: "⚠️ Se ha producido un error, inténtalo de nuevo en un momento.",
+  fr: "⚠️ Une erreur s'est produite, réessaie dans un instant.",
+  unknown: "⚠️ Something went wrong, please try again shortly.",
+};
+
+// M-ACP-1: a turn that completes but emits zero text chunks would
+// otherwise send nothing at all — indistinguishable from a dead bridge.
+const TURN_EMPTY: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "🤔 Non ho prodotto una risposta. Riprova o riformula la richiesta.",
+  en: "🤔 I didn't produce a reply. Try again or rephrase.",
+  es: "🤔 No he generado una respuesta. Inténtalo de nuevo o reformula.",
+  fr: "🤔 Je n'ai pas produit de réponse. Réessaie ou reformule.",
+  unknown: "🤔 I didn't produce a reply. Try again or rephrase.",
+};
+
 /**
  * Picks the polite-refusal copy matching the language detected in
  * `text`. Exported so the CLI (M7) uses the same source of truth as
@@ -39,6 +61,16 @@ const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
  */
 export function pickRefusalMessage(text: string): string {
   return REFUSAL[detectLanguage(text)];
+}
+
+/** M-ACP-1: localized "the turn failed" copy (see TURN_ERROR). */
+export function pickErrorMessage(text: string): string {
+  return TURN_ERROR[detectLanguage(text)];
+}
+
+/** M-ACP-1: localized "the turn produced nothing" copy (see TURN_EMPTY). */
+export function pickEmptyMessage(text: string): string {
+  return TURN_EMPTY[detectLanguage(text)];
 }
 
 export class Dispatcher {
@@ -76,15 +108,36 @@ export class Dispatcher {
 
     logger.info({ agentId, userId, textLen: text.length }, "dispatching to session manager");
 
+    // M-ACP-1: track whether the turn emitted anything and whether it
+    // failed, so we can surface a user-facing message instead of silence.
+    let produced = false;
+    let failed = false;
     try {
       await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+          produced = true;
           buffer.push(update.content.text);
         }
       });
+    } catch (err) {
+      failed = true;
+      logger.error({ err, agentId, userId }, "agent turn failed");
     } finally {
       buffer.end();
       await queue.drain();
+    }
+
+    // After any partial output has been flushed, tell the user what
+    // happened. Errors are best-effort: if even this send throws, the
+    // adapter's own catch logs it (no rethrow from here).
+    if (failed) {
+      await send(pickErrorMessage(text)).catch((sendErr) =>
+        logger.error({ err: sendErr, agentId, userId }, "failed to deliver turn-error message"),
+      );
+    } else if (!produced) {
+      await send(pickEmptyMessage(text)).catch((sendErr) =>
+        logger.error({ err: sendErr, agentId, userId }, "failed to deliver empty-reply message"),
+      );
     }
   }
 }

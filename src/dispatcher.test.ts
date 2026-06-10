@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import { Dispatcher } from "./dispatcher.js";
+import { Dispatcher, pickErrorMessage, pickEmptyMessage } from "./dispatcher.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import type { BridgeConfig } from "./config.js";
@@ -109,5 +109,70 @@ describe("Dispatcher", () => {
       resolveSendTarget: () => async () => {},
     });
     await expect(d.handleMessage("ghost", "111", "hi")).rejects.toThrow(/ghost/);
+  });
+
+  // M-ACP-1: an authorised turn that fails must surface a user-facing
+  // message instead of silent 👀 + typing then nothing. Centralised in
+  // the dispatcher so every ingress (Discord/Slack/Telegram/web/CLI/
+  // scheduled) gets it for free.
+  function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
+    return { prompt } as unknown as SessionManager;
+  }
+
+  it("M-ACP-1: a failed agent turn sends a localized error and does NOT rethrow", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(async () => {
+        throw new Error("opencode child crashed");
+      }),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    // Italian input → Italian error copy, and the promise resolves (no throw).
+    await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toBeUndefined();
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe(pickErrorMessage("ciao, come va?"));
+    expect(sent[0]).toMatch(/riprova|errore/i);
+  });
+
+  it("M-ACP-1: a turn that produced zero text chunks sends an empty-reply fallback", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      // resolve without ever emitting an agent_message_chunk
+      sessionManager: makeStubMgr(async () => {}),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ping");
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe(pickEmptyMessage("ping"));
+  });
+
+  it("M-ACP-1: a normal turn sends neither error nor empty fallback", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(async (_a, _u, _t, onUpdate) => {
+        onUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } } as never);
+      }),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ping");
+    const joined = sent.join("");
+    expect(joined).not.toBe(pickErrorMessage("ping"));
+    expect(joined).not.toBe(pickEmptyMessage("ping"));
+    expect(joined).toContain("hi");
   });
 });
