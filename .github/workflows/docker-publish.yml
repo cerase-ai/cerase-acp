@@ -21,8 +21,20 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/cerase-acp
 
+# M-CI-1: serialise publishes per ref so two rapid pushes can't race
+# and move :latest backwards. No cancel-in-progress — tag builds finish.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # M-CI-1: gate the publish on a green suite. needs: only works within
+  # one workflow, so call the reusable ci workflow and depend on it.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
   build-and-push:
+    needs: [gate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
