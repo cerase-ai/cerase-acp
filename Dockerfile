@@ -20,7 +20,7 @@
 # ---------- build stage ----------
 # OPT-22: bumped from node:20 — Node 22 LTS active, no reason to stay
 # on 20 on Ubuntu 26.04. Pure TypeScript build, no native deps.
-FROM node:22 AS build
+FROM node:26 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -32,7 +32,7 @@ RUN npm prune --omit=dev
 
 # ---------- runtime stage ----------
 # OPT-22: bumped from node:20-slim (see build-stage comment).
-FROM node:22-slim AS runtime
+FROM node:26-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini docker.io \
  && rm -rf /var/lib/apt/lists/*
