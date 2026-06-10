@@ -20,7 +20,7 @@ import { Dispatcher } from "./dispatcher.js";
 import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { startInternalServer, type InternalServer } from "./internal-server.js";
-import { needsApprovalLink, applyApprovalLink, fetchPendingApprovalLink } from "./approval-link.js";
+import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
 import { parseAttachments, hasAttachments } from "./attachment.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
 import { ConfigReloader } from "./config-reloader.js";
@@ -73,6 +73,32 @@ export interface ApplyConfigDiffDeps {
   adapters: Map<string, ChatAdapter>;
   createAdapter: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
   dispatcher: Dispatcher;
+}
+
+/**
+ * M-ACP-2 — bounded-retry adapter creation: one agent's bad token /
+ * transient platform error must not abort the whole reload (the
+ * remaining agents were never processed). One retry, then give up on
+ * THAT agent and continue; the failure is logged loudly (a missing
+ * adapter surfaces via the reload-status path).
+ */
+async function createAdapterWithRetry(
+  deps: ApplyConfigDiffDeps,
+  agent: AgentConfig,
+): Promise<ChatAdapter | null> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await deps.createAdapter(agent, deps.dispatcher);
+    } catch (err) {
+      logger.error(
+        { err, agentId: agent.id, attempt },
+        attempt === 1
+          ? "auto-reload: createAdapter failed — retrying once"
+          : "auto-reload: createAdapter failed twice — SKIPPING this agent (it will not receive DMs until the next reload)",
+      );
+    }
+  }
+  return null;
 }
 
 /**
@@ -140,7 +166,8 @@ export async function applyConfigDiff(
         // every classification path lands at a coherent state.
         deps.sessionManager.updateAllowlist(mod.agentId, fresh.allowed_users);
 
-        const adapter = await deps.createAdapter(fresh, deps.dispatcher);
+        const adapter = await createAdapterWithRetry(deps, fresh);
+        if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest
         deps.adapters.set(mod.agentId, adapter);
         try {
           await adapter.start();
@@ -162,7 +189,8 @@ export async function applyConfigDiff(
   //    already settled.
   for (const agent of diff.added) {
     deps.sessionManager.addAgent(agent);
-    const adapter = await deps.createAdapter(agent, deps.dispatcher);
+    const adapter = await createAdapterWithRetry(deps, agent);
+    if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest
     deps.adapters.set(agent.id, adapter);
     try {
       await adapter.start();
@@ -232,11 +260,18 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         let text = chunk;
         // HITL-3: approval link substitution (unchanged).
         if (controlPlaneSecret && needsApprovalLink(text)) {
-          const link = await fetchPendingApprovalLink(agentId, {
-            controlPlaneUrl,
-            internalSecret: controlPlaneSecret,
-          });
-          text = applyApprovalLink(text, link);
+          try {
+            const link = await fetchPendingApprovalLink(agentId, {
+              controlPlaneUrl,
+              internalSecret: controlPlaneSecret,
+            });
+            text = applyApprovalLink(text, link);
+          } catch (err) {
+            // M-ACP-2: fetch failed (≠ no pending approval) — explain
+            // instead of silently stripping the placeholder.
+            logger.warn({ err, agentId }, "approval-link fetch failed — substituting fallback note");
+            text = applyApprovalLinkFallback(text);
+          }
         }
         // ATTACH-1: upload workspace files referenced by [[attach: <path>]].
         // The agent emits the marker; we read the file from its slot

@@ -50,14 +50,30 @@ export async function fetchPendingApprovalLink(
   const url =
     `${opts.controlPlaneUrl.replace(/\/$/, "")}/api/internal/approval-pending-link` +
     `?agent_id=${encodeURIComponent(agentId)}`;
-  try {
-    const resp = await f(url, {
-      headers: { Authorization: `Bearer ${opts.internalSecret}` },
-    });
-    if (!resp.ok) return null;
-    const data = (await resp.json()) as { approval_link?: string | null };
-    return data.approval_link ?? null;
-  } catch {
-    return null;
+  // M-ACP-2: fetch FAILURE is not the same as "no pending approval" —
+  // returning null for both made the caller silently strip the
+  // placeholder and dead-end the HITL flow when the control-plane was
+  // merely unreachable. Failure now THROWS; the caller substitutes an
+  // explanatory fallback.
+  const resp = await f(url, {
+    headers: { Authorization: `Bearer ${opts.internalSecret}` },
+  });
+  if (!resp.ok) {
+    throw new Error(`approval-pending-link returned HTTP ${resp.status}`);
   }
+  const data = (await resp.json()) as { approval_link?: string | null };
+  return data.approval_link ?? null;
+}
+
+/**
+ * M-ACP-2 — replace the placeholder with an explanatory note when the
+ * link could not be fetched: the user still learns WHERE to approve.
+ */
+export function applyApprovalLinkFallback(text: string): string {
+  if (!text.includes(PLACEHOLDER)) return text;
+  return text
+    .split(PLACEHOLDER)
+    .join(
+      "⚠️ link di approvazione momentaneamente non disponibile — apri la coda Approvazioni nel pannello admin / approval link temporarily unavailable — open the Approvals queue in the admin panel",
+    );
 }

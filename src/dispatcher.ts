@@ -92,6 +92,34 @@ const DISCLOSURE_PRIVACY: Record<"it" | "en" | "es" | "fr" | "unknown", string> 
   unknown: "Privacy notice:",
 };
 
+// M-ACP-2 — dedicated copy for the 402/overquota chain: the credit
+// gate raises BudgetExceededError → the LLM call fails → opencode
+// errors the turn. Without classification the employee got the generic
+// "something went wrong" and retried forever.
+const TURN_NO_CREDITS: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "🪫 I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore (può ricaricarli dal pannello).",
+  en: "🪫 Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
+  es: "🪫 Los créditos de la organización se han agotado — avisa a tu administrador (puede recargarlos desde el panel).",
+  fr: "🪫 Les crédits de l'organisation sont épuisés — préviens ton administrateur (il peut recharger depuis le panneau).",
+  unknown: "🪫 Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
+};
+
+/** M-ACP-2: localized "no credits left" copy (see TURN_NO_CREDITS). */
+export function pickNoCreditsMessage(text: string): string {
+  return TURN_NO_CREDITS[detectLanguage(text)];
+}
+
+/**
+ * M-ACP-2 — recognise the credit-gate abort in a failed turn's error
+ * chain. The signatures come from litellm/hooks/cerase_credit_gate.py
+ * ("cerase credit gate: …") and LiteLLM's BudgetExceededError; the raw
+ * text survives into the ACP error message opencode reports.
+ */
+export function isCreditExhaustedError(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.message}` : String(err);
+  return /cerase credit gate|BudgetExceeded|credits? exhausted/i.test(text);
+}
+
 /** M-LEGAL-1: localized first-contact AI disclosure (+ optional link). */
 export function pickDisclosureMessage(text: string, privacyNoticeUrl?: string): string {
   const lang = detectLanguage(text);
@@ -149,6 +177,7 @@ export class Dispatcher {
     // failed, so we can surface a user-facing message instead of silence.
     let produced = false;
     let failed = false;
+    let creditExhausted = false;
     try {
       await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
@@ -158,7 +187,8 @@ export class Dispatcher {
       });
     } catch (err) {
       failed = true;
-      logger.error({ err, agentId, userId }, "agent turn failed");
+      creditExhausted = isCreditExhaustedError(err);
+      logger.error({ err, agentId, userId, creditExhausted }, "agent turn failed");
     } finally {
       buffer.end();
       await queue.drain();
@@ -168,7 +198,8 @@ export class Dispatcher {
     // happened. Errors are best-effort: if even this send throws, the
     // adapter's own catch logs it (no rethrow from here).
     if (failed) {
-      await send(pickErrorMessage(text)).catch((sendErr) =>
+      const copy = creditExhausted ? pickNoCreditsMessage(text) : pickErrorMessage(text);
+      await send(copy).catch((sendErr) =>
         logger.error({ err: sendErr, agentId, userId }, "failed to deliver turn-error message"),
       );
     } else if (!produced) {

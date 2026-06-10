@@ -16,6 +16,7 @@
 // Discord); this adapter just hands the user id and text to it.
 
 import { makeLogger } from "./logger.js";
+import { startTypingKeepalive } from "./typing-keepalive.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import type { ChatAdapter } from "./chat-adapter.js";
@@ -59,7 +60,24 @@ export function createTelegramAdapter(
           const userId = String(ctx.from.id);
           const text = ctx.message?.text ?? "";
           if (!text) return;
-          await dispatcher.handleMessage(agent.id, userId, text);
+          // M-ACP-2: Telegram shows "typing…" ~5s per sendChatAction —
+          // keep it alive for the duration of the turn, stopping on
+          // every exit path. Slack/Workspace Chat have NO bot-typing
+          // API for non-Socket-Mode... (Slack: typing events are
+          // RTM-only, deprecated; Workspace Chat: no API) — documented
+          // platform limit, no equivalent there.
+          const chatId = ctx.chat.id;
+          const stopTyping = startTypingKeepalive(
+            { sendTyping: () => bot.telegram.sendChatAction(chatId, "typing") },
+            // Telegram displays a chat action for ~5s (Discord ~10s) —
+            // tick inside that window so the indicator never flickers.
+            { intervalMs: 4_000, maxTicks: 75 },
+          );
+          try {
+            await dispatcher.handleMessage(agent.id, userId, text);
+          } finally {
+            stopTyping();
+          }
         } catch (err) {
           logger.error({ err, agentId: agent.id }, "telegram text handler threw");
         }

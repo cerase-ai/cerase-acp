@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SendQueue, chunkForDiscord } from "./send-queue.js";
+import { SendQueue, chunkForDiscord, DELIVERY_FAILURE_MARKER } from "./send-queue.js";
 
 describe("chunkForDiscord", () => {
   it("returns one chunk when text fits", () => {
@@ -121,8 +121,58 @@ describe("SendQueue", () => {
     q.enqueue("ok-1");
     q.enqueue("fail");
     q.enqueue("ok-2");
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(2_000);
     await q.drain();
-    expect(sent).toEqual(["ok-1", "ok-2"]);
+    // M-ACP-2: the permanently-failing chunk is retried once, then a
+    // visible delivery-failure marker is emitted; the queue continues.
+    expect(sent).toEqual(["ok-1", DELIVERY_FAILURE_MARKER, "ok-2"]);
+  });
+});
+
+// M-ACP-2 — a failed chunk is retried once; persistent failure emits a
+// visible delivery-failure marker instead of silently dropping mid-reply
+// content (the user used to see a reply with a hole in it).
+describe("SendQueue delivery retry (M-ACP-2)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("retries a failed chunk once and delivers it", async () => {
+    const received: string[] = [];
+    let failures = 1;
+    const q = new SendQueue({
+      send: async (text) => {
+        if (failures > 0) {
+          failures--;
+          throw new Error("platform hiccup");
+        }
+        received.push(text);
+      },
+    });
+    q.enqueue("hello");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await q.drain();
+    expect(received).toEqual(["hello"]);
+  });
+
+  it("emits the delivery-failure marker once when the retry also fails", async () => {
+    const received: string[] = [];
+    let failures = 2; // first attempt + retry of chunk 1
+    const q = new SendQueue({
+      send: async (text) => {
+        if (failures > 0) {
+          failures--;
+          throw new Error("platform down");
+        }
+        received.push(text);
+      },
+    });
+    q.enqueue("lost chunk");
+    q.enqueue("second chunk");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await q.drain();
+    expect(received).toContain(DELIVERY_FAILURE_MARKER);
+    expect(received).toContain("second chunk");
+    expect(received).not.toContain("lost chunk");
+    expect(received.filter((t) => t === DELIVERY_FAILURE_MARKER).length).toBe(1);
   });
 });

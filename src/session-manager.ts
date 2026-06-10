@@ -92,6 +92,15 @@ export interface SessionManagerOptions {
    * then quiet).
    */
   endpointResolver?: (containerName: string) => RestEndpoint | null;
+  /**
+   * M-ACP-2 — per-turn watchdog: a hung opencode child used to block
+   * that user's PromptQueue forever (until the idle kill). When
+   * `connection.prompt()` hasn't resolved within this budget the child
+   * is killed, the turn rejects (the dispatcher sends the localized
+   * error) and the next prompt respawns. Defaults to 10 minutes —
+   * generous for long tool-using turns; override in tests.
+   */
+  turnTimeoutMs?: number;
 }
 
 /**
@@ -147,7 +156,10 @@ export class SessionManager {
     this.onTelemetry = options?.onTelemetry;
     this.canonicalFetcher = options?.canonicalFetcher ?? defaultFetcher;
     this.endpointResolver = options?.endpointResolver ?? defaultEndpointForAgent;
+    this.turnTimeoutMs = options?.turnTimeoutMs ?? 10 * 60 * 1000;
   }
+
+  private turnTimeoutMs: number;
 
   activeSessionCount(): number {
     return this.entries.size;
@@ -303,10 +315,45 @@ export class SessionManager {
       let reconciledTextBytes = 0;
       let reconciledReasoningBytes = 0;
       try {
-        const response = await entry!.connection.prompt({
-          sessionId: entry!.sessionId,
-          prompt: [{ type: "text", text }],
+        // M-ACP-2: race the prompt RPC against the watchdog. On
+        // timeout, SIGTERM the child — its exit handler drops the
+        // session from the map, so the next prompt respawns cleanly.
+        let watchdogId: NodeJS.Timeout | undefined;
+        const watchdog = new Promise<never>((_, reject) => {
+          watchdogId = setTimeout(() => {
+            logger.error(
+              { agentId: agent.id, userId, timeoutMs: this.turnTimeoutMs },
+              "turn watchdog fired — killing the hung opencode child",
+            );
+            try {
+              entry!.child.kill("SIGTERM");
+            } catch {
+              /* already dead */
+            }
+            // Drop the session NOW (the child's exit handler would do it
+            // asynchronously): a prompt arriving right after the kill must
+            // respawn, not adopt the dying connection.
+            const k = sessionKey(agent.id, userId);
+            if (this.entries.get(k) === entry) this.entries.delete(k);
+            reject(
+              new Error(
+                `turn watchdog: opencode child unresponsive for ${this.turnTimeoutMs}ms — killed and respawning on next prompt`,
+              ),
+            );
+          }, this.turnTimeoutMs);
         });
+        let response;
+        try {
+          response = await Promise.race([
+            entry!.connection.prompt({
+              sessionId: entry!.sessionId,
+              prompt: [{ type: "text", text }],
+            }),
+            watchdog,
+          ]);
+        } finally {
+          clearTimeout(watchdogId);
+        }
         t1 = Date.now();
         // Debug-log the stopReason for forensic visibility into
         // why a turn ended (end_turn, max_tokens, refusal, …).

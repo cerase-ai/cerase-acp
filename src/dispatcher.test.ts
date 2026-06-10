@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import { Dispatcher, pickErrorMessage, pickEmptyMessage, pickDisclosureMessage } from "./dispatcher.js";
+import { Dispatcher, pickErrorMessage, pickEmptyMessage, pickDisclosureMessage, pickNoCreditsMessage, isCreditExhaustedError } from "./dispatcher.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import type { BridgeConfig } from "./config.js";
@@ -258,5 +258,41 @@ describe("AI-Act first-contact disclosure (M-LEGAL-1)", () => {
     await d.handleMessage("doc-qa", "999-not-allowed", "hi");
     expect(sent.length).toBe(1);
     expect(sent[0]).not.toContain("https://example.org/privacy");
+  });
+});
+
+// M-ACP-2 — the 402/overquota chain (credit-gate BudgetExceededError →
+// LLM call fails → opencode errors the turn) used to surface as the
+// generic "something went wrong". The dispatcher now recognises the
+// credit-gate signature and sends dedicated low-credit copy.
+describe("402 overquota copy (M-ACP-2)", () => {
+  function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
+    return { prompt } as unknown as SessionManager;
+  }
+
+  it("isCreditExhaustedError recognises the credit-gate signatures", () => {
+    expect(isCreditExhaustedError(new Error('429 {"error":"cerase credit gate: tenant credits exhausted"}'))).toBe(true);
+    expect(isCreditExhaustedError(new Error("BudgetExceededError: over budget"))).toBe(true);
+    expect(isCreditExhaustedError(new Error("ECONNRESET"))).toBe(false);
+  });
+
+  it("a credit-exhausted turn sends the dedicated copy instead of the generic error", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(async () => {
+        throw new Error('agent turn failed: cerase credit gate: tenant credits exhausted (402)');
+      }),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ciao, mi aiuti con una cosa?");
+    // sent[0] is the first-contact disclosure; sent[1] the failure copy.
+    expect(sent[1]).toBe(pickNoCreditsMessage("ciao, mi aiuti con una cosa?"));
+    expect(sent[1]).toMatch(/credit/i);
+    expect(sent[1]).not.toBe(pickErrorMessage("ciao, mi aiuti con una cosa?"));
   });
 });

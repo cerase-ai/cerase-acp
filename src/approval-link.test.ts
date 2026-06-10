@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyApprovalLink, needsApprovalLink, fetchPendingApprovalLink } from "./approval-link.js";
+import { applyApprovalLink, applyApprovalLinkFallback, needsApprovalLink, fetchPendingApprovalLink } from "./approval-link.js";
 
 const LINK = "https://cerase.example/approve/abc.def";
 
@@ -57,13 +57,31 @@ describe("fetchPendingApprovalLink", () => {
     expect(await fetchPendingApprovalLink("a", opts(fakeFetch))).toBeNull();
   });
 
-  it("returns null on an HTTP error or exception (never throws)", async () => {
+  it("M-ACP-2: THROWS on an HTTP error or exception (fetch failure ≠ no pending approval)", async () => {
+    // Pre-M-ACP-2 both cases returned null and the caller silently
+    // stripped the placeholder — a dead-end HITL flow when the
+    // control-plane was merely unreachable.
     const errFetch = (async () => ({ ok: false, json: async () => ({}) }) as Response) as unknown as typeof fetch;
-    expect(await fetchPendingApprovalLink("a", opts(errFetch))).toBeNull();
+    await expect(fetchPendingApprovalLink("a", opts(errFetch))).rejects.toThrow();
 
     const throwFetch = (async () => {
       throw new Error("network");
     }) as unknown as typeof fetch;
-    expect(await fetchPendingApprovalLink("a", opts(throwFetch))).toBeNull();
+    await expect(fetchPendingApprovalLink("a", opts(throwFetch))).rejects.toThrow();
+  });
+});
+
+// M-ACP-2 — when the link fetch FAILS, the placeholder becomes an
+// explanatory fallback (point the user at the admin approval queue)
+// instead of disappearing.
+describe("applyApprovalLinkFallback", () => {
+  it("replaces the placeholder with the explanatory note", () => {
+    const out = applyApprovalLinkFallback("Approvi qui: {{APPROVAL_LINK}}");
+    expect(out).not.toContain("{{APPROVAL_LINK}}");
+    expect(out).toMatch(/approvazion/i); // points at the approval queue
+  });
+
+  it("leaves a message without the placeholder untouched", () => {
+    expect(applyApprovalLinkFallback("ciao")).toBe("ciao");
   });
 });

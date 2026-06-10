@@ -7,6 +7,8 @@
 // Env knobs:
 //   FAKE_REPLY              — reply text (default "hello world")
 //   FAKE_CHUNKS             — number of session/update chunks (default 3)
+//   FAKE_HANG_PROMPT        — set to "1" to NEVER answer session/prompt
+//                              (hung-child simulation for the watchdog)
 //   FAKE_CRASH_AFTER_PROMPT — set to "1" to exit(0) after responding to
 //                              one prompt. Used to test crash-respawn.
 //   FAKE_DELAY_MS_PER_CHUNK — sleep ms between chunks (default 0)
@@ -103,6 +105,10 @@ rl.on("line", async (line) => {
   }
 
   if (msg.method === "session/prompt") {
+    // M-ACP-2: simulate a hung opencode child — never answer the prompt
+    // RPC (the watchdog must kill us; without it the user's queue blocks
+    // forever).
+    if (process.env.FAKE_HANG_PROMPT === "1") return;
     const sessionId = msg.params?.sessionId;
     // Split REPLY into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.

@@ -350,3 +350,37 @@ describe("SessionManager", () => {
     }
   });
 });
+
+// M-ACP-2 — per-turn watchdog: a hung opencode child used to block that
+// user's PromptQueue FOREVER (until the idle kill). The watchdog kills
+// the child, rejects the turn (dispatcher sends the localized error)
+// and the session map is cleaned so the next prompt respawns.
+describe("per-turn watchdog (M-ACP-2)", () => {
+  it("kills a hung child and rejects the turn within the timeout", async () => {
+    const cfg: BridgeConfig = {
+      agents: [
+        {
+          id: "hung",
+          bot_token: "x",
+          allowed_users: ["1"],
+          cwd: "/home/agent/cerase/workspace",
+          spawn: {
+            command: "env",
+            args: ["--", "FAKE_HANG_PROMPT=1", "node", FAKE_CHILD],
+          },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    } as unknown as BridgeConfig;
+    const mgr = new SessionManager(cfg, undefined, { turnTimeoutMs: 500 });
+    try {
+      await expect(mgr.prompt("hung", "1", "ciao")).rejects.toThrow(/watchdog/i);
+      // The hung child was killed and the session dropped — a fresh
+      // prompt respawns (and hangs again → rejects again, proving the
+      // queue is NOT blocked forever).
+      await expect(mgr.prompt("hung", "1", "ancora")).rejects.toThrow(/watchdog/i);
+    } finally {
+      await mgr.shutdown();
+    }
+  }, 20_000);
+});

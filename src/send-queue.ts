@@ -51,7 +51,13 @@ export interface SendQueueOptions {
   minIntervalMs?: number;
 }
 
+/** M-ACP-2: sent once when a chunk is lost after its retry. */
+export const DELIVERY_FAILURE_MARKER =
+  "⚠️ Parte della risposta non è stata consegnata (errore del canale). / Part of the reply could not be delivered.";
+
 export class SendQueue {
+  private failureMarkerQueued = false;
+
   private items: string[] = [];
   private running = false;
   private lastSentAt = 0;
@@ -94,7 +100,18 @@ export class SendQueue {
         try {
           await this.send(chunk);
         } catch (err) {
-          logger.warn({ err }, "send-queue: send() threw — dropping chunk and continuing");
+          // M-ACP-2: one retry, then a VISIBLE delivery-failure marker
+          // (once per queue) instead of a silent hole in the reply.
+          logger.warn({ err }, "send-queue: send() threw — retrying once");
+          try {
+            await this.send(chunk);
+          } catch (retryErr) {
+            logger.error({ err: retryErr }, "send-queue: retry failed — dropping chunk, emitting marker");
+            if (!this.failureMarkerQueued) {
+              this.failureMarkerQueued = true;
+              this.items.unshift(DELIVERY_FAILURE_MARKER);
+            }
+          }
         }
         this.lastSentAt = Date.now();
       }
