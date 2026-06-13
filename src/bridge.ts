@@ -22,6 +22,7 @@ import { startTestInjectionServer, type TestInjectionServer } from "./test-injec
 import { startInternalServer, type InternalServer } from "./internal-server.js";
 import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
 import { parseAttachments, hasAttachments } from "./attachment.js";
+import { redactEngineIdentifiers } from "./egress-redaction.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { diffConfigs, type ConfigDiff } from "./config-diff.js";
@@ -298,6 +299,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // If the reply was only the marker, don't send an empty message.
           if (!text) return;
         }
+        // M-AGENT-VOICE-1 (A): deterministic engine-identity redaction, the
+        // last step before the reply leaves for any channel — never reveal we
+        // run on OpenCode, even if the model ignored the prompt-level rule.
+        text = redactEngineIdentifiers(text);
         return inner(text);
       };
     },
