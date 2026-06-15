@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import { Dispatcher, pickErrorMessage, pickEmptyMessage, pickDisclosureMessage, pickNoCreditsMessage, isCreditExhaustedError } from "./dispatcher.js";
+import { Dispatcher, pickErrorMessage, pickEmptyMessage, pickNoCreditsMessage, isCreditExhaustedError } from "./dispatcher.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import type { BridgeConfig } from "./config.js";
@@ -42,11 +42,10 @@ describe("Dispatcher", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
-    // M-LEGAL-1: first contact prepends the one-time AI disclosure.
-    expect(sent.length).toBeGreaterThanOrEqual(2);
-    expect(sent[0].text).toBe(pickDisclosureMessage("ping"));
-    // After joining + trimming the marker we should reconstruct the full reply.
-    const joined = sent.slice(1).map((s) => s.text.replace(/ ⏎$/u, "")).join("");
+    // M-ACP-DISCLOSURE-OFF: no AI disclosure is prepended — the reply is all
+    // that's sent. Join + trim the streaming marker to reconstruct it.
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    const joined = sent.map((s) => s.text.replace(/ ⏎$/u, "")).join("");
     expect(joined).toBe("ciao da fake-acp, tutto bene?");
   });
 
@@ -136,10 +135,9 @@ describe("Dispatcher", () => {
     });
     // Italian input → Italian error copy, and the promise resolves (no throw).
     await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toBeUndefined();
-    // sent[0] is the M-LEGAL-1 first-contact disclosure.
-    expect(sent.length).toBe(2);
-    expect(sent[1]).toBe(pickErrorMessage("ciao, come va?"));
-    expect(sent[1]).toMatch(/riprova|errore/i);
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe(pickErrorMessage("ciao, come va?"));
+    expect(sent[0]).toMatch(/riprova|errore/i);
   });
 
   it("M-ACP-1: a turn that produced zero text chunks sends an empty-reply fallback", async () => {
@@ -155,9 +153,8 @@ describe("Dispatcher", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
-    // sent[0] is the M-LEGAL-1 first-contact disclosure.
-    expect(sent.length).toBe(2);
-    expect(sent[1]).toBe(pickEmptyMessage("ping"));
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe(pickEmptyMessage("ping"));
   });
 
   it("M-ACP-1: a normal turn sends neither error nor empty fallback", async () => {
@@ -181,12 +178,11 @@ describe("Dispatcher", () => {
   });
 });
 
-// M-LEGAL-1 — AI Act Art. 50 first-contact transparency (deadline
-// 2026-08-02): the first turn of a (agent, user) pair must be preceded
-// by a localized "you are talking to an AI" disclosure carrying the
-// configured privacy-notice link. State is the in-memory turn-meta
-// tracker: a bridge restart re-discloses (over-disclosure is fine).
-describe("AI-Act first-contact disclosure (M-LEGAL-1)", () => {
+// M-ACP-DISCLOSURE-OFF — the AI-Act first-contact disclosure was removed: the
+// assistant is USER-facing (the employee was given it and knows it's an AI), so
+// Art. 50's "obvious from the context of use" exemption applies. Guard that no
+// AI-disclaimer copy is prepended to the first reply.
+describe("no AI disclaimer on first contact (M-ACP-DISCLOSURE-OFF)", () => {
   function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
     return { prompt } as unknown as SessionManager;
   }
@@ -194,8 +190,8 @@ describe("AI-Act first-contact disclosure (M-LEGAL-1)", () => {
     onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } as never);
   };
 
-  it("sends a localized disclosure with the privacy link before the first reply", async () => {
-    const cfg = { ...makeConfig("x"), privacy_notice_url: "https://example.org/privacy" };
+  it("sends only the reply on first contact — never a disclaimer", async () => {
+    const cfg = makeConfig("x");
     const sent: string[] = [];
     const d = new Dispatcher({
       config: cfg,
@@ -206,58 +202,8 @@ describe("AI-Act first-contact disclosure (M-LEGAL-1)", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ciao, mi puoi aiutare?");
-    expect(sent[0]).toMatch(/assistente AI/i);
-    expect(sent[0]).toContain("https://example.org/privacy");
-    expect(sent.join("")).toContain("ok");
-  });
-
-  it("does not repeat the disclosure on subsequent turns", async () => {
-    const cfg = { ...makeConfig("x"), privacy_notice_url: "https://example.org/privacy" };
-    const sent: string[] = [];
-    const d = new Dispatcher({
-      config: cfg,
-      sessionManager: makeStubMgr(okTurn),
-      turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async (text) => {
-        sent.push(text);
-      },
-    });
-    await d.handleMessage("doc-qa", "111", "ciao, mi puoi aiutare?");
-    await d.handleMessage("doc-qa", "111", "e adesso?");
-    const disclosures = sent.filter((t) => t.includes("https://example.org/privacy"));
-    expect(disclosures.length).toBe(1);
-  });
-
-  it("omits the privacy link cleanly when not configured", async () => {
-    const cfg = makeConfig("x"); // no privacy_notice_url
-    const sent: string[] = [];
-    const d = new Dispatcher({
-      config: cfg,
-      sessionManager: makeStubMgr(okTurn),
-      turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async (text) => {
-        sent.push(text);
-      },
-    });
-    await d.handleMessage("doc-qa", "111", "hello, can you help me?");
-    expect(sent[0]).toMatch(/AI assistant/i);
-    expect(sent[0]).not.toContain("undefined");
-  });
-
-  it("is not sent to users refused by the allowlist", async () => {
-    const cfg = { ...makeConfig("x"), privacy_notice_url: "https://example.org/privacy" };
-    const sent: string[] = [];
-    const d = new Dispatcher({
-      config: cfg,
-      sessionManager: makeStubMgr(okTurn),
-      turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async (text) => {
-        sent.push(text);
-      },
-    });
-    await d.handleMessage("doc-qa", "999-not-allowed", "hi");
-    expect(sent.length).toBe(1);
-    expect(sent[0]).not.toContain("https://example.org/privacy");
+    expect(sent.join("")).toBe("ok");
+    expect(sent.join("")).not.toMatch(/assistente AI|AI assistant|sistema automatizzato|automated system/i);
   });
 });
 
@@ -290,9 +236,9 @@ describe("402 overquota copy (M-ACP-2)", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ciao, mi aiuti con una cosa?");
-    // sent[0] is the first-contact disclosure; sent[1] the failure copy.
-    expect(sent[1]).toBe(pickNoCreditsMessage("ciao, mi aiuti con una cosa?"));
-    expect(sent[1]).toMatch(/credit/i);
-    expect(sent[1]).not.toBe(pickErrorMessage("ciao, mi aiuti con una cosa?"));
+    // M-ACP-DISCLOSURE-OFF: no disclosure — sent[0] is the failure copy.
+    expect(sent[0]).toBe(pickNoCreditsMessage("ciao, mi aiuti con una cosa?"));
+    expect(sent[0]).toMatch(/credit/i);
+    expect(sent[0]).not.toBe(pickErrorMessage("ciao, mi aiuti con una cosa?"));
   });
 });
