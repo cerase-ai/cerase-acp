@@ -47,3 +47,48 @@ export function redactEngineIdentifiers(text: string): string {
   }
   return out;
 }
+
+/**
+ * M-AGENT-SUMMARY-LEAK-1 — the engine's internal context-compaction summary.
+ *
+ * During mid-session compaction OpenCode produces a structured session-state
+ * block (Anchored Summary / Constraints & Preferences / Active Tools & State /
+ * Next Actions / Technical Notes / Workspace Paths & Files). It is an INTERNAL
+ * artefact, not an answer — yet it once surfaced as an assistant reply, leaking
+ * a masked PII token (`<nome …>`), workspace file paths, and tool state to the
+ * user. The fix is to recognise such a block at the egress boundary and
+ * withhold it entirely (a reply that IS the session summary is never
+ * user-facing — see the sibling call in bridge.ts).
+ *
+ * Detection is deliberately tolerant of FORMAT DRIFT — the section names can
+ * change on an OpenCode bump, so we don't anchor on one exact string. REVIEW
+ * this marker set on every OpenCode version bump (same review note as the
+ * engine-identifier list; it also lives in the deploy doc).
+ */
+const SUMMARY_SECTION_MARKERS: ReadonlyArray<RegExp> = [
+  /\banchored\s+summary\b/i,
+  /\bconstraints?\s*&\s*preferences\b/i,
+  /\bactive\s+tools?\s*&\s*state\b/i,
+  /\bnext\s+actions\b/i,
+  /\btechnical\s+notes\b/i,
+  /\bworkspace\s+paths?\s*(?:&|and)?\s*files\b/i,
+];
+// "Anchored Summary" is the block's title — on its own a strong signal.
+const STRONG_SUMMARY_MARKER = /\banchored\s+summary\b/i;
+// Below this many corroborating section headers we don't treat prose as a summary.
+const SUMMARY_HEADER_THRESHOLD = 3;
+
+/**
+ * Whether `text` is (or contains) the engine's internal compaction/session
+ * summary block. True ⇒ the bridge withholds the whole reply. Pure; empty
+ * input is not a summary.
+ */
+export function isInternalSummaryBlock(text: string): boolean {
+  if (!text || !text.trim()) return false;
+  if (STRONG_SUMMARY_MARKER.test(text)) return true;
+  let hits = 0;
+  for (const re of SUMMARY_SECTION_MARKERS) {
+    if (re.test(text)) hits += 1;
+  }
+  return hits >= SUMMARY_HEADER_THRESHOLD;
+}
