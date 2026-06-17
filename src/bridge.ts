@@ -21,6 +21,7 @@ import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { startInternalServer, type InternalServer } from "./internal-server.js";
 import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
+import { postSessionSummary } from "./session-summary.js";
 import { parseAttachments, hasAttachments } from "./attachment.js";
 import {
   isInternalSummaryBlock,
@@ -309,6 +310,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         // reply IS that block, withhold it entirely — it is not an answer.
         if (isInternalSummaryBlock(text)) {
           logger.warn({ agentId }, "egress: suppressed an internal engine summary/compaction block");
+          // M-SESSION-CONTEXT-HYGIENE-1: capture it instead of discarding — persist
+          // as the assistant's rolling summary over the internal channel.
+          // Fire-and-forget; a capture failure must not affect the turn.
+          if (controlPlaneSecret) {
+            void postSessionSummary(agentId, text, {
+              controlPlaneUrl,
+              internalSecret: controlPlaneSecret,
+            });
+          }
           return;
         }
         // M-AGENT-VOICE-1 (A): deterministic engine-identity redaction, the
