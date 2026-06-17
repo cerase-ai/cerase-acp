@@ -19,7 +19,7 @@
     "@agentclientprotocol/sdk": "0.22.1",
     "@slack/bolt": "^4.4.0",
     "discord.js": "^14.26.0",
-    "googleapis": "^160.0.0",
+    "googleapis": "^173.0.0",
     "pino": "^10.3.0",
     "telegraf": "^4.16.3",
     "yaml": "^2.9.0",
