@@ -22,7 +22,11 @@ import { startTestInjectionServer, type TestInjectionServer } from "./test-injec
 import { startInternalServer, type InternalServer } from "./internal-server.js";
 import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
 import { parseAttachments, hasAttachments } from "./attachment.js";
-import { isInternalSummaryBlock, redactEngineIdentifiers } from "./egress-redaction.js";
+import {
+  isInternalSummaryBlock,
+  redactEngineIdentifiers,
+  stripToolCallArtifacts,
+} from "./egress-redaction.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { diffConfigs, type ConfigDiff } from "./config-diff.js";
@@ -311,6 +315,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         // last step before the reply leaves for any channel — never reveal we
         // run on OpenCode, even if the model ignored the prompt-level rule.
         text = redactEngineIdentifiers(text);
+        // M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: a tool call the model spelled
+        // out as text (DSML) must never reach the chat. Strip it; if that was the
+        // whole reply, withhold it (it is scaffolding, not an answer).
+        text = stripToolCallArtifacts(text);
+        if (!text.trim()) {
+          logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
+          return;
+        }
         return inner(text);
       };
     },

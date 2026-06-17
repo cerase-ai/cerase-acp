@@ -1,5 +1,57 @@
 import { describe, it, expect } from "vitest";
-import { isInternalSummaryBlock, redactEngineIdentifiers } from "./egress-redaction.js";
+import {
+  isInternalSummaryBlock,
+  redactEngineIdentifiers,
+  stripToolCallArtifacts,
+} from "./egress-redaction.js";
+
+describe("M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: DSML tool-call leak scrub", () => {
+  it("strips a spelled-out DSML tool_calls block, keeping the surrounding prose", () => {
+    const text =
+      "Provo a collegare Gmail.\n" +
+      '<｜｜DSML｜｜tool_calls>\n' +
+      '<｜｜DSML｜｜invoke name="cerase-gateway_call_recipe">\n' +
+      '<｜｜DSML｜｜parameter name="args" string="false">{"recipe":"gmail.inbox"}</｜｜DSML｜｜parameter>\n' +
+      '<｜｜DSML｜｜parameter name="recipe_name" string="true">account.connect</｜｜DSML｜｜parameter>\n' +
+      '</｜｜DSML｜｜invoke>\n' +
+      '</｜｜DSML｜｜tool_calls>\n' +
+      "Fatto.";
+    const out = stripToolCallArtifacts(text);
+    expect(out).toContain("Provo a collegare Gmail.");
+    expect(out).toContain("Fatto.");
+    expect(out).not.toContain("DSML");
+    expect(out).not.toContain("account.connect");
+    expect(out).not.toContain("｜");
+  });
+
+  it("strips the exact leaked sample to nothing user-facing", () => {
+    const leak =
+      '<｜｜DSML｜｜tool_calls>\n' +
+      '<｜｜DSML｜｜invoke name="cerase-gateway_call_recipe">\n' +
+      '<｜｜DSML｜｜parameter name="args" string="false">{"recipe":"gmail.label","label":"default"}</｜｜DSML｜｜parameter>\n' +
+      '<｜｜DSML｜｜parameter name="recipe_name" string="true">account.connect</｜｜DSML｜｜parameter>\n' +
+      '</｜｜DSML｜｜invoke>\n' +
+      '</｜｜DSML｜｜tool_calls>\n' +
+      '<｜｜DSML｜｜tool_calls>\n' +
+      '<｜｜DSML｜｜invoke name="read">\n' +
+      '<｜｜DSML｜｜parameter name="filePath" string="true">/home/agent/x.js</｜｜DSML｜｜parameter>\n' +
+      '</｜｜DSML｜｜invoke>\n' +
+      '</｜｜DSML｜｜tool_calls>';
+    expect(stripToolCallArtifacts(leak).trim()).toBe("");
+  });
+
+  it("strips an unclosed / truncated DSML block to the end", () => {
+    const text = 'Ecco:\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name="x">truncated';
+    const out = stripToolCallArtifacts(text);
+    expect(out.trim()).toBe("Ecco:");
+    expect(out).not.toContain("DSML");
+  });
+
+  it("leaves normal prose unchanged (idempotent, no false positives)", () => {
+    const text = "Ti ho inviato il link per collegare Gmail: aprilo e autorizza.";
+    expect(stripToolCallArtifacts(text)).toBe(text);
+  });
+});
 
 describe("M-AGENT-VOICE-1: egress engine-identity redaction", () => {
   it("never leaves the bare engine name in a reply", () => {

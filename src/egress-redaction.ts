@@ -49,6 +49,39 @@ export function redactEngineIdentifiers(text: string): string {
 }
 
 /**
+ * M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4 — strip a tool call the model spelled
+ * out as TEXT (a "DSML" artifact) before it reaches the chat.
+ *
+ * When the model is given a poor affordance it sometimes emits the structured
+ * tool-call syntax as plain text instead of an actual tool call — e.g.
+ * `<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke …> …` (the markers use the fullwidth
+ * vertical bar U+FF5C). That is internal scaffolding, never an answer, and once
+ * leaked verbatim into a user's chat. This is the egress safety net (the real
+ * fix is the affordance — see [[feedback_never_blame_the_model]] — but the
+ * boundary must never pass raw tool-call syntax to a user).
+ *
+ * Deterministic + tolerant of drift: it targets any angle-bracket marker that
+ * contains "DSML". Pure + idempotent; if a reply is ONLY such a block the result
+ * is empty and the bridge withholds it.
+ */
+export function stripToolCallArtifacts(text: string): string {
+  if (!text) return text;
+  let out = text;
+  // 1) whole balanced `…tool_calls` blocks (the spelled-out tool call).
+  out = out.replace(
+    /<[^>]*?DSML[^>]*?tool_calls[^>]*?>[\s\S]*?<\/[^>]*?DSML[^>]*?tool_calls[^>]*?>/gi,
+    "",
+  );
+  // 2) an unbalanced / truncated opening block → strip to the end.
+  out = out.replace(/<[^>]*?DSML[^>]*?tool_calls[^>]*?>[\s\S]*$/gi, "");
+  // 3) any remaining stray DSML tags (invoke / parameter, balanced or not).
+  out = out.replace(/<\/?[^>]*?DSML[^>]*?>/gi, "");
+  // tidy the blank lines the removal may leave behind.
+  out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out;
+}
+
+/**
  * M-AGENT-SUMMARY-LEAK-1 — the engine's internal context-compaction summary.
  *
  * During mid-session compaction OpenCode produces a structured session-state
