@@ -14,6 +14,7 @@
 // /_test/inject (test-injection.ts).
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { makeLogger } from "./logger.js";
 import type { Dispatcher } from "./dispatcher.js";
 
@@ -36,7 +37,14 @@ export interface AgentLiveness {
   id: string;
   channel: string;
   attached: boolean;
-  ready: boolean;
+  /**
+   * `true`/`false` = the channel client reports a live/dropped connection;
+   * `null` = unknown (the adapter exposes no readiness signal yet). M-ACP-HARDEN-1
+   * fixed a false-green: non-Discord adapters used to report `true` unconditionally,
+   * so a Slack/Telegram gateway drop showed as healthy — they now report `null`
+   * (the control-plane renders "stato sconosciuto", not a green badge).
+   */
+  ready: boolean | null;
 }
 
 export interface InternalServerOptions {
@@ -50,6 +58,16 @@ export interface InternalServerOptions {
    * by `GET /internal/status`. Absent → the endpoint reports an empty set.
    */
   getAgentStatus?: () => AgentLiveness[];
+  /**
+   * M-ACP-HARDEN-1 — gate the inject endpoint on the agent's allowlist.
+   * Without it, an internal-secret holder could deliver arbitrary text to
+   * ANY user_id on ANY agent's channel (the model-turn path checks the
+   * allowlist, but the heads-up + system-message-only sends bypassed it).
+   * When provided, an inject for a (agentId,userId) not in the allowlist is
+   * rejected 403 before any send. Absent → no allowlist enforcement
+   * (back-compat for callers that pre-validate).
+   */
+  isAllowed?: (agentId: string, userId: string) => boolean;
 }
 
 /** The heads-up posted before processing when surface_in_chat is set. */
@@ -96,7 +114,9 @@ async function handleRequest(
   // to every route below.
   const auth = req.headers.authorization ?? "";
   const expected = `Bearer ${opts.internalSecret}`;
-  const authorized = Boolean(opts.internalSecret) && auth === expected;
+  // M-ACP-HARDEN-1: constant-time compare so the gate doesn't leak the
+  // secret's length/prefix through response timing.
+  const authorized = Boolean(opts.internalSecret) && safeEqual(auth, expected);
 
   // M-BRIDGE-LIVENESS-1 — GET /internal/status: the per-agent runtime
   // liveness the control-plane reads to render the "Connessione" badge and
@@ -128,6 +148,15 @@ async function handleRequest(
   const text = rec.text;
   if (typeof agentId !== "string" || typeof userId !== "string" || typeof text !== "string") {
     sendJson(res, 400, { error: "agent_id, user_id, text are required strings" });
+    return;
+  }
+  // M-ACP-HARDEN-1: the inject endpoint must not deliver text to an arbitrary
+  // user on an arbitrary agent's channel even with the internal secret.
+  // Enforce the agent's allowlist here — covering BOTH the system-message-only
+  // path and the heads-up + model-turn path — before any send happens.
+  if (opts.isAllowed && !opts.isAllowed(agentId, userId)) {
+    logger.info({ agentId, userId }, "inject rejected: user not in agent allowlist");
+    sendJson(res, 403, { error: "user not allowed for this agent" });
     return;
   }
   const surfaceInChat = rec.surface_in_chat !== false; // default true
@@ -175,6 +204,18 @@ async function handleRequest(
   }
 
   sendJson(res, 202, { status: "accepted" });
+}
+
+/**
+ * M-ACP-HARDEN-1 — constant-time string compare for the shared-secret gate.
+ * `timingSafeEqual` throws on length mismatch, so guard the length first
+ * (a length difference is not itself secret).
+ */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {

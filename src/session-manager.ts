@@ -142,6 +142,8 @@ export class SessionManager {
   private inFlightSpawns = new Map<string, Promise<SessionEntry>>();
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
+  // M-ACP-HARDEN-1: session.max_concurrent enforced as a real ceiling (LRU eviction).
+  private maxConcurrent: number;
   private onTelemetry?: (t: TurnTelemetry) => void;
   private canonicalFetcher: CanonicalFetcher;
   private endpointResolver: (containerName: string) => RestEndpoint | null;
@@ -153,6 +155,7 @@ export class SessionManager {
   ) {
     for (const a of config.agents) this.agentsById.set(a.id, a);
     this.idleMs = config.session.idle_timeout_minutes * 60 * 1000;
+    this.maxConcurrent = config.session.max_concurrent;
     this.onTelemetry = options?.onTelemetry;
     this.canonicalFetcher = options?.canonicalFetcher ?? defaultFetcher;
     this.endpointResolver = options?.endpointResolver ?? defaultEndpointForAgent;
@@ -260,11 +263,21 @@ export class SessionManager {
       if (!pending) {
         pending = this.spawnAndInit(agent, userId);
         this.inFlightSpawns.set(key, pending);
-        pending.finally(() => {
-          if (this.inFlightSpawns.get(key) === pending) this.inFlightSpawns.delete(key);
-        });
+        // M-ACP-CRASH-1: this finally-chain is a SECOND consumer of `pending`.
+        // If spawnAndInit rejects (a child dies mid-handshake, an EPIPE on a
+        // closed stdin, etc.), `await pending` below surfaces the rejection to
+        // the caller — but this discarded chain ALSO rejects, and with no
+        // `.catch` it becomes an UNHANDLED rejection that terminates the whole
+        // multi-tenant bridge (Node ≥15) over one user's recoverable per-turn
+        // failure. Swallow it here; the awaiter still handles the real error.
+        pending
+          .finally(() => {
+            if (this.inFlightSpawns.get(key) === pending) this.inFlightSpawns.delete(key);
+          })
+          .catch(() => {});
       }
       entry = await pending;
+      this.evictForCapacity(key);
       this.entries.set(key, entry);
     }
 
@@ -628,6 +641,44 @@ export class SessionManager {
 
     this.resetIdleTimer(entry);
     return entry;
+  }
+
+  /**
+   * M-ACP-HARDEN-1: enforce session.max_concurrent as a REAL ceiling. Before
+   * inserting a new (agent,user) session, while we're at/over the cap, evict
+   * the least-recently-used session (kill its child) to make room. Without
+   * this, `prompt()` spawned one `docker exec` child per (agent,user) with no
+   * bound — a DM flood / many inject user_ids meant unbounded process+memory
+   * growth. `exceptKey` is the session we're about to insert (not yet in the
+   * map) and is never chosen.
+   */
+  private evictForCapacity(exceptKey: string): void {
+    while (this.entries.size >= this.maxConcurrent) {
+      let lruKey: string | undefined;
+      let lruAt = Infinity;
+      for (const [k, e] of this.entries) {
+        if (k === exceptKey) continue;
+        if (e.lastTurnAt < lruAt) {
+          lruAt = e.lastTurnAt;
+          lruKey = k;
+        }
+      }
+      if (!lruKey) break;
+      const victim = this.entries.get(lruKey)!;
+      logger.warn(
+        { evicted: lruKey, max: this.maxConcurrent },
+        "max_concurrent reached — evicting least-recently-used ACP session",
+      );
+      if (victim.idleTimer) clearTimeout(victim.idleTimer);
+      if (!victim.closed && !victim.child.killed) {
+        try {
+          victim.child.kill("SIGTERM");
+        } catch {
+          // already gone
+        }
+      }
+      this.entries.delete(lruKey);
+    }
   }
 
   private resetIdleTimer(entry: SessionEntry): void {

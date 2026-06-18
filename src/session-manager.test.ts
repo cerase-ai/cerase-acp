@@ -160,6 +160,52 @@ describe("SessionManager", () => {
     await expect(mgr.prompt("ghost", "user-A", "x")).rejects.toThrow(/ghost/);
   });
 
+  // M-ACP-CRASH-1: a spawn/handshake failure must reject the turn for THAT
+  // user without emitting an unhandled rejection — the discarded
+  // inFlightSpawns.finally() chain used to reject unhandled and crash the
+  // whole bridge (every user disconnected) on one recoverable failure.
+  it("M-ACP-CRASH-1: a failed spawn rejects the turn with NO unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (r: unknown) => unhandled.push(r);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // A child with no stdin/stdout makes spawnAndInit throw synchronously
+      // (before the EPIPE-prone handshake path) — a clean way to force the
+      // spawn rejection without dirtying the suite with library EPIPE noise.
+      const badSpawn: SpawnFn = () =>
+        ({ stdin: null, stdout: null, on() {}, once() {}, kill() {} }) as unknown as ReturnType<SpawnFn>;
+      mgr = new SessionManager(makeConfig(), badSpawn);
+      await expect(mgr.prompt("doc-qa", "user-A", "x")).rejects.toThrow(/stdin\/stdout/);
+      // Let any stray unhandled rejection from the discarded finally-chain fire.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toHaveLength(0);
+      // inFlightSpawns was cleaned up → a retry re-spawns (and rejects again),
+      // still with no unhandled rejection.
+      await expect(mgr.prompt("doc-qa", "user-A", "y")).rejects.toThrow(/stdin\/stdout/);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  // M-ACP-HARDEN-1: session.max_concurrent is a real ceiling — a new session
+  // past the cap evicts the least-recently-used one instead of spawning an
+  // unbounded number of docker-exec children.
+  it("M-ACP-HARDEN-1: enforces max_concurrent by evicting the LRU session", async () => {
+    const cfg = makeConfig({ reply: "x" });
+    cfg.session.max_concurrent = 1;
+    mgr = new SessionManager(cfg);
+    await mgr.prompt("doc-qa", "user-A", "first");
+    expect(mgr.activeSessionCount()).toBe(1);
+    await mgr.prompt("doc-qa", "user-B", "second");
+    // The ceiling held: user-A was evicted to make room for user-B.
+    expect(mgr.activeSessionCount()).toBe(1);
+    const entries = (mgr as unknown as { entries: Map<string, unknown> }).entries;
+    expect(entries.has("doc-qa:user-B")).toBe(true);
+    expect(entries.has("doc-qa:user-A")).toBe(false);
+  });
+
   it("shutdown() kills all live children and clears state", async () => {
     mgr = new SessionManager(makeConfig({ reply: "x" }));
     await mgr.prompt("doc-qa", "user-A", "ping");

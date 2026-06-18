@@ -18,6 +18,7 @@ import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { Dispatcher } from "./dispatcher.js";
 import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
+import { isAllowed } from "./allowlist.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { startInternalServer, type InternalServer, type AgentLiveness } from "./internal-server.js";
 import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
@@ -352,7 +353,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       id,
       channel: config.agents.find((a) => a.id === id)?.channel ?? "unknown",
       attached: true,
-      ready: adapter.ready ? adapter.ready() : true,
+      // M-ACP-HARDEN-1: was `: true` — a hard-coded green for every adapter
+      // that doesn't implement ready() (telegram/slack/workspace), so a
+      // gateway drop on those channels showed as healthy. Report `null`
+      // (unknown) instead; only adapters with a real readiness signal
+      // (discord.js client.isReady()) report a concrete boolean.
+      ready: adapter.ready ? adapter.ready() : null,
     }));
 
   // SCHED-2 — productionised injection endpoint the control-plane
@@ -366,6 +372,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       internalSecret: acpInjectSecret,
       port: Number(process.env.CERASE_ACP_INTERNAL_PORT ?? "7476"),
       getAgentStatus,
+      // M-ACP-HARDEN-1: gate inject on the agent's allowlist (unknown agent → reject).
+      isAllowed: (agentId, userId) => {
+        try {
+          return isAllowed(config, agentId, userId);
+        } catch {
+          return false;
+        }
+      },
     });
     logger.info({ port: internalServer.port() }, "internal endpoints started (/internal/inject, /internal/status)");
   }
