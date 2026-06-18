@@ -101,6 +101,13 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
 
   return {
     agentId: agent.id,
+    // M-BRIDGE-LIVENESS-1 — the REAL gateway connection state: true once
+    // the client has logged in and the WebSocket is up, false after a drop
+    // or before login. This is what tells "Attivo ma disconnesso" apart
+    // from a healthy Luigi in the admin.
+    ready() {
+      return client.isReady();
+    },
     async start() {
       // bot_token is validated as required for channel='discord' in
       // config.ts superRefine, so the optional-string type assertion

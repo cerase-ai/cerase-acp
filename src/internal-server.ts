@@ -24,12 +24,32 @@ export interface InternalServer {
   close(): Promise<void>;
 }
 
+/**
+ * M-BRIDGE-LIVENESS-1 — one agent's REAL runtime state on the bridge.
+ * `attached` = an adapter is held for it; `ready` = its channel client
+ * reports a live connection right now (discord.js `client.isReady()`).
+ * The field is channel-agnostic (`ready`, not `discordReady`): the bridge
+ * is multi-channel and the control-plane maps it to a single "Connessione"
+ * badge regardless of platform.
+ */
+export interface AgentLiveness {
+  id: string;
+  channel: string;
+  attached: boolean;
+  ready: boolean;
+}
+
 export interface InternalServerOptions {
   dispatcher: Dispatcher;
   /** Shared secret required in the Authorization: Bearer header. */
   internalSecret: string;
   port?: number;
   host?: string;
+  /**
+   * M-BRIDGE-LIVENESS-1 — supplies the per-agent liveness snapshot served
+   * by `GET /internal/status`. Absent → the endpoint reports an empty set.
+   */
+  getAgentStatus?: () => AgentLiveness[];
 }
 
 /** The heads-up posted before processing when surface_in_chat is set. */
@@ -72,15 +92,31 @@ async function handleRequest(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
+  // Shared-secret gate (cluster-only endpoints) — evaluated once, applied
+  // to every route below.
+  const auth = req.headers.authorization ?? "";
+  const expected = `Bearer ${opts.internalSecret}`;
+  const authorized = Boolean(opts.internalSecret) && auth === expected;
+
+  // M-BRIDGE-LIVENESS-1 — GET /internal/status: the per-agent runtime
+  // liveness the control-plane reads to render the "Connessione" badge and
+  // flag "Attivo ma disconnesso". Read-only; same shared-secret gate.
+  if (req.method === "GET" && url.pathname === "/internal/status") {
+    if (!authorized) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const agents = opts.getAgentStatus ? opts.getAgentStatus() : [];
+    sendJson(res, 200, { agents });
+    return;
+  }
+
   if (req.method !== "POST" || url.pathname !== "/internal/inject") {
     sendJson(res, 404, { error: "not found" });
     return;
   }
 
-  // Shared-secret gate (cluster-only endpoint).
-  const auth = req.headers.authorization ?? "";
-  const expected = `Bearer ${opts.internalSecret}`;
-  if (!opts.internalSecret || auth !== expected) {
+  if (!authorized) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }

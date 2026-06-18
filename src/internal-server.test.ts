@@ -102,3 +102,82 @@ describe("internal-server /internal/inject", () => {
     expect(resp.status).toBe(404);
   });
 });
+
+// M-BRIDGE-LIVENESS-1 — GET /internal/status surfaces the REAL per-agent
+// runtime liveness (attached + client-ready) so the control-plane can show
+// "Attivo ma disconnesso" instead of a green badge over a down bridge.
+describe("internal-server /internal/status", () => {
+  let server: InternalServer;
+  let base: string;
+  const liveAgents = [
+    { id: "agent-1", channel: "discord", attached: true, ready: true },
+    { id: "agent-2", channel: "telegram", attached: true, ready: false },
+  ];
+
+  beforeEach(async () => {
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => liveAgents,
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const getStatus = (auth = `Bearer ${SECRET}`) =>
+    fetch(`${base}/internal/status`, { headers: { authorization: auth } });
+
+  it("401s without the shared secret", async () => {
+    const resp = await getStatus("Bearer wrong");
+    expect(resp.status).toBe(401);
+  });
+
+  it("returns the per-agent liveness reported by getAgentStatus", async () => {
+    const resp = await getStatus();
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ agents: liveAgents });
+  });
+
+  it("reports an empty set when no agent is attached (the agents.yaml-blanked incident)", async () => {
+    const empty = await startInternalServer({
+      dispatcher: makeFakeDispatcher().dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [],
+    });
+    try {
+      const resp = await fetch(`http://127.0.0.1:${empty.port()}/internal/status`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      });
+      expect(resp.status).toBe(200);
+      expect(await resp.json()).toEqual({ agents: [] });
+    } finally {
+      await empty.close();
+    }
+  });
+
+  it("defaults to an empty set when no status provider is wired", async () => {
+    const noProvider = await startInternalServer({
+      dispatcher: makeFakeDispatcher().dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+    });
+    try {
+      const resp = await fetch(`http://127.0.0.1:${noProvider.port()}/internal/status`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      });
+      expect(resp.status).toBe(200);
+      expect(await resp.json()).toEqual({ agents: [] });
+    } finally {
+      await noProvider.close();
+    }
+  });
+});

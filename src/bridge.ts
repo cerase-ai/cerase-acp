@@ -19,7 +19,7 @@ import { TurnMetaTracker } from "./turn-meta.js";
 import { Dispatcher } from "./dispatcher.js";
 import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
-import { startInternalServer, type InternalServer } from "./internal-server.js";
+import { startInternalServer, type InternalServer, type AgentLiveness } from "./internal-server.js";
 import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
 import { postSessionSummary } from "./session-summary.js";
 import { parseAttachments, hasAttachments } from "./attachment.js";
@@ -342,17 +342,32 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
   }
 
+  // M-BRIDGE-LIVENESS-1 — the live per-agent liveness snapshot served by
+  // GET /internal/status. Source of truth = the `adapters` map (an agent
+  // dropped from agents.yaml is gone from here → the control-plane reads
+  // it as "Disconnesso"); the channel is joined from the live config and
+  // `ready` delegates to the adapter's own connection check.
+  const getAgentStatus = (): AgentLiveness[] =>
+    Array.from(adapters.entries()).map(([id, adapter]) => ({
+      id,
+      channel: config.agents.find((a) => a.id === id)?.channel ?? "unknown",
+      attached: true,
+      ready: adapter.ready ? adapter.ready() : true,
+    }));
+
   // SCHED-2 — productionised injection endpoint the control-plane
   // scheduled-message dispatcher POSTs to (shared-secret). Started when
-  // the internal secret is configured.
+  // the internal secret is configured. M-BRIDGE-LIVENESS-1 adds the
+  // read-only GET /internal/status liveness probe on the same server.
   let internalServer: InternalServer | undefined;
   if (acpInjectSecret) {
     internalServer = await startInternalServer({
       dispatcher: productionDispatcher,
       internalSecret: acpInjectSecret,
       port: Number(process.env.CERASE_ACP_INTERNAL_PORT ?? "7476"),
+      getAgentStatus,
     });
-    logger.info({ port: internalServer.port() }, "internal injection endpoint started (/internal/inject)");
+    logger.info({ port: internalServer.port() }, "internal endpoints started (/internal/inject, /internal/status)");
   }
 
   // Test-mode: start the test server BEFORE the adapters so it's

@@ -21,6 +21,15 @@ export interface ChatAdapter {
   start(): Promise<void>;
   stop(): Promise<void>;
   /**
+   * M-BRIDGE-LIVENESS-1 — does the underlying channel client report a live
+   * connection right now? The Discord adapter delegates to discord.js
+   * `client.isReady()` (true after login, false on a gateway drop), so the
+   * control-plane can tell "Attivo ma disconnesso" apart from a healthy
+   * agent. An adapter that doesn't implement it is treated as ready while
+   * it is held (best-effort — those channels expose no finer signal yet).
+   */
+  ready?(): boolean;
+  /**
    * The function the dispatcher uses to send a chunk to this user's DM.
    *
    * **OPT-67 typing-indicator contract (applies to ALL adapters that
