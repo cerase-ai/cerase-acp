@@ -55,23 +55,163 @@ For each configured agent template:
    DM reply  ◄─────────── discord.js Client.send()
 ```
 
+## Quick local setup (no Docker, no chat platform)
+
+You don't need Docker, Discord, or any chat platform to test cerase-acp
+end-to-end. Use `channel: web` (no credentials required) and point
+`spawn` at your local `opencode` binary.
+
+**1. Create a minimal `agents.yaml`:**
+
+```yaml
+agents:
+  - id: local
+    channel: web
+    allowed_users:
+      - "me"
+    spawn:
+      command: opencode
+      args: [acp]
+    cwd: /home/yourname/projects   # ACP session working directory
+
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 4
+```
+
+**2. Build and test:**
+
+```bash
+npm ci && npm run build
+
+# one-shot prompt
+./scripts/cerase-acp-cli prompt \
+  --config agents.yaml --agent local --user me "hello"
+
+# interactive REPL (single ACP child kept alive across turns —
+# conversation history works just like a real DM thread)
+./scripts/cerase-acp-cli repl \
+  --config agents.yaml --agent local --user me
+```
+
+To silence pino logs: `CERASE_ACP_LOG_LEVEL=silent` or `2>/dev/null`.
+
 ## Configuration
 
-Operators copy `agents.yaml.example` to `agents.yaml` and edit. The
-container expects the path at `/etc/cerase-acp/agents.yaml` (mounted
-read-only). See `agents.yaml.example` for the schema.
+Create an `agents.yaml` (copy from `agents.yaml.example`). Each agent
+is a typed template declaring its chat channel, credentials, allowlist
+of authorised users, ACP spawn command, and optional working directory.
 
-Required env (per agent template):
+The daemon reads the config path from `CERASE_ACP_CONFIG` (default:
+`/etc/cerase-acp/agents.yaml` in the container, `./agents.yaml` for local
+CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 
-- `DISCORD_BOT_TOKEN_<AGENT_ID>` — referenced in `agents.yaml` as
-  `${env:DISCORD_BOT_TOKEN_<AGENT_ID>}`.
+### Supported channels
 
-Optional env:
+| Channel | Required credentials | Adapter | Notes |
+|---------|---------------------|---------|-------|
+| `discord` (default) | `bot_token` | `discord.js` Client, DM-only | Gateway Intents must be enabled in Developer Portal |
+| `telegram` | `bot_token` | `telegraf` | BotFather token; DMs only |
+| `slack` | `bot_token` + `slack_app_token` | `@slack/bolt` Socket Mode | `xoxb-…` bot token + `xapp-…` app-level token |
+| `workspace_chat` | `workspace_chat_credentials_path` | Google Workspace Chat API | Path to service-account JSON inside the container |
+| `web` | *none* | Null-sink adapter | For local dev, CLI testing, and panel-only agents |
 
-- `BRIDGE_E2E_TEST=1` — enables the test-injection HTTP endpoint on
-  `:7474`. **Never set in production.** Used only by cerase's
-  `tests/e2e-discord/` to drive end-to-end tests without real Discord
-  traffic.
+### Agent fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `id` | yes | — | Alphanumeric + `-`. Must be unique. |
+| `channel` | no | `discord` | One of the channels above. |
+| `bot_token` | per channel | — | See channel table. Use `${env:VAR}` for env-var substitution. |
+| `allowed_users` | yes | — | List of user IDs authorised to DM this agent. Discord: snowflake string. Telegram: numeric chat ID. Slack: `U…` workspace ID. Web: any synthetic ID. |
+| `spawn.command` | yes | — | Command to start one ACP child. Container: `docker`. Local: `opencode` or path to binary. |
+| `spawn.args` | yes | — | Args passed to `spawn.command`. Container: `[exec, -i, cerase-agent-<id>, opencode, acp]`. Local: `[acp]`. |
+| `cwd` | no | `/root/cerase/workspace` | Working directory passed to the ACP child via `session/new`. For local installs, point this at a real project directory. |
+
+### Session settings
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `idle_timeout_minutes` | 60 | Kill an idle ACP child after this many minutes; respawn on next DM. |
+| `max_concurrent` | 16 | Safety ceiling on concurrent `(user, agent)` ACP sessions. |
+
+## Discord setup
+
+### 1. Create a Discord Application
+
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click **New Application**, give it a name
+3. Go to the **Bot** tab (left sidebar)
+4. Click **Reset Token** → copy the token
+5. Store it as an env var (the config reads `${env:CERASE_DISCORD_BOT_TOKEN}`):
+
+```bash
+read -s -p 'Discord bot token: ' TOKEN && echo && \
+  echo "export CERASE_DISCORD_BOT_TOKEN=$TOKEN" >> ~/.bashrc && \
+  source ~/.bashrc && unset TOKEN
+```
+
+### 2. Enable Gateway Intents
+
+In the **Bot** tab, scroll to **Privileged Gateway Intents** and enable:
+
+| Intent | Why |
+|--------|-----|
+| **MESSAGE CONTENT INTENT** | Required to read the text of incoming DMs |
+| **SERVER MEMBERS INTENT** | Required for `client.users.fetch()` to resolve DM channels |
+| **PRESENCE INTENT** | Not needed — leave off |
+
+*Note: if you see `Error: Used disallowed intents` on startup, one of
+these is still disabled.*
+
+### 3. Generate the OAuth2 invite URL
+
+1. Go to **OAuth2** (left sidebar)
+2. Under **Scopes**, check:
+   - `bot`
+   - `applications.commands`
+3. Under **Bot Permissions**, check:
+   - `Send Messages`
+   - `Read Message History`
+   - `Attach Files`
+   - `Add Reactions`
+4. Copy the generated URL at the bottom, open it in a browser, and
+   authorise the bot on a server (or skip this — users can DM the bot
+   directly without it being in any server).
+
+### 4. Get your Discord user ID
+
+1. In Discord, go to **Settings → Advanced** → enable **Developer Mode**
+2. Right-click your username anywhere → **Copy ID**
+3. Paste the ID into `agents.yaml` under `allowed_users`
+
+### 5. Example agents.yaml for Discord
+
+```yaml
+agents:
+  - id: my-agent
+    channel: discord
+    bot_token: ${env:CERASE_DISCORD_BOT_TOKEN}
+    allowed_users:
+      - "123456789012345678"   # your Discord user ID
+    spawn:
+      command: opencode
+      args: [acp]
+    cwd: /home/yourname/projects
+
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 4
+```
+
+### 6. Start the daemon
+
+```bash
+node dist/index.js
+```
+
+The bridge logs the agent count on startup. Send a DM to your bot —
+it should reply through the ACP pipeline. Press Ctrl+C to shut down.
 
 ## Build + run (local dev)
 
@@ -158,6 +298,26 @@ running.
 End-to-end tests against a real Compose stack (LiteLLM + opencode +
 bridge) live in `cerase/tests/e2e-discord/` and drive the bridge via
 the `BRIDGE_E2E_TEST` injection endpoint.
+
+## Troubleshooting
+
+### `config references ${env:VAR} but the environment variable is not set`
+
+The daemon tried to start but the env var referenced in `agents.yaml` is
+missing from the current shell environment. This happens when you add
+the variable to `~/.bashrc` but haven't reloaded your shell.
+
+```bash
+source ~/.bashrc   # reload, then retry
+```
+
+### `Error: Used disallowed intents` (Discord)
+
+One or more Gateway Intents are disabled in the Discord Developer Portal.
+Go to your application → **Bot** → **Privileged Gateway Intents** and
+enable all three required intents (see the [Gateway Intents
+section](#2-enable-gateway-intents) above). Restart the daemon after
+saving.
 
 ## License
 
