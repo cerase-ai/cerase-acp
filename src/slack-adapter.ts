@@ -24,6 +24,7 @@ import type { Dispatcher } from "./dispatcher.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { extractSlackFiles } from "./channel-attachments.js";
+import type { App } from "@slack/bolt";
 
 const logger = makeLogger("cerase-acp.slack");
 
@@ -37,8 +38,10 @@ export function createSlackAdapter(
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let app: any | undefined;
+  // Lazy-loaded SDK client. Real @slack/bolt App type — default
+  // StringIndexed generic matches the untyped message payloads below
+  // (M-AUDIT-acp-2).
+  let app: App | undefined;
 
   return {
     agentId: agent.id,
@@ -56,7 +59,7 @@ export function createSlackAdapter(
       // im.message = direct-message-to-our-bot. Slack also fires
       // `message` events for channel posts and threads; we filter to
       // channel_type === "im" so only DMs reach the dispatcher.
-      app.message(async (args: { message: Record<string, unknown> }) => {
+      app.message(async (args) => {
         try {
           const m = args.message;
           if (m.channel_type !== "im") return;

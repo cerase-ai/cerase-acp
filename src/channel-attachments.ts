@@ -10,12 +10,26 @@ export interface TelegramFileRef {
 }
 
 /**
+ * Structural view of a Telegram message for attachment extraction.
+ * The index signature lets callers pass full SDK message objects (which
+ * carry many extra fields) without excess-property friction, while the
+ * named fields stay precisely typed (M-AUDIT-acp-2).
+ */
+export interface TelegramMessageLike {
+  photo?: Array<{ file_id: string }>;
+  document?: { file_id: string; file_name?: string };
+  voice?: { file_id: string };
+  audio?: { file_id: string; file_name?: string };
+  video?: { file_id: string; file_name?: string };
+}
+
+/**
  * Pull attachment file_ids out of a Telegram message. Handles the common DM
  * media kinds (document / photo / voice / audio / video); a photo is an array
  * of sizes — take the largest (last). Names fall back to a type default when
  * Telegram omits `file_name` (photos/voice always do).
  */
-export function extractTelegramFiles(message: Record<string, any> | undefined): TelegramFileRef[] {
+export function extractTelegramFiles(message: TelegramMessageLike | undefined): TelegramFileRef[] {
   if (!message) return [];
   const out: TelegramFileRef[] = [];
 
@@ -45,11 +59,23 @@ export interface SlackFileRef {
 }
 
 /**
+ * Structural view of a Slack message event for attachment extraction
+ * (M-AUDIT-acp-2).
+ */
+interface SlackMessageLike {
+  files?: Array<{
+    name?: string | null;
+    url_private_download?: string;
+    url_private?: string;
+  }>;
+}
+
+/**
  * Pull downloadable files out of a Slack message event. Slack attaches them as
  * `files[]` with `url_private_download` (preferred) / `url_private`, both of
  * which require `Authorization: Bearer <bot token>`.
  */
-export function extractSlackFiles(message: Record<string, any> | undefined): SlackFileRef[] {
+export function extractSlackFiles(message: SlackMessageLike | undefined): SlackFileRef[] {
   if (!message || !Array.isArray(message.files)) return [];
   const out: SlackFileRef[] = [];
   for (const f of message.files) {
@@ -68,13 +94,24 @@ export interface WorkspaceChatAttachmentRef {
 }
 
 /**
+ * Structural view of a Google Chat message for attachment extraction
+ * (M-AUDIT-acp-2).
+ */
+export interface WorkspaceChatMessageLike {
+  attachment?: Array<{
+    contentName?: string;
+    attachmentDataRef?: { resourceName?: string };
+  }>;
+}
+
+/**
  * Pull uploaded-content attachments out of a Google Chat message. Each carries
  * `attachmentDataRef.resourceName`, downloaded via the Chat media API. Drive
  * attachments (driveDataRef, no resourceName) are skipped — they live in the
  * user's Drive, not fetchable as bot-uploaded media.
  */
 export function extractWorkspaceChatAttachments(
-  message: Record<string, any> | undefined,
+  message: WorkspaceChatMessageLike | undefined,
 ): WorkspaceChatAttachmentRef[] {
   if (!message || !Array.isArray(message.attachment)) return [];
   const out: WorkspaceChatAttachmentRef[] = [];

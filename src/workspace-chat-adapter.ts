@@ -28,11 +28,12 @@
 
 import { makeLogger } from "./logger.js";
 import type { AgentConfig } from "./config.js";
-import type { Dispatcher } from "./dispatcher.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import type { Dispatcher } from "./dispatcher.js";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
-import { extractWorkspaceChatAttachments } from "./channel-attachments.js";
+import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
+import type { chat_v1 } from "googleapis";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
 
@@ -50,7 +51,7 @@ const WORKSPACE_CHAT_PORT = Number(process.env.WORKSPACE_CHAT_PORT ?? "7475");
 interface WorkspaceChatEvent {
   type?: string;
   user?: { name?: string; email?: string };
-  message?: { text?: string };
+  message?: WorkspaceChatMessageLike & { text?: string };
 }
 
 interface WorkspaceChatReply {
@@ -117,8 +118,9 @@ export function createWorkspaceChatAdapter(
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let chatClient: any | undefined;
+  // Lazy-loaded SDK client. Real googleapis chat_v1.Chat type
+  // (M-AUDIT-acp-2).
+  let chatClient: chat_v1.Chat | undefined;
 
   return {
     agentId: agent.id,
@@ -149,7 +151,7 @@ export function createWorkspaceChatAdapter(
           const buffers: { name: string; bytes: Buffer }[] = [];
           for (const att of wcAttachments) {
             try {
-              const resp = await chatClient.media.download(
+              const resp = await chatClient!.media.download(
                 { resourceName: att.resourceName },
                 { responseType: "arraybuffer" },
               );
@@ -199,8 +201,14 @@ export function createWorkspaceChatAdapter(
         const space = await chatClient.spaces.findDirectMessage({
           name: `users/${userId}`,
         });
+        const spaceName = space.data.name ?? undefined;
+        if (!spaceName) {
+          throw new Error(
+            `workspace-chat: findDirectMessage returned no space name for user "${userId}"`,
+          );
+        }
         await chatClient.spaces.messages.create({
-          parent: space.data.name,
+          parent: spaceName,
           requestBody: { text: chunk },
         });
       };

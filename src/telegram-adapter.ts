@@ -21,7 +21,8 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
-import { extractTelegramFiles } from "./channel-attachments.js";
+import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
+import type { Telegraf } from "telegraf";
 
 const logger = makeLogger("cerase-acp.telegram");
 
@@ -35,10 +36,9 @@ export function createTelegramAdapter(
     );
   }
 
-  // Lazy-typed handle on telegraf so the import + type wiring stays
-  // out of the runtime closure when no agent uses Telegram.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let bot: any | undefined;
+  // Lazy-loaded SDK client. Real Telegraf type — the default Context
+  // generic is fine for the DM-only handlers below (M-AUDIT-acp-2).
+  let bot: Telegraf | undefined;
   let stopped = false;
 
   return {
@@ -68,7 +68,7 @@ export function createTelegramAdapter(
           // platform limit, no equivalent there.
           const chatId = ctx.chat.id;
           const stopTyping = startTypingKeepalive(
-            { sendTyping: () => bot.telegram.sendChatAction(chatId, "typing") },
+            { sendTyping: () => bot!.telegram.sendChatAction(chatId, "typing") },
             // Telegram displays a chat action for ~5s (Discord ~10s) —
             // tick inside that window so the indicator never flickers.
             { intervalMs: 4_000, maxTicks: 75 },
@@ -91,7 +91,7 @@ export function createTelegramAdapter(
       const mediaHandler = async (ctx: {
         from?: { id: number };
         chat?: { id: number };
-        message?: Record<string, unknown> & { caption?: string };
+        message?: TelegramMessageLike & { caption?: string };
         telegram: { getFileLink(fileId: string): Promise<URL> };
       }) => {
         try {
@@ -116,7 +116,7 @@ export function createTelegramAdapter(
           logger.error({ err, agentId: agent.id }, "telegram media handler threw");
         }
       };
-      for (const kind of ["document", "photo", "voice", "audio", "video"]) {
+      for (const kind of ["document", "photo", "voice", "audio", "video"] as const) {
         bot.on(kind, mediaHandler);
       }
 
