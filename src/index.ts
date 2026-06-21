@@ -36,10 +36,10 @@ async function main(): Promise<void> {
     logger.info({ signal }, "shutting down");
     try {
       await handle.shutdown();
+      process.exit(0);
     } catch (err) {
       logger.error({ err }, "error during shutdown");
-    } finally {
-      process.exit(0);
+      process.exit(1);
     }
   };
 

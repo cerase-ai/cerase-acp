@@ -318,6 +318,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             void postSessionSummary(agentId, text, {
               controlPlaneUrl,
               internalSecret: controlPlaneSecret,
+            }).catch((err) => {
+              logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
             });
           }
           return;
