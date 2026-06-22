@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, resolveEnvSubstitutions } from "./config.js";
 
 const VALID_YAML = `
@@ -27,7 +27,7 @@ session:
 `;
 
 describe("resolveEnvSubstitutions", () => {
-  it("replaces \${env:VAR} with process.env values", () => {
+  it("replaces ${env:VAR} with process.env values", () => {
     const env = { FOO: "bar", BAZ: "qux" };
     expect(resolveEnvSubstitutions("hello ${env:FOO}", env)).toBe("hello bar");
     expect(resolveEnvSubstitutions("${env:FOO}-${env:BAZ}", env)).toBe("bar-qux");
@@ -35,9 +35,7 @@ describe("resolveEnvSubstitutions", () => {
 
   it("leaves non-${env:...} text untouched", () => {
     expect(resolveEnvSubstitutions("plain text", {})).toBe("plain text");
-    expect(resolveEnvSubstitutions("$DOLLAR not substituted", {})).toBe(
-      "$DOLLAR not substituted",
-    );
+    expect(resolveEnvSubstitutions("$DOLLAR not substituted", {})).toBe("$DOLLAR not substituted");
   });
 
   it("throws a clear error when an ${env:VAR} reference is missing", () => {
@@ -67,18 +65,9 @@ describe("loadConfig", () => {
     expect(cfg.agents).toHaveLength(2);
     expect(cfg.agents[0]!.id).toBe("doc-qa");
     expect(cfg.agents[0]!.bot_token).toBe("tok-doc");
-    expect(cfg.agents[0]!.allowed_users).toEqual([
-      "111111111111111111",
-      "222222222222222222",
-    ]);
+    expect(cfg.agents[0]!.allowed_users).toEqual(["111111111111111111", "222222222222222222"]);
     expect(cfg.agents[0]!.spawn.command).toBe("docker");
-    expect(cfg.agents[0]!.spawn.args).toEqual([
-      "exec",
-      "-i",
-      "cerase-agent-doc-qa",
-      "opencode",
-      "acp",
-    ]);
+    expect(cfg.agents[0]!.spawn.args).toEqual(["exec", "-i", "cerase-agent-doc-qa", "opencode", "acp"]);
     expect(cfg.session.idle_timeout_minutes).toBe(60);
     expect(cfg.session.max_concurrent).toBe(16);
   });
@@ -143,9 +132,7 @@ session:
   it("throws when a required ${env:...} token is missing from process.env", () => {
     writeFileSync(path, VALID_YAML);
     // DISCORD_BOT_TOKEN_POLICY_QA intentionally absent
-    expect(() => loadConfig(path, { DISCORD_BOT_TOKEN_DOC_QA: "tok-doc" })).toThrow(
-      /DISCORD_BOT_TOKEN_POLICY_QA/,
-    );
+    expect(() => loadConfig(path, { DISCORD_BOT_TOKEN_DOC_QA: "tok-doc" })).toThrow(/DISCORD_BOT_TOKEN_POLICY_QA/);
   });
 
   it("accepts an empty agents array (zero-Agent boot is valid since v0.2)", () => {
@@ -296,8 +283,6 @@ session:
     );
     const cfg = loadConfig(path, {});
     expect(cfg.agents[0]!.channel).toBe("workspace_chat");
-    expect(cfg.agents[0]!.workspace_chat_credentials_path).toBe(
-      "/var/cerase/workspace-chat-creds/wc-agent.json",
-    );
+    expect(cfg.agents[0]!.workspace_chat_credentials_path).toBe("/var/cerase/workspace-chat-creds/wc-agent.json");
   });
 });

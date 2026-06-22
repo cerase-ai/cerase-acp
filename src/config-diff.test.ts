@@ -89,16 +89,12 @@ describe("diffConfigs", () => {
   });
 
   it("processes multiple agents independently in one diff pass", () => {
-    const prev = cfg([
-      baseAgent("a"),
-      baseAgent("b", { allowed_users: ["x"] }),
-      baseAgent("c", { bot_token: "old" }),
-    ]);
+    const prev = cfg([baseAgent("a"), baseAgent("b", { allowed_users: ["x"] }), baseAgent("c", { bot_token: "old" })]);
     const next = cfg([
-      baseAgent("a"),                                       // unchanged
-      baseAgent("b", { allowed_users: ["x", "y"] }),        // allowed_users_only
-      baseAgent("c", { bot_token: "new" }),                 // bot_token_or_spawn
-      baseAgent("d"),                                       // added
+      baseAgent("a"), // unchanged
+      baseAgent("b", { allowed_users: ["x", "y"] }), // allowed_users_only
+      baseAgent("c", { bot_token: "new" }), // bot_token_or_spawn
+      baseAgent("d"), // added
     ]);
     const d = diffConfigs(prev, next);
     expect(d.added.map((a) => a.id)).toEqual(["d"]);

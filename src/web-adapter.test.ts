@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { createWebAdapter } from "./web-adapter.js";
+import { describe, expect, it } from "vitest";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { createWebAdapter } from "./web-adapter.js";
 
 const AGENT = {
   id: "maintainer-1",

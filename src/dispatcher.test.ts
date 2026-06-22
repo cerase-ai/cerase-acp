@@ -1,9 +1,15 @@
-import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import { Dispatcher, pickErrorMessage, pickEmptyMessage, pickNoCreditsMessage, isCreditExhaustedError } from "./dispatcher.js";
+import { afterEach, describe, expect, it } from "vitest";
+import type { BridgeConfig } from "./config.js";
+import {
+  Dispatcher,
+  isCreditExhaustedError,
+  pickEmptyMessage,
+  pickErrorMessage,
+  pickNoCreditsMessage,
+} from "./dispatcher.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
-import type { BridgeConfig } from "./config.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -217,7 +223,9 @@ describe("402 overquota copy (M-ACP-2)", () => {
   }
 
   it("isCreditExhaustedError recognises the credit-gate signatures", () => {
-    expect(isCreditExhaustedError(new Error('429 {"error":"cerase credit gate: tenant credits exhausted"}'))).toBe(true);
+    expect(isCreditExhaustedError(new Error('429 {"error":"cerase credit gate: tenant credits exhausted"}'))).toBe(
+      true,
+    );
     expect(isCreditExhaustedError(new Error("BudgetExceededError: over budget"))).toBe(true);
     expect(isCreditExhaustedError(new Error("ECONNRESET"))).toBe(false);
   });
@@ -228,7 +236,7 @@ describe("402 overquota copy (M-ACP-2)", () => {
     const d = new Dispatcher({
       config: cfg,
       sessionManager: makeStubMgr(async () => {
-        throw new Error('agent turn failed: cerase credit gate: tenant credits exhausted (402)');
+        throw new Error("agent turn failed: cerase credit gate: tenant credits exhausted (402)");
       }),
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {

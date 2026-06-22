@@ -17,12 +17,12 @@
 // problems = same debug surface). A bash REPL with per-turn spawn
 // would test a fictional scenario where each turn is a fresh session.
 
-import { loadConfig, type BridgeConfig, type AgentConfig } from "./config.js";
+import * as readline from "node:readline";
 import { isAllowed } from "./allowlist.js";
+import { type AgentConfig, type BridgeConfig, loadConfig } from "./config.js";
+import { pickRefusalMessage } from "./dispatcher.js";
 import { SessionManager, type TurnTelemetry } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
-import { pickRefusalMessage } from "./dispatcher.js";
-import * as readline from "node:readline";
 
 export interface CliIO {
   stdoutWrite: (chunk: string) => void;
@@ -152,7 +152,7 @@ function loadAndValidate(
     // Refusal text language is keyed off the probe text passed in
     // (one-shot: the prompt text; repl: the first line typed or a
     // safe default). Caller exits 0 — refusal is a valid response.
-    io.stdoutWrite(pickRefusalMessage(refusalProbeText ?? "") + "\n");
+    io.stdoutWrite(`${pickRefusalMessage(refusalProbeText ?? "")}\n`);
     return { exitCode: 0 };
   }
   return { cfg, agent };

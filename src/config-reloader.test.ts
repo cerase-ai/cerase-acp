@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ConfigReloader } from "./config-reloader.js";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BridgeConfig } from "./config.js";
+import { ConfigReloader } from "./config-reloader.js";
 
 const VALID_YAML_A = `
 agents:

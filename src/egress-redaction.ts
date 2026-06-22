@@ -68,16 +68,16 @@ export function stripToolCallArtifacts(text: string): string {
   if (!text) return text;
   let out = text;
   // 1) whole balanced `…tool_calls` blocks (the spelled-out tool call).
-  out = out.replace(
-    /<[^>]*?DSML[^>]*?tool_calls[^>]*?>[\s\S]*?<\/[^>]*?DSML[^>]*?tool_calls[^>]*?>/gi,
-    "",
-  );
+  out = out.replace(/<[^>]*?DSML[^>]*?tool_calls[^>]*?>[\s\S]*?<\/[^>]*?DSML[^>]*?tool_calls[^>]*?>/gi, "");
   // 2) an unbalanced / truncated opening block → strip to the end.
   out = out.replace(/<[^>]*?DSML[^>]*?tool_calls[^>]*?>[\s\S]*$/gi, "");
   // 3) any remaining stray DSML tags (invoke / parameter, balanced or not).
   out = out.replace(/<\/?[^>]*?DSML[^>]*?>/gi, "");
   // tidy the blank lines the removal may leave behind.
-  out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  out = out
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   return out;
 }
 
@@ -117,7 +117,7 @@ const SUMMARY_HEADER_THRESHOLD = 3;
  * input is not a summary.
  */
 export function isInternalSummaryBlock(text: string): boolean {
-  if (!text || !text.trim()) return false;
+  if (!text?.trim()) return false;
   if (STRONG_SUMMARY_MARKER.test(text)) return true;
   let hits = 0;
   for (const re of SUMMARY_SECTION_MARKERS) {

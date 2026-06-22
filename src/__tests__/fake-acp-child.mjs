@@ -44,7 +44,7 @@ const LATE_BURST_INTERVAL_MS = parseInt(process.env.FAKE_LATE_BURST_INTERVAL_MS 
 const MESSAGE_ID = process.env.FAKE_MESSAGE_ID;
 
 const send = (msg) => {
-  process.stdout.write(JSON.stringify(msg) + "\n");
+  process.stdout.write(`${JSON.stringify(msg)}\n`);
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,7 +57,7 @@ rl.on("line", async (line) => {
   let msg;
   try {
     msg = JSON.parse(line);
-  } catch (e) {
+  } catch (_e) {
     return;
   }
 

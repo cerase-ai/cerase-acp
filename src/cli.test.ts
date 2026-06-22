@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "./cli.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -79,16 +79,7 @@ describe("runCli", () => {
 
   it("streams the agent reply to stdout and exits 0 on the happy path", async () => {
     const cfg = writeSampleConfig(dir, "ciao da fake-acp");
-    const out = await capture([
-      "prompt",
-      "--config",
-      cfg,
-      "--agent",
-      "demo",
-      "--user",
-      "111",
-      "ping",
-    ]);
+    const out = await capture(["prompt", "--config", cfg, "--agent", "demo", "--user", "111", "ping"]);
     expect(out.exitCode).toBe(0);
     // chunks may interleave but the concatenation must be exact
     expect(out.stdout.replace(/\n+$/u, "")).toBe("ciao da fake-acp");
@@ -96,16 +87,7 @@ describe("runCli", () => {
 
   it("message-only: reply on stdout, no `thinking:` block on stderr", async () => {
     const cfg = writeSampleConfig(dir, "regular reply");
-    const out = await capture([
-      "prompt",
-      "--config",
-      cfg,
-      "--agent",
-      "demo",
-      "--user",
-      "111",
-      "ping",
-    ]);
+    const out = await capture(["prompt", "--config", cfg, "--agent", "demo", "--user", "111", "ping"]);
     expect(out.exitCode).toBe(0);
     expect(out.stdout.replace(/\n+$/u, "")).toBe("regular reply");
     expect(out.stderr).not.toMatch(/thinking:/);
@@ -118,16 +100,7 @@ describe("runCli", () => {
     // reasoning-model `content` fields. User-facing stdout would
     // otherwise be empty.
     const cfg = writeSampleConfig(dir, "this is a thought", ["111"], "thought");
-    const out = await capture([
-      "prompt",
-      "--config",
-      cfg,
-      "--agent",
-      "demo",
-      "--user",
-      "111",
-      "ping",
-    ]);
+    const out = await capture(["prompt", "--config", cfg, "--agent", "demo", "--user", "111", "ping"]);
     expect(out.exitCode).toBe(0);
     // Stderr carries the thinking block (label + content)
     expect(out.stderr).toMatch(/thinking:/);
@@ -139,32 +112,14 @@ describe("runCli", () => {
 
   it("prints the polite refusal and still exits 0 for an unauthorised user", async () => {
     const cfg = writeSampleConfig(dir, "never seen");
-    const out = await capture([
-      "prompt",
-      "--config",
-      cfg,
-      "--agent",
-      "demo",
-      "--user",
-      "999",
-      "hi",
-    ]);
+    const out = await capture(["prompt", "--config", cfg, "--agent", "demo", "--user", "999", "hi"]);
     expect(out.exitCode).toBe(0);
     expect(out.stdout).toMatch(/not authorised|non sono autorizzato/i);
   });
 
   it("exits 1 with a clear error when the agent id is unknown", async () => {
     const cfg = writeSampleConfig(dir, "x");
-    const out = await capture([
-      "prompt",
-      "--config",
-      cfg,
-      "--agent",
-      "ghost",
-      "--user",
-      "111",
-      "hi",
-    ]);
+    const out = await capture(["prompt", "--config", cfg, "--agent", "ghost", "--user", "111", "hi"]);
     expect(out.exitCode).toBe(1);
     expect(out.stderr).toMatch(/ghost/);
   });
@@ -258,10 +213,7 @@ describe("runCli", () => {
     // earlier assertion (single sessionId) already proves the
     // tracker survived; this asserts the loop body did run twice.
     const cfg = writeSampleConfig(dir, "reply");
-    const out = await capture(
-      ["repl", "--config", cfg, "--agent", "demo", "--user", "111"],
-      ["a", "b", ""],
-    );
+    const out = await capture(["repl", "--config", cfg, "--agent", "demo", "--user", "111"], ["a", "b", ""]);
     expect(out.exitCode).toBe(0);
     const replies = (out.stdout.match(/reply/g) ?? []).length;
     expect(replies).toBe(2);
@@ -269,29 +221,20 @@ describe("runCli", () => {
 
   it("repl exits 0 on empty stdin (no first line)", async () => {
     const cfg = writeSampleConfig(dir, "x");
-    const out = await capture(
-      ["repl", "--config", cfg, "--agent", "demo", "--user", "111"],
-      [""],
-    );
+    const out = await capture(["repl", "--config", cfg, "--agent", "demo", "--user", "111"], [""]);
     expect(out.exitCode).toBe(0);
   });
 
   it("repl: unauthorised user gets the polite refusal once + exits 0 (no loop)", async () => {
     const cfg = writeSampleConfig(dir, "x");
-    const out = await capture(
-      ["repl", "--config", cfg, "--agent", "demo", "--user", "999"],
-      ["ciao"],
-    );
+    const out = await capture(["repl", "--config", cfg, "--agent", "demo", "--user", "999"], ["ciao"]);
     expect(out.exitCode).toBe(0);
     expect(out.stdout).toMatch(/non sono ancora autorizzato|not authorised/i);
   });
 
   it("repl: unknown agent id exits 1", async () => {
     const cfg = writeSampleConfig(dir, "x");
-    const out = await capture(
-      ["repl", "--config", cfg, "--agent", "ghost", "--user", "111"],
-      ["ciao"],
-    );
+    const out = await capture(["repl", "--config", cfg, "--agent", "ghost", "--user", "111"], ["ciao"]);
     expect(out.exitCode).toBe(1);
     expect(out.stderr).toMatch(/ghost/);
   });

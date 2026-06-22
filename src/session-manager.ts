@@ -1,17 +1,12 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
+import type { AgentConfig, BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
-import type { BridgeConfig, AgentConfig } from "./config.js";
+import { type CanonicalFetcher, defaultEndpointForAgent, defaultFetcher, type RestEndpoint } from "./opencode-rest.js";
+import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { reconcile, type SeenState } from "./reconciler.js";
-import {
-  defaultEndpointForAgent,
-  defaultFetcher,
-  type CanonicalFetcher,
-  type RestEndpoint,
-} from "./opencode-rest.js";
-import { decidePermissionOutcome } from "./permission-policy.js";
 
 const logger = makeLogger("cerase-acp.session-manager");
 
@@ -109,8 +104,7 @@ export interface SessionManagerOptions {
  */
 export type SpawnFn = (command: string, args: string[]) => ChildProcess;
 
-const defaultSpawn: SpawnFn = (command, args) =>
-  spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+const defaultSpawn: SpawnFn = (command, args) => spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
 
 interface SessionEntry {
   agentId: string;
@@ -242,12 +236,7 @@ export class SessionManager {
     agent.allowed_users = [...allowedUsers];
   }
 
-  async prompt(
-    agentId: string,
-    userId: string,
-    text: string,
-    onUpdate?: SessionUpdateHandler,
-  ): Promise<PromptResult> {
+  async prompt(agentId: string, userId: string, text: string, onUpdate?: SessionUpdateHandler): Promise<PromptResult> {
     const agent = this.agentsById.get(agentId);
     if (!agent) throw new Error(`unknown agent id "${agentId}"`);
 
@@ -355,7 +344,7 @@ export class SessionManager {
             );
           }, this.turnTimeoutMs);
         });
-        let response;
+        let response: Awaited<ReturnType<NonNullable<typeof entry>["connection"]["prompt"]>>;
         try {
           response = await Promise.race([
             entry!.connection.prompt({
@@ -370,10 +359,7 @@ export class SessionManager {
         t1 = Date.now();
         // Debug-log the stopReason for forensic visibility into
         // why a turn ended (end_turn, max_tokens, refusal, …).
-        logger.debug(
-          { agentId: agent.id, userId, stopReason: response.stopReason },
-          "session/prompt resolved",
-        );
+        logger.debug({ agentId: agent.id, userId, stopReason: response.stopReason }, "session/prompt resolved");
         // Drain: wait until the stream has been idle for
         // POST_PROMPT_IDLE_MS, or until POST_PROMPT_MAX_DRAIN_MS
         // elapses as a safety ceiling. Captures the post-RPC
@@ -422,11 +408,7 @@ export class SessionManager {
           const endpoint = this.endpointResolver(containerName);
           if (endpoint) {
             try {
-              const canonical = await this.canonicalFetcher(
-                endpoint,
-                entry!.sessionId,
-                assistantMessageId,
-              );
+              const canonical = await this.canonicalFetcher(endpoint, entry!.sessionId, assistantMessageId);
               if (canonical) {
                 const deltas = reconcile(seen, canonical);
                 for (const d of deltas) {
@@ -446,10 +428,7 @@ export class SessionManager {
                 }
               }
             } catch (err) {
-              logger.warn(
-                { agentId: agent.id, err: (err as Error).message },
-                "M16 reconciliation failed — skipped",
-              );
+              logger.warn({ agentId: agent.id, err: (err as Error).message }, "M16 reconciliation failed — skipped");
             }
           }
         }
@@ -510,15 +489,10 @@ export class SessionManager {
   }
 
   private async spawnAndInit(agent: AgentConfig, userId: string): Promise<SessionEntry> {
-    logger.info(
-      { agentId: agent.id, userId, command: agent.spawn.command },
-      "spawning ACP child",
-    );
+    logger.info({ agentId: agent.id, userId, command: agent.spawn.command }, "spawning ACP child");
     const child = this.spawnFn(agent.spawn.command, agent.spawn.args);
     if (!child.stdin || !child.stdout) {
-      throw new Error(
-        `spawned ACP child for "${agent.id}" has no stdin/stdout — check spawn.command + stdio config`,
-      );
+      throw new Error(`spawned ACP child for "${agent.id}" has no stdin/stdout — check spawn.command + stdio config`);
     }
 
     // M-ACP-2: a child that dies mid-handshake (or mid-turn) leaves the
@@ -551,10 +525,7 @@ export class SessionManager {
           // receive. Useful when investigating "where did the reply
           // go?" — non-text or non-agent_message_chunk updates that
           // the CLI silently drops show up here.
-          logger.debug(
-            { agentId: agent.id, userId, update: params.update },
-            "sessionUpdate received",
-          );
+          logger.debug({ agentId: agent.id, userId, update: params.update }, "sessionUpdate received");
           entryRef?.onUpdate?.(params.update);
         },
         async requestPermission(params: acp.RequestPermissionRequest) {
@@ -570,10 +541,7 @@ export class SessionManager {
               agentId: agent.id,
               userId,
               toolCallId: params.toolCall?.toolCallId,
-              outcome:
-                outcome.outcome === "selected"
-                  ? `selected:${outcome.optionId}`
-                  : outcome.outcome,
+              outcome: outcome.outcome === "selected" ? `selected:${outcome.optionId}` : outcome.outcome,
             },
             "agent requested permission in-DM — auto-decided via permission-policy",
           );
@@ -629,10 +597,7 @@ export class SessionManager {
     // Crash listener: remove from map on exit so the next prompt
     // respawns transparently.
     child.once("exit", (code, signal) => {
-      logger.info(
-        { agentId: agent.id, userId, code, signal },
-        "ACP child exited",
-      );
+      logger.info({ agentId: agent.id, userId, code, signal }, "ACP child exited");
       entry.closed = true;
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
       const key = sessionKey(agent.id, userId);
@@ -684,10 +649,7 @@ export class SessionManager {
   private resetIdleTimer(entry: SessionEntry): void {
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     entry.idleTimer = setTimeout(() => {
-      logger.info(
-        { agentId: entry.agentId, userId: entry.userId },
-        "killing idle ACP child",
-      );
+      logger.info({ agentId: entry.agentId, userId: entry.userId }, "killing idle ACP child");
       try {
         entry.child.kill("SIGTERM");
       } catch {

@@ -54,10 +54,7 @@ export interface ReconciledDelta {
   text: string;
 }
 
-const collect = (
-  message: CanonicalMessage,
-  kind: "text" | "reasoning",
-): string => {
+const collect = (message: CanonicalMessage, kind: "text" | "reasoning"): string => {
   let acc = "";
   for (const part of message.parts) {
     if (part.type !== kind) continue;
@@ -86,10 +83,7 @@ const collect = (
  * return an empty delta to avoid duplicating visible text — better to
  * under-report.
  */
-export function reconcile(
-  seen: SeenState,
-  canonical: CanonicalMessage,
-): ReconciledDelta[] {
+export function reconcile(seen: SeenState, canonical: CanonicalMessage): ReconciledDelta[] {
   const out: ReconciledDelta[] = [];
   const canonicalText = collect(canonical, "text");
   const canonicalReasoning = collect(canonical, "reasoning");
@@ -97,10 +91,7 @@ export function reconcile(
   if (canonicalText.startsWith(seen.textSeen) && canonicalText.length > seen.textSeen.length) {
     out.push({ kind: "text", text: canonicalText.slice(seen.textSeen.length) });
   }
-  if (
-    canonicalReasoning.startsWith(seen.reasoningSeen) &&
-    canonicalReasoning.length > seen.reasoningSeen.length
-  ) {
+  if (canonicalReasoning.startsWith(seen.reasoningSeen) && canonicalReasoning.length > seen.reasoningSeen.length) {
     out.push({
       kind: "reasoning",
       text: canonicalReasoning.slice(seen.reasoningSeen.length),

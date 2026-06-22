@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { SessionManager, type TurnTelemetry, type SpawnFn } from "./session-manager.js";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "./config.js";
-import type { CanonicalMessage } from "./reconciler.js";
 import type { RestEndpoint } from "./opencode-rest.js";
+import type { CanonicalMessage } from "./reconciler.js";
+import { SessionManager, type SpawnFn, type TurnTelemetry } from "./session-manager.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -20,12 +20,10 @@ function makeConfig(overrides?: {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
   if (overrides?.crashAfterPrompt) env.push("FAKE_CRASH_AFTER_PROMPT=1");
-  if (overrides?.lateBurstText !== undefined)
-    env.push(`FAKE_LATE_BURST_TEXT=${overrides.lateBurstText}`);
+  if (overrides?.lateBurstText !== undefined) env.push(`FAKE_LATE_BURST_TEXT=${overrides.lateBurstText}`);
   if (overrides?.lateBurstIntervalMs !== undefined)
     env.push(`FAKE_LATE_BURST_INTERVAL_MS=${overrides.lateBurstIntervalMs}`);
-  if (overrides?.messageId !== undefined)
-    env.push(`FAKE_MESSAGE_ID=${overrides.messageId}`);
+  if (overrides?.messageId !== undefined) env.push(`FAKE_MESSAGE_ID=${overrides.messageId}`);
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -91,10 +89,7 @@ describe("SessionManager", () => {
       return spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
     };
     mgr = new SessionManager(makeConfig({ reply: "x" }), countingSpawn);
-    await Promise.all([
-      mgr.prompt("doc-qa", "user-A", "first"),
-      mgr.prompt("doc-qa", "user-A", "also-first"),
-    ]);
+    await Promise.all([mgr.prompt("doc-qa", "user-A", "first"), mgr.prompt("doc-qa", "user-A", "also-first")]);
     expect(spawnCount).toBe(1);
     expect(mgr.activeSessionCount()).toBe(1);
   });
@@ -150,8 +145,7 @@ describe("SessionManager", () => {
     // Reach into the private entries map for the assertion. Test-only,
     // accepted: it's the only path to the live sessionId without
     // changing the production API.
-    const entry = (mgr as unknown as { entries: Map<string, { sessionId: string }> }).entries
-      .get("doc-qa:user-A");
+    const entry = (mgr as unknown as { entries: Map<string, { sessionId: string }> }).entries.get("doc-qa:user-A");
     expect(entry?.sessionId).toBe("fake-session-cwd=/expected/path");
   });
 
@@ -226,9 +220,7 @@ describe("SessionManager", () => {
     //
     // Burst: 30 chars at 100ms intervals = 3000ms total post-end_turn.
     const lateBurst = "abcdefghij" + "klmnopqrst" + "uvwxyz0123";
-    mgr = new SessionManager(
-      makeConfig({ reply: "head=", lateBurstText: lateBurst, lateBurstIntervalMs: 100 }),
-    );
+    mgr = new SessionManager(makeConfig({ reply: "head=", lateBurstText: lateBurst, lateBurstIntervalMs: 100 }));
     const chunks: string[] = [];
     const result = await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
@@ -236,7 +228,7 @@ describe("SessionManager", () => {
       }
     });
     expect(result.stopReason).toBe("end_turn");
-    expect(chunks.join("")).toBe("head=" + lateBurst);
+    expect(chunks.join("")).toBe(`head=${lateBurst}`);
   }, 10_000);
 
   it("emits per-turn telemetry via the onTelemetry hook (M15)", async () => {
@@ -310,15 +302,11 @@ describe("SessionManager", () => {
       parts: [{ id: "prt_0", type: "text", text: "ciao da fake-acpRECOVERED" }],
     };
     let captured: TurnTelemetry | undefined;
-    mgr = new SessionManager(
-      makeConfig({ reply: "ciao da fake-acp", messageId: "msg_test_42" }),
-      undefined,
-      {
-        endpointResolver: () => fakeEndpoint,
-        canonicalFetcher: async () => fakeCanonical,
-        onTelemetry: (t) => (captured = t),
-      },
-    );
+    mgr = new SessionManager(makeConfig({ reply: "ciao da fake-acp", messageId: "msg_test_42" }), undefined, {
+      endpointResolver: () => fakeEndpoint,
+      canonicalFetcher: async () => fakeCanonical,
+      onTelemetry: (t) => (captured = t),
+    });
     const chunks: string[] = [];
     await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
@@ -333,18 +321,14 @@ describe("SessionManager", () => {
   it("M16: skips reconciliation when endpointResolver returns null", async () => {
     let fetcherCalls = 0;
     let captured: TurnTelemetry | undefined;
-    mgr = new SessionManager(
-      makeConfig({ reply: "x", messageId: "msg_test_88" }),
-      undefined,
-      {
-        endpointResolver: () => null,
-        canonicalFetcher: async () => {
-          fetcherCalls += 1;
-          return null;
-        },
-        onTelemetry: (t) => (captured = t),
+    mgr = new SessionManager(makeConfig({ reply: "x", messageId: "msg_test_88" }), undefined, {
+      endpointResolver: () => null,
+      canonicalFetcher: async () => {
+        fetcherCalls += 1;
+        return null;
       },
-    );
+      onTelemetry: (t) => (captured = t),
+    });
     await mgr.prompt("doc-qa", "user-A", "ping");
     expect(fetcherCalls).toBe(0);
     expect(captured?.reconciledTextBytes).toBe(0);
@@ -357,17 +341,13 @@ describe("SessionManager", () => {
       password: "test",
     };
     let captured: TurnTelemetry | undefined;
-    mgr = new SessionManager(
-      makeConfig({ reply: "partial", messageId: "msg_test_99" }),
-      undefined,
-      {
-        endpointResolver: () => fakeEndpoint,
-        canonicalFetcher: async () => {
-          throw new Error("simulated REST timeout");
-        },
-        onTelemetry: (t) => (captured = t),
+    mgr = new SessionManager(makeConfig({ reply: "partial", messageId: "msg_test_99" }), undefined, {
+      endpointResolver: () => fakeEndpoint,
+      canonicalFetcher: async () => {
+        throw new Error("simulated REST timeout");
       },
-    );
+      onTelemetry: (t) => (captured = t),
+    });
     const chunks: string[] = [];
     const result = await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {

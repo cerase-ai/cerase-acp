@@ -41,10 +41,7 @@ export interface TypingKeepaliveOptions {
  * not surface as an unhandled rejection (which Node would log
  * loudly and which might crash the bridge on `--unhandled-rejections=strict`).
  */
-export function startTypingKeepalive(
-  target: TypingTarget,
-  options?: TypingKeepaliveOptions,
-): () => void {
+export function startTypingKeepalive(target: TypingTarget, options?: TypingKeepaliveOptions): () => void {
   const intervalMs = options?.intervalMs ?? 7000;
   const maxTicks = options?.maxTicks ?? 42;
   // Immediate call — don't make the user wait `intervalMs` for the

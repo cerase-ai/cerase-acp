@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { applyConfigDiff, type ApplyConfigDiffDeps } from "./bridge.js";
-import type { AgentConfig, BridgeConfig } from "./config.js";
+import { describe, expect, it } from "vitest";
+import { type ApplyConfigDiffDeps, applyConfigDiff } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import type { AgentConfig, BridgeConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 
 // M-ACP-2 — applyConfigDiff resilience: one agent's createAdapter()
@@ -47,11 +47,14 @@ function makeDeps(createAdapter: ApplyConfigDiffDeps["createAdapter"], agents: A
 describe("applyConfigDiff resilience (M-ACP-2)", () => {
   it("a failing createAdapter for one added agent does not abort the others", async () => {
     const created: string[] = [];
-    const deps = makeDeps(async (a) => {
-      if (a.id === "bad") throw new Error("invalid bot token");
-      created.push(a.id);
-      return fakeAdapter(a.id);
-    }, [agent("bad"), agent("good")]);
+    const deps = makeDeps(
+      async (a) => {
+        if (a.id === "bad") throw new Error("invalid bot token");
+        created.push(a.id);
+        return fakeAdapter(a.id);
+      },
+      [agent("bad"), agent("good")],
+    );
 
     await applyConfigDiff({ added: [agent("bad"), agent("good")], removed: [], modified: [] }, deps);
 
@@ -62,11 +65,14 @@ describe("applyConfigDiff resilience (M-ACP-2)", () => {
 
   it("retries a transiently failing createAdapter once", async () => {
     let attempts = 0;
-    const deps = makeDeps(async (a) => {
-      attempts++;
-      if (attempts === 1) throw new Error("transient");
-      return fakeAdapter(a.id);
-    }, [agent("flaky")]);
+    const deps = makeDeps(
+      async (a) => {
+        attempts++;
+        if (attempts === 1) throw new Error("transient");
+        return fakeAdapter(a.id);
+      },
+      [agent("flaky")],
+    );
 
     await applyConfigDiff({ added: [agent("flaky")], removed: [], modified: [] }, deps);
 
@@ -75,10 +81,13 @@ describe("applyConfigDiff resilience (M-ACP-2)", () => {
   });
 
   it("a failing respawn for a modified agent does not abort the reload", async () => {
-    const deps = makeDeps(async (a) => {
-      if (a.id === "bad") throw new Error("nope");
-      return fakeAdapter(a.id);
-    }, [agent("bad"), agent("good")]);
+    const deps = makeDeps(
+      async (a) => {
+        if (a.id === "bad") throw new Error("nope");
+        return fakeAdapter(a.id);
+      },
+      [agent("bad"), agent("good")],
+    );
     deps.adapters.set("bad", fakeAdapter("bad"));
     deps.adapters.set("good", fakeAdapter("good"));
 

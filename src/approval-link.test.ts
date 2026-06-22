@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { applyApprovalLink, applyApprovalLinkFallback, needsApprovalLink, fetchPendingApprovalLink } from "./approval-link.js";
+import { describe, expect, it } from "vitest";
+import {
+  applyApprovalLink,
+  applyApprovalLinkFallback,
+  fetchPendingApprovalLink,
+  needsApprovalLink,
+} from "./approval-link.js";
 
 const LINK = "https://cerase.example/approve/abc.def";
 
@@ -53,7 +58,8 @@ describe("fetchPendingApprovalLink", () => {
   });
 
   it("returns null when there is no pending approval", async () => {
-    const fakeFetch = (async () => ({ ok: true, json: async () => ({ approval_link: null }) }) as Response) as unknown as typeof fetch;
+    const fakeFetch = (async () =>
+      ({ ok: true, json: async () => ({ approval_link: null }) }) as Response) as unknown as typeof fetch;
     expect(await fetchPendingApprovalLink("a", opts(fakeFetch))).toBeNull();
   });
 

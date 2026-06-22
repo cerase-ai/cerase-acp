@@ -4,13 +4,13 @@
 // buffer → send-queue. Knows nothing about Discord — that's what
 // `resolveSendTarget` is for.
 
-import { makeLogger } from "./logger.js";
-import type { BridgeConfig } from "./config.js";
 import { isAllowed } from "./allowlist.js";
-import { SessionManager } from "./session-manager.js";
-import { TurnMetaTracker, detectLanguage } from "./turn-meta.js";
-import { StreamBuffer } from "./stream-buffer.js";
+import type { BridgeConfig } from "./config.js";
+import { makeLogger } from "./logger.js";
 import { SendQueue } from "./send-queue.js";
+import type { SessionManager } from "./session-manager.js";
+import { StreamBuffer } from "./stream-buffer.js";
+import { detectLanguage, type TurnMetaTracker } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
 
@@ -100,7 +100,6 @@ export function isCreditExhaustedError(err: unknown): boolean {
   const text = err instanceof Error ? `${err.message}` : String(err);
   return /cerase credit gate|BudgetExceeded|credits? exhausted/i.test(text);
 }
-
 
 export class Dispatcher {
   constructor(private deps: DispatcherDeps) {}

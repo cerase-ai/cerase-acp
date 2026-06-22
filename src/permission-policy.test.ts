@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { decidePermissionOutcome } from "./permission-policy.js";
 import type * as acp from "@agentclientprotocol/sdk";
+import { describe, expect, it } from "vitest";
+import { decidePermissionOutcome } from "./permission-policy.js";
 
 const mkReq = (opts: { kind: string; optionId: string; name?: string }[]): acp.RequestPermissionRequest =>
   ({

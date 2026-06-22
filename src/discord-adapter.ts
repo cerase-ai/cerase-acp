@@ -5,20 +5,13 @@
 // behaviourally via the cerase repo's e2e-discord bats tier and the
 // BRIDGE_E2E_TEST endpoint, without unit-testing discord.js mocks.
 
-import {
-  Client,
-  Events,
-  GatewayIntentBits,
-  Partials,
-  type Message,
-  type DMChannel,
-} from "discord.js";
-import { makeLogger } from "./logger.js";
+import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partials } from "discord.js";
+import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { startTypingKeepalive } from "./typing-keepalive.js";
-import type { ChatAdapter } from "./chat-adapter.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import { makeLogger } from "./logger.js";
+import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
@@ -34,11 +27,7 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
   const dmChannels = new Map<string, DMChannel>();
 
   const client = new Client({
-    intents: [
-      GatewayIntentBits.DirectMessages,
-      GatewayIntentBits.MessageContent,
-      GatewayIntentBits.Guilds,
-    ],
+    intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.Guilds],
     partials: [Partials.Channel, Partials.Message],
   });
 

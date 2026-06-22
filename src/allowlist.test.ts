@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { isAllowed } from "./allowlist.js";
 import type { BridgeConfig } from "./config.js";
 

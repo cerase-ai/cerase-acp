@@ -7,12 +7,12 @@
 // driving the full ConfigReloader through real file writes — the
 // reloader itself is covered in config-reloader.test.ts).
 
-import { describe, it, expect } from "vitest";
-import type { AgentConfig, BridgeConfig } from "./config.js";
-import type { Dispatcher } from "./dispatcher.js";
-import type { ChatAdapter } from "./chat-adapter.js";
-import { diffConfigs } from "./config-diff.js";
+import { describe, expect, it } from "vitest";
 import { applyConfigDiff } from "./bridge.js";
+import type { ChatAdapter } from "./chat-adapter.js";
+import type { AgentConfig, BridgeConfig } from "./config.js";
+import { diffConfigs } from "./config-diff.js";
+import type { Dispatcher } from "./dispatcher.js";
 
 interface FakeAdapter extends ChatAdapter {
   startCalls: number;
@@ -228,10 +228,7 @@ describe("applyConfigDiff", () => {
     adapters.set("alpha", aOld);
     adapters.set("beta", bOld);
 
-    const prev = cfg([
-      baseAgent("alpha"),
-      baseAgent("beta", { allowed_users: ["x"] }),
-    ]);
+    const prev = cfg([baseAgent("alpha"), baseAgent("beta", { allowed_users: ["x"] })]);
     const next = cfg([
       // alpha removed
       baseAgent("beta", { allowed_users: ["x", "y"] }), // allowed_users_only

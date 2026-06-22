@@ -18,8 +18,7 @@ export interface WorkspaceFile {
 /** Injectable for tests: returns the raw file bytes for argv. */
 export type FileFetcher = (argv: string[], maxBytes: number) => Promise<Buffer>;
 
-const DEFAULT_WORKSPACE_ROOT =
-  process.env.CERASE_AGENT_WORKSPACE_ROOT ?? "/home/agent/cerase/workspace";
+const DEFAULT_WORKSPACE_ROOT = process.env.CERASE_AGENT_WORKSPACE_ROOT ?? "/home/agent/cerase/workspace";
 // Discord free-tier upload ceiling; the largest common denominator.
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -30,15 +29,10 @@ const realFetcher: FileFetcher = (argv, maxBytes) =>
       reject(new Error("empty argv for file fetcher"));
       return;
     }
-    execFile(
-      bin,
-      args,
-      { encoding: "buffer", maxBuffer: maxBytes + 1 },
-      (err: Error | null, stdout: Buffer) => {
-        if (err) reject(err);
-        else resolve(stdout);
-      },
-    );
+    execFile(bin, args, { encoding: "buffer", maxBuffer: maxBytes + 1 }, (err: Error | null, stdout: Buffer) => {
+      if (err) reject(err);
+      else resolve(stdout);
+    });
   });
 
 export interface ReadWorkspaceOptions {
@@ -143,14 +137,6 @@ export async function writeAgentWorkspaceFile(
   }
   const full = `${root}/${relPath}`;
   const dir = full.slice(0, full.lastIndexOf("/"));
-  const argv = [
-    "docker",
-    "exec",
-    "-i",
-    containerName,
-    "sh",
-    "-c",
-    `mkdir -p '${dir}' && cat > '${full}'`,
-  ];
+  const argv = ["docker", "exec", "-i", containerName, "sh", "-c", `mkdir -p '${dir}' && cat > '${full}'`];
   await writer(argv, bytes);
 }

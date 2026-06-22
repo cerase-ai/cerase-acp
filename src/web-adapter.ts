@@ -12,17 +12,14 @@
 // pipeline (session-manager, prompt-queue, allowlist, turn-meta) is
 // channel-agnostic and unchanged, exactly the CHANNEL-1 contract.
 
+import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { makeLogger } from "./logger.js";
-import type { ChatAdapter } from "./chat-adapter.js";
 
 const logger = makeLogger("cerase-acp.web-adapter");
 
-export function createWebAdapter(
-  agent: AgentConfig,
-  _dispatcher: Dispatcher,
-): ChatAdapter {
+export function createWebAdapter(agent: AgentConfig, _dispatcher: Dispatcher): ChatAdapter {
   return {
     agentId: agent.id,
     async start() {

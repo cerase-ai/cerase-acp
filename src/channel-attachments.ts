@@ -118,7 +118,10 @@ export function extractWorkspaceChatAttachments(
   for (const a of message.attachment) {
     const resourceName = a?.attachmentDataRef?.resourceName;
     if (typeof resourceName === "string" && resourceName !== "") {
-      out.push({ name: typeof a.contentName === "string" && a.contentName !== "" ? a.contentName : "file", resourceName });
+      out.push({
+        name: typeof a.contentName === "string" && a.contentName !== "" ? a.contentName : "file",
+        resourceName,
+      });
     }
   }
   return out;

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SendQueue, chunkForDiscord, DELIVERY_FAILURE_MARKER } from "./send-queue.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chunkForDiscord, DELIVERY_FAILURE_MARKER, SendQueue } from "./send-queue.js";
 
 describe("chunkForDiscord", () => {
   it("returns one chunk when text fits", () => {
@@ -22,7 +22,7 @@ describe("chunkForDiscord", () => {
   });
 
   it("splits on sentence boundaries when no newlines exist", () => {
-    const sentence = "x".repeat(500) + ". ";
+    const sentence = `${"x".repeat(500)}. `;
     const text = sentence.repeat(5); // 2510 chars in 5 sentences
     const chunks = chunkForDiscord(text);
     expect(chunks.length).toBeGreaterThanOrEqual(2);

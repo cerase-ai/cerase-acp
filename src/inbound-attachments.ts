@@ -8,8 +8,8 @@
 // so attachments never reached the agent. The logic lives here (pure +
 // injectable) so it is unit-tested without channel SDKs / real docker / network.
 
-import { writeAgentWorkspaceFile, type FileWriter } from "./workspace-files.js";
 import { makeLogger } from "./logger.js";
+import { type FileWriter, writeAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.attachments");
 

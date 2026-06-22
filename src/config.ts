@@ -42,13 +42,7 @@ const AgentIdSchema = z
 //   slack    → "U…" workspace user id
 //   workspace_chat → email address (must match Workspace domain)
 //   web      → a synthetic, deterministic user id (e.g. "maintainer:<orgId>")
-export const ChatChannelSchema = z.enum([
-  "discord",
-  "telegram",
-  "slack",
-  "workspace_chat",
-  "web",
-]);
+export const ChatChannelSchema = z.enum(["discord", "telegram", "slack", "workspace_chat", "web"]);
 export type ChatChannel = z.infer<typeof ChatChannelSchema>;
 
 const AgentSchema = z
@@ -93,10 +87,7 @@ const AgentSchema = z
         break;
       case "slack":
         need("bot_token", "channel='slack' requires bot_token (xoxb-… bot token)");
-        need(
-          "slack_app_token",
-          "channel='slack' requires slack_app_token (xapp-… app-level token for Socket Mode)",
-        );
+        need("slack_app_token", "channel='slack' requires slack_app_token (xapp-… app-level token for Socket Mode)");
         break;
       case "workspace_chat":
         need(
@@ -144,16 +135,11 @@ export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
 // Replaces every `${env:VAR}` token in `raw` with `env[VAR]`. Throws when
 // a referenced variable is absent from `env` so a missing token surfaces
 // at config-load time, not at first message dispatch.
-export function resolveEnvSubstitutions(
-  raw: string,
-  env: Record<string, string | undefined>,
-): string {
+export function resolveEnvSubstitutions(raw: string, env: Record<string, string | undefined>): string {
   return raw.replace(/\$\{env:([A-Z0-9_]+)\}/g, (_, name: string) => {
     const value = env[name];
     if (value === undefined || value === "") {
-      throw new Error(
-        `config references \${env:${name}} but the environment variable is not set`,
-      );
+      throw new Error(`config references \${env:${name}} but the environment variable is not set`);
     }
     return value;
   });
@@ -162,10 +148,7 @@ export function resolveEnvSubstitutions(
 // Loads `agents.yaml` from `path`, resolves env substitutions against
 // `env` (defaults to `process.env`), parses YAML, validates with zod.
 // Throws with operator-readable error messages on any failure mode.
-export function loadConfig(
-  path: string,
-  env: Record<string, string | undefined> = process.env,
-): BridgeConfig {
+export function loadConfig(path: string, env: Record<string, string | undefined> = process.env): BridgeConfig {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -186,9 +169,7 @@ export function loadConfig(
 
   const result = BridgeConfigSchema.safeParse(parsed);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((i) => `  - ${i.path.join(".") || "<root>"}: ${i.message}`)
-      .join("\n");
+    const issues = result.error.issues.map((i) => `  - ${i.path.join(".") || "<root>"}: ${i.message}`).join("\n");
     throw new Error(`agents.yaml schema validation failed:\n${issues}`);
   }
   return result.data;

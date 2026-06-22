@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readAgentWorkspaceFile, writeAgentWorkspaceFile } from "./workspace-files.js";
 
 describe("readAgentWorkspaceFile", () => {
@@ -24,9 +24,7 @@ describe("readAgentWorkspaceFile", () => {
 
   it("throws when the file exceeds the size cap", async () => {
     const fetcher = vi.fn(async () => Buffer.alloc(10));
-    await expect(
-      readAgentWorkspaceFile("c", "big.bin", { fetcher, maxBytes: 4 }),
-    ).rejects.toThrow(/too large/);
+    await expect(readAgentWorkspaceFile("c", "big.bin", { fetcher, maxBytes: 4 })).rejects.toThrow(/too large/);
   });
 });
 
@@ -47,9 +45,7 @@ describe("writeAgentWorkspaceFile", () => {
 
   it("rejects an unsafe (traversal) path before touching docker", async () => {
     const writer = vi.fn(async () => {});
-    await expect(
-      writeAgentWorkspaceFile("c", "../etc/passwd", Buffer.from("x"), { writer }),
-    ).rejects.toThrow(/unsafe/);
+    await expect(writeAgentWorkspaceFile("c", "../etc/passwd", Buffer.from("x"), { writer })).rejects.toThrow(/unsafe/);
     expect(writer).not.toHaveBeenCalled();
   });
 

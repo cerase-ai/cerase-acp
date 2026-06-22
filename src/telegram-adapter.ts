@@ -15,21 +15,18 @@
 // Allowlist enforcement is the dispatcher's responsibility (same as
 // Discord); this adapter just hands the user id and text to it.
 
-import { makeLogger } from "./logger.js";
-import { startTypingKeepalive } from "./typing-keepalive.js";
+import type { Telegraf } from "telegraf";
+import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
+import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import type { ChatAdapter } from "./chat-adapter.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
-import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
-import type { Telegraf } from "telegraf";
+import { makeLogger } from "./logger.js";
+import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.telegram");
 
-export function createTelegramAdapter(
-  agent: AgentConfig,
-  dispatcher: Dispatcher,
-): ChatAdapter {
+export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   if (!agent.bot_token) {
     throw new Error(
       `agent "${agent.id}" channel='telegram' has no bot_token (BotFather token) — caught at config load via superRefine`,
@@ -146,9 +143,7 @@ export function createTelegramAdapter(
     makeSendTarget(userId: string) {
       return async (chunk: string) => {
         if (!bot) {
-          throw new Error(
-            `telegram adapter for agent "${agent.id}" not started — refusing to sendMessage`,
-          );
+          throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to sendMessage`);
         }
         // telegraf's Telegram API client lives at bot.telegram. The
         // sendMessage method takes a chat_id (string for our purposes)

@@ -1,13 +1,10 @@
-import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import {
-  startTestInjectionServer,
-  type TestInjectionServer,
-} from "./test-injection.js";
+import { afterEach, describe, expect, it } from "vitest";
+import type { BridgeConfig } from "./config.js";
 import { Dispatcher } from "./dispatcher.js";
 import { SessionManager } from "./session-manager.js";
+import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { TurnMetaTracker } from "./turn-meta.js";
-import type { BridgeConfig } from "./config.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 

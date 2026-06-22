@@ -2,9 +2,9 @@
 // be unit-tested with injected adapter factories. This file just reads
 // env, calls runBridge, and wires signals to the shutdown handle.
 
-import { makeLogger } from "./logger.js";
-import { loadConfig } from "./config.js";
 import { runBridge } from "./bridge.js";
+import { loadConfig } from "./config.js";
+import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp");
 

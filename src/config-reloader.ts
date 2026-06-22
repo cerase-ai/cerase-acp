@@ -1,7 +1,7 @@
-import { watch, type FSWatcher } from "node:fs";
+import { type FSWatcher, watch } from "node:fs";
 import { basename, dirname } from "node:path";
+import { type BridgeConfig, loadConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
-import { loadConfig, type BridgeConfig } from "./config.js";
 
 const logger = makeLogger("cerase-acp.config-reloader");
 

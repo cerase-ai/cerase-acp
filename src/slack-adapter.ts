@@ -18,20 +18,17 @@
 //   - Block Kit interactive components
 //   - App Home tab
 
-import { makeLogger } from "./logger.js";
+import type { App } from "@slack/bolt";
+import { extractSlackFiles } from "./channel-attachments.js";
+import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import type { ChatAdapter } from "./chat-adapter.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
-import { extractSlackFiles } from "./channel-attachments.js";
-import type { App } from "@slack/bolt";
+import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.slack");
 
-export function createSlackAdapter(
-  agent: AgentConfig,
-  dispatcher: Dispatcher,
-): ChatAdapter {
+export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   if (!agent.bot_token || !agent.slack_app_token) {
     throw new Error(
       `agent "${agent.id}" channel='slack' missing bot_token or slack_app_token — should have been caught at config load via superRefine`,
@@ -102,9 +99,7 @@ export function createSlackAdapter(
     makeSendTarget(userId: string) {
       return async (chunk: string) => {
         if (!app) {
-          throw new Error(
-            `slack adapter for agent "${agent.id}" not started — refusing to postMessage`,
-          );
+          throw new Error(`slack adapter for agent "${agent.id}" not started — refusing to postMessage`);
         }
         // Slack's chat.postMessage with channel=<user-id> opens (or
         // reuses) the user's IM channel automatically. No need to

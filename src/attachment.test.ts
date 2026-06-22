@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseAttachments, isSafeWorkspacePath } from "./attachment.js";
+import { describe, expect, it } from "vitest";
+import { isSafeWorkspacePath, parseAttachments } from "./attachment.js";
 
 describe("parseAttachments", () => {
   it("extracts a single [[attach: path]] marker and strips it from the text", () => {

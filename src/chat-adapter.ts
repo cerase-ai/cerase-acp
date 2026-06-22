@@ -87,10 +87,7 @@ export interface OutgoingFile {
  * adapter — bridge.ts calls `adapter.start()` separately so it can
  * group failures and apply the test-mode resilience contract.
  */
-export async function createChatAdapter(
-  agent: AgentConfig,
-  dispatcher: Dispatcher,
-): Promise<ChatAdapter> {
+export async function createChatAdapter(agent: AgentConfig, dispatcher: Dispatcher): Promise<ChatAdapter> {
   switch (agent.channel) {
     case "discord": {
       const { createDiscordAdapter } = await import("./discord-adapter.js");
@@ -105,9 +102,7 @@ export async function createChatAdapter(
       return createSlackAdapter(agent, dispatcher);
     }
     case "workspace_chat": {
-      const { createWorkspaceChatAdapter } = await import(
-        "./workspace-chat-adapter.js"
-      );
+      const { createWorkspaceChatAdapter } = await import("./workspace-chat-adapter.js");
       return createWorkspaceChatAdapter(agent, dispatcher);
     }
     case "web": {
@@ -120,9 +115,7 @@ export async function createChatAdapter(
       // channel added to ChatChannelSchema without a case here is a
       // compile error.
       const _exhaustive: never = agent.channel;
-      throw new Error(
-        `createChatAdapter: unknown channel ${String(_exhaustive)} for agent "${agent.id}"`,
-      );
+      throw new Error(`createChatAdapter: unknown channel ${String(_exhaustive)} for agent "${agent.id}"`);
     }
   }
 }

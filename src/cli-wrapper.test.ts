@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { AddressInfo } from "node:net";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const WRAPPER = fileURLToPath(new URL("../scripts/cerase-acp-cli", import.meta.url));
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -92,16 +92,7 @@ describe("cerase-acp-cli (bash wrapper)", () => {
 
   it("`prompt` dispatches to the TS CLI and streams the reply", async () => {
     const cfg = writeSampleConfig(dir);
-    const r = await runWrapper([
-      "prompt",
-      "--config",
-      cfg,
-      "--agent",
-      "demo",
-      "--user",
-      "111",
-      "ping",
-    ]);
+    const r = await runWrapper(["prompt", "--config", cfg, "--agent", "demo", "--user", "111", "ping"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("hello from wrapper");
   });
@@ -113,10 +104,9 @@ describe("cerase-acp-cli (bash wrapper)", () => {
     // SessionManager. Reply count == 2; the wrapper's job is just
     // to invoke the TS subcommand correctly.
     const cfg = writeSampleConfig(dir);
-    const r = await runWrapper(
-      ["repl", "--config", cfg, "--agent", "demo", "--user", "111"],
-      { input: "ciao\nciao ancora\n" },
-    );
+    const r = await runWrapper(["repl", "--config", cfg, "--agent", "demo", "--user", "111"], {
+      input: "ciao\nciao ancora\n",
+    });
     expect(r.code).toBe(0);
     const replies = (r.stdout.match(/hello from wrapper/g) ?? []).length;
     expect(replies).toBe(2);
@@ -167,16 +157,7 @@ describe("cerase-acp-cli inject (against an in-memory fake daemon)", () => {
   });
 
   it("inject calls POST /_test/inject then GET /_test/last-reply and prints the reply", async () => {
-    const r = await runWrapper([
-      "inject",
-      "--remote",
-      url,
-      "--agent",
-      "demo",
-      "--user",
-      "111",
-      "hello there",
-    ]);
+    const r = await runWrapper(["inject", "--remote", url, "--agent", "demo", "--user", "111", "hello there"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("HELLO THERE");
   });
@@ -193,16 +174,7 @@ describe("cerase-acp-cli inject (against an in-memory fake daemon)", () => {
     const addr = blackhole.address() as AddressInfo;
     const blackholeUrl = `http://127.0.0.1:${addr.port}`;
     try {
-      const r = await runWrapper([
-        "inject",
-        "--remote",
-        blackholeUrl,
-        "--agent",
-        "demo",
-        "--user",
-        "111",
-        "test",
-      ]);
+      const r = await runWrapper(["inject", "--remote", blackholeUrl, "--agent", "demo", "--user", "111", "test"]);
       expect(r.code).not.toBe(0);
     } finally {
       await new Promise<void>((resolve) => blackhole.close(() => resolve()));

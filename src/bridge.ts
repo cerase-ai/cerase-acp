@@ -12,26 +12,27 @@
 //   - `bridgeE2eTest: false` (production) → no test server; adapter
 //     starts run in Promise.all; any rejection bubbles up as fail-fast.
 
-import { makeLogger } from "./logger.js";
-import type { AgentConfig, BridgeConfig } from "./config.js";
-import { SessionManager } from "./session-manager.js";
-import { TurnMetaTracker } from "./turn-meta.js";
-import { Dispatcher } from "./dispatcher.js";
-import { createChatAdapter, type ChatAdapter } from "./chat-adapter.js";
 import { isAllowed } from "./allowlist.js";
-import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
-import { startInternalServer, type InternalServer, type AgentLiveness } from "./internal-server.js";
-import { needsApprovalLink, applyApprovalLink, applyApprovalLinkFallback, fetchPendingApprovalLink } from "./approval-link.js";
-import { postSessionSummary } from "./session-summary.js";
-import { parseAttachments, hasAttachments } from "./attachment.js";
 import {
-  isInternalSummaryBlock,
-  redactEngineIdentifiers,
-  stripToolCallArtifacts,
-} from "./egress-redaction.js";
-import { readAgentWorkspaceFile } from "./workspace-files.js";
+  applyApprovalLink,
+  applyApprovalLinkFallback,
+  fetchPendingApprovalLink,
+  needsApprovalLink,
+} from "./approval-link.js";
+import { hasAttachments, parseAttachments } from "./attachment.js";
+import { type ChatAdapter, createChatAdapter } from "./chat-adapter.js";
+import type { AgentConfig, BridgeConfig } from "./config.js";
+import { type ConfigDiff, diffConfigs } from "./config-diff.js";
 import { ConfigReloader } from "./config-reloader.js";
-import { diffConfigs, type ConfigDiff } from "./config-diff.js";
+import { Dispatcher } from "./dispatcher.js";
+import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
+import { type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
+import { makeLogger } from "./logger.js";
+import { SessionManager } from "./session-manager.js";
+import { postSessionSummary } from "./session-summary.js";
+import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
+import { TurnMetaTracker } from "./turn-meta.js";
+import { readAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.bridge");
 
@@ -89,10 +90,7 @@ export interface ApplyConfigDiffDeps {
  * THAT agent and continue; the failure is logged loudly (a missing
  * adapter surfaces via the reload-status path).
  */
-async function createAdapterWithRetry(
-  deps: ApplyConfigDiffDeps,
-  agent: AgentConfig,
-): Promise<ChatAdapter | null> {
+async function createAdapterWithRetry(deps: ApplyConfigDiffDeps, agent: AgentConfig): Promise<ChatAdapter | null> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       return await deps.createAdapter(agent, deps.dispatcher);
@@ -114,10 +112,7 @@ async function createAdapterWithRetry(
  * perform. Exported for unit testing — runBridge wires it as the
  * onChange handler of ConfigReloader.
  */
-export async function applyConfigDiff(
-  diff: ConfigDiff,
-  deps: ApplyConfigDiffDeps,
-): Promise<void> {
+export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDeps): Promise<void> {
   // 1. Remove old agents first (frees adapter resources before any
   //    same-id add would collide). Stops the adapter, then asks the
   //    SessionManager to terminate ACP children and drop the agent
@@ -153,10 +148,7 @@ export async function applyConfigDiff(
         try {
           await oldAdapter.stop();
         } catch (err) {
-          logger.error(
-            { err, agentId: mod.agentId },
-            "auto-reload: adapter.stop() failed during respawn",
-          );
+          logger.error({ err, agentId: mod.agentId }, "auto-reload: adapter.stop() failed during respawn");
         }
         deps.adapters.delete(mod.agentId);
       }
@@ -178,10 +170,7 @@ export async function applyConfigDiff(
         deps.adapters.set(mod.agentId, adapter);
         try {
           await adapter.start();
-          logger.info(
-            { agentId: mod.agentId, classification: mod.classification },
-            "auto-reload: agent respawned",
-          );
+          logger.info({ agentId: mod.agentId, classification: mod.classification }, "auto-reload: agent respawned");
         } catch (err) {
           logger.error(
             { err, agentId: mod.agentId },
@@ -203,10 +192,7 @@ export async function applyConfigDiff(
       await adapter.start();
       logger.info({ agentId: agent.id }, "auto-reload: new agent attached");
     } catch (err) {
-      logger.error(
-        { err, agentId: agent.id },
-        "auto-reload: new adapter.start() failed — agent will not receive DMs",
-      );
+      logger.error({ err, agentId: agent.id }, "auto-reload: new adapter.start() failed — agent will not receive DMs");
     }
   }
 }
@@ -431,18 +417,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     } catch (err) {
       // Best-effort teardown so we don't leak resources on the way out.
       logger.error({ err }, "adapter start failed in production mode — tearing down");
-      await Promise.allSettled([
-        ...Array.from(adapters.values()).map((a) => a.stop()),
-        sessionManager.shutdown(),
-      ]);
+      await Promise.allSettled([...Array.from(adapters.values()).map((a) => a.stop()), sessionManager.shutdown()]);
       throw err;
     }
   }
 
-  logger.info(
-    { agentCount: adapters.size, bridgeE2eTest },
-    "cerase-acp bridge ready",
-  );
+  logger.info({ agentCount: adapters.size, bridgeE2eTest }, "cerase-acp bridge ready");
 
   // M-auto-reload v0.2: watch agents.yaml for live updates.
   // Snapshot the current config so the next reload can compute a diff
@@ -453,11 +433,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   if (opts.configPath) {
     reloader = new ConfigReloader(opts.configPath, (nextConfig) => {
       const diff = diffConfigs(currentSnapshot, nextConfig);
-      if (
-        diff.added.length === 0 &&
-        diff.removed.length === 0 &&
-        diff.modified.length === 0
-      ) {
+      if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
         return;
       }
       logger.info(

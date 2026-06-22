@@ -33,13 +33,9 @@ import type * as acp from "@agentclientprotocol/sdk";
  * outcome with enough context (agentId, userId) for forensic
  * grep'ing.
  */
-export function decidePermissionOutcome(
-  request: acp.RequestPermissionRequest,
-): acp.RequestPermissionOutcome {
+export function decidePermissionOutcome(request: acp.RequestPermissionRequest): acp.RequestPermissionOutcome {
   const opts = request.options ?? [];
-  const pick =
-    opts.find((o) => o.kind === "allow_always") ??
-    opts.find((o) => o.kind === "allow_once");
+  const pick = opts.find((o) => o.kind === "allow_always") ?? opts.find((o) => o.kind === "allow_once");
   if (!pick) return { outcome: "cancelled" };
   return { outcome: "selected", optionId: pick.optionId };
 }

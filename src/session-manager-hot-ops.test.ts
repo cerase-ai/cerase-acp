@@ -6,11 +6,11 @@
 // downstream consumers (Dispatcher / allowlist.isAllowed) see the
 // updated state without needing a config-passing refactor.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { isAllowed } from "./allowlist.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
-import { isAllowed } from "./allowlist.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 

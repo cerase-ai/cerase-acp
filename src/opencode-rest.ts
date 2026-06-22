@@ -68,13 +68,9 @@ export function defaultEndpointForAgent(containerName: string): RestEndpoint | n
  * after-the-fact recovery; if the REST endpoint isn't responding
  * promptly we degrade gracefully rather than blocking the turn.
  */
-export const defaultFetcher: CanonicalFetcher = async (
-  endpoint,
-  sessionId,
-  messageId,
-) => {
+export const defaultFetcher: CanonicalFetcher = async (endpoint, sessionId, messageId) => {
   const url = `${endpoint.baseURL}/session/${sessionId}/message/${messageId}`;
-  const authz = "Basic " + Buffer.from(`${endpoint.username}:${endpoint.password}`).toString("base64");
+  const authz = `Basic ${Buffer.from(`${endpoint.username}:${endpoint.password}`).toString("base64")}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 2000);
   try {

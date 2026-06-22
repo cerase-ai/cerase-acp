@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { startInternalServer, headsUpText, type InternalServer } from "./internal-server.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { headsUpText, type InternalServer, startInternalServer } from "./internal-server.js";
 
 // Minimal Dispatcher fake — records the calls the endpoint makes.
 function makeFakeDispatcher() {
@@ -28,7 +28,12 @@ describe("internal-server /internal/inject", () => {
   beforeEach(async () => {
     const fake = makeFakeDispatcher();
     calls = fake.calls;
-    server = await startInternalServer({ dispatcher: fake.dispatcher, internalSecret: SECRET, port: 0, host: "127.0.0.1" });
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+    });
     base = `http://127.0.0.1:${server.port()}`;
   });
 

@@ -1,13 +1,7 @@
-import { describe, it, expect } from "vitest";
-import {
-  reconcile,
-  type CanonicalMessage,
-  type SeenState,
-} from "./reconciler.js";
+import { describe, expect, it } from "vitest";
+import { type CanonicalMessage, reconcile, type SeenState } from "./reconciler.js";
 
-const mkMsg = (
-  parts: Array<{ type: "text" | "reasoning"; text: string; ignored?: boolean }>,
-): CanonicalMessage => ({
+const mkMsg = (parts: Array<{ type: "text" | "reasoning"; text: string; ignored?: boolean }>): CanonicalMessage => ({
   id: "msg_test",
   parts: parts.map((p, i) => ({
     id: `prt_${i}`,

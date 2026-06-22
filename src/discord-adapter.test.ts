@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
 
 // Structural pin for the OPT-67 fix. Testing makeSendTarget end-to-end
 // requires a full discord.js client harness (mock channel, DM creation,
@@ -53,20 +53,12 @@ describe("discord-adapter (OPT-67 invariants)", () => {
 // the typing affordance to exist (slack/telegram/workspace can skip
 // the indicator entirely); it only fires when an adapter DOES use one.
 describe("cross-adapter typing invariants (OPT-67)", () => {
-  const adapterFiles = [
-    "telegram-adapter.ts",
-    "slack-adapter.ts",
-    "workspace-chat-adapter.ts",
-  ];
+  const adapterFiles = ["telegram-adapter.ts", "slack-adapter.ts", "workspace-chat-adapter.ts"];
 
   for (const fname of adapterFiles) {
     it(`${fname}: if a typing API is used, it is NOT called inside makeSendTarget`, () => {
       const src = readFileSync(join(here, fname), "utf8");
-      const typingApis = [
-        /sendTyping\s*\(/,
-        /sendChatAction\s*\(\s*['"]typing['"]/,
-        /setStatus\s*\(\s*\{[^}]*typing/i,
-      ];
+      const typingApis = [/sendTyping\s*\(/, /sendChatAction\s*\(\s*['"]typing['"]/, /setStatus\s*\(\s*\{[^}]*typing/i];
       const usesTyping = typingApis.some((rx) => rx.test(src));
       if (!usesTyping) {
         // No typing UX in this adapter yet — nothing to enforce.

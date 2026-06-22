@@ -42,10 +42,7 @@ export interface PendingLinkOptions {
  * Fetch the signed link for an agent's latest pending approval from the
  * control-plane, or null when there is none / on any failure.
  */
-export async function fetchPendingApprovalLink(
-  agentId: string,
-  opts: PendingLinkOptions,
-): Promise<string | null> {
+export async function fetchPendingApprovalLink(agentId: string, opts: PendingLinkOptions): Promise<string | null> {
   const f = opts.fetchImpl ?? fetch;
   const url =
     `${opts.controlPlaneUrl.replace(/\/$/, "")}/api/internal/approval-pending-link` +

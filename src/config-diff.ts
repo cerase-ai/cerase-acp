@@ -18,10 +18,7 @@ import type { AgentConfig, BridgeConfig } from "./config.js";
  *                            diff; the reloader treats this as
  *                            `bot_token_or_spawn` (superset).
  */
-export type ModifiedClassification =
-  | "allowed_users_only"
-  | "bot_token_or_spawn"
-  | "mixed";
+export type ModifiedClassification = "allowed_users_only" | "bot_token_or_spawn" | "mixed";
 
 export interface ModifiedAgent {
   agentId: string;

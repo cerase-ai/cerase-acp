@@ -13,10 +13,10 @@
 // This is the productionised counterpart of the BRIDGE_E2E_TEST-gated
 // /_test/inject (test-injection.ts).
 
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { makeLogger } from "./logger.js";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Dispatcher } from "./dispatcher.js";
+import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.internal-server");
 
@@ -103,11 +103,7 @@ export async function startInternalServer(opts: InternalServerOptions): Promise<
   };
 }
 
-async function handleRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-  opts: InternalServerOptions,
-): Promise<void> {
+async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: InternalServerOptions): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
   // Shared-secret gate (cluster-only endpoints) — evaluated once, applied
@@ -169,10 +165,7 @@ async function handleRequest(
   // scheduled-message wording (the in-admin chat echo passes its own
   // attribution marker, e.g. "💬 Paolo (dal pannello): …"). Absent → the
   // scheduled dispatcher's existing heads-up is used, so it is unaffected.
-  const headsUp =
-    typeof rec.heads_up === "string" && rec.heads_up.length > 0
-      ? rec.heads_up
-      : headsUpText(text);
+  const headsUp = typeof rec.heads_up === "string" && rec.heads_up.length > 0 ? rec.heads_up : headsUpText(text);
 
   if (systemMessageOnly) {
     try {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { PromptQueue } from "./prompt-queue.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

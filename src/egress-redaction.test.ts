@@ -1,20 +1,16 @@
-import { describe, it, expect } from "vitest";
-import {
-  isInternalSummaryBlock,
-  redactEngineIdentifiers,
-  stripToolCallArtifacts,
-} from "./egress-redaction.js";
+import { describe, expect, it } from "vitest";
+import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
 
 describe("M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: DSML tool-call leak scrub", () => {
   it("strips a spelled-out DSML tool_calls block, keeping the surrounding prose", () => {
     const text =
       "Provo a collegare Gmail.\n" +
-      '<｜｜DSML｜｜tool_calls>\n' +
+      "<｜｜DSML｜｜tool_calls>\n" +
       '<｜｜DSML｜｜invoke name="cerase-gateway_call_recipe">\n' +
       '<｜｜DSML｜｜parameter name="args" string="false">{"recipe":"gmail.inbox"}</｜｜DSML｜｜parameter>\n' +
       '<｜｜DSML｜｜parameter name="recipe_name" string="true">account.connect</｜｜DSML｜｜parameter>\n' +
-      '</｜｜DSML｜｜invoke>\n' +
-      '</｜｜DSML｜｜tool_calls>\n' +
+      "</｜｜DSML｜｜invoke>\n" +
+      "</｜｜DSML｜｜tool_calls>\n" +
       "Fatto.";
     const out = stripToolCallArtifacts(text);
     expect(out).toContain("Provo a collegare Gmail.");
@@ -26,17 +22,17 @@ describe("M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: DSML tool-call leak scrub", 
 
   it("strips the exact leaked sample to nothing user-facing", () => {
     const leak =
-      '<｜｜DSML｜｜tool_calls>\n' +
+      "<｜｜DSML｜｜tool_calls>\n" +
       '<｜｜DSML｜｜invoke name="cerase-gateway_call_recipe">\n' +
       '<｜｜DSML｜｜parameter name="args" string="false">{"recipe":"gmail.label","label":"default"}</｜｜DSML｜｜parameter>\n' +
       '<｜｜DSML｜｜parameter name="recipe_name" string="true">account.connect</｜｜DSML｜｜parameter>\n' +
-      '</｜｜DSML｜｜invoke>\n' +
-      '</｜｜DSML｜｜tool_calls>\n' +
-      '<｜｜DSML｜｜tool_calls>\n' +
+      "</｜｜DSML｜｜invoke>\n" +
+      "</｜｜DSML｜｜tool_calls>\n" +
+      "<｜｜DSML｜｜tool_calls>\n" +
       '<｜｜DSML｜｜invoke name="read">\n' +
       '<｜｜DSML｜｜parameter name="filePath" string="true">/home/agent/x.js</｜｜DSML｜｜parameter>\n' +
-      '</｜｜DSML｜｜invoke>\n' +
-      '</｜｜DSML｜｜tool_calls>';
+      "</｜｜DSML｜｜invoke>\n" +
+      "</｜｜DSML｜｜tool_calls>";
     expect(stripToolCallArtifacts(leak).trim()).toBe("");
   });
 

@@ -26,14 +26,14 @@
 //   - threading
 //   - card UI interactive components
 
-import { makeLogger } from "./logger.js";
-import type { AgentConfig } from "./config.js";
-import type { ChatAdapter } from "./chat-adapter.js";
-import type { Dispatcher } from "./dispatcher.js";
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
-import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { chat_v1 } from "googleapis";
+import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
+import type { ChatAdapter } from "./chat-adapter.js";
+import type { AgentConfig } from "./config.js";
+import type { Dispatcher } from "./dispatcher.js";
+import { ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
+import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
 
@@ -41,10 +41,7 @@ const logger = makeLogger("cerase-acp.workspace-chat");
 // process — one port). The first adapter to start binds the port; the
 // rest reuse the same server and register their per-agent handlers in
 // a routing map by agent.id (matched in the URL path).
-const ROUTES = new Map<
-  string,
-  (body: WorkspaceChatEvent) => Promise<WorkspaceChatReply | undefined>
->();
+const ROUTES = new Map<string, (body: WorkspaceChatEvent) => Promise<WorkspaceChatReply | undefined>>();
 let sharedServer: Server | undefined;
 const WORKSPACE_CHAT_PORT = Number(process.env.WORKSPACE_CHAT_PORT ?? "7475");
 
@@ -108,10 +105,7 @@ async function ensureServerStarted(): Promise<void> {
   });
 }
 
-export function createWorkspaceChatAdapter(
-  agent: AgentConfig,
-  dispatcher: Dispatcher,
-): ChatAdapter {
+export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   if (!agent.workspace_chat_credentials_path) {
     throw new Error(
       `agent "${agent.id}" channel='workspace_chat' missing workspace_chat_credentials_path — should have been caught at config load via superRefine`,
@@ -189,9 +183,7 @@ export function createWorkspaceChatAdapter(
     makeSendTarget(userId: string) {
       return async (chunk: string) => {
         if (!chatClient) {
-          throw new Error(
-            `workspace-chat adapter for agent "${agent.id}" not started — refusing to send`,
-          );
+          throw new Error(`workspace-chat adapter for agent "${agent.id}" not started — refusing to send`);
         }
         // The chat client posts to spaces.messages.create with the
         // user's DM space name. We resolve the user's DM space via
@@ -203,9 +195,7 @@ export function createWorkspaceChatAdapter(
         });
         const spaceName = space.data.name ?? undefined;
         if (!spaceName) {
-          throw new Error(
-            `workspace-chat: findDirectMessage returned no space name for user "${userId}"`,
-          );
+          throw new Error(`workspace-chat: findDirectMessage returned no space name for user "${userId}"`);
         }
         await chatClient.spaces.messages.create({
           parent: spaceName,

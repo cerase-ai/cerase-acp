@@ -1,10 +1,9 @@
-import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
-import { runBridge, type RunBridgeHandle } from "./bridge.js";
-import type { BridgeConfig } from "./config.js";
-import type { AgentConfig } from "./config.js";
-import type { Dispatcher } from "./dispatcher.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import type { AgentConfig, BridgeConfig } from "./config.js";
+import type { Dispatcher } from "./dispatcher.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 

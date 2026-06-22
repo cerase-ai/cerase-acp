@@ -29,11 +29,7 @@ export function chunkForDiscord(text: string): string[] {
     const window = remaining.slice(0, CHUNK_BUDGET);
     let cut = window.lastIndexOf("\n");
     if (cut < CHUNK_BUDGET / 2) {
-      cut = Math.max(
-        window.lastIndexOf(". "),
-        window.lastIndexOf("! "),
-        window.lastIndexOf("? "),
-      );
+      cut = Math.max(window.lastIndexOf(". "), window.lastIndexOf("! "), window.lastIndexOf("? "));
       if (cut > 0) cut += 1; // include the terminator
     }
     if (cut < CHUNK_BUDGET / 2) cut = CHUNK_BUDGET;

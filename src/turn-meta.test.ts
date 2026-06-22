@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { TurnMetaTracker, detectLanguage, formatGap, makeTurnMetaBlock } from "./turn-meta.js";
+import { describe, expect, it } from "vitest";
+import { detectLanguage, formatGap, makeTurnMetaBlock, TurnMetaTracker } from "./turn-meta.js";
 
 describe("formatGap", () => {
   it("returns 'first' when prevAt is undefined", () => {

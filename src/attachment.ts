@@ -38,7 +38,10 @@ export function parseAttachments(text: string): ParsedAttachments {
     return " ";
   });
   // Collapse the whitespace the markers left behind, then trim.
-  const cleaned = stripped.replace(/[ \t]{2,}/g, " ").replace(/ +\n/g, "\n").trim();
+  const cleaned = stripped
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/ +\n/g, "\n")
+    .trim();
   return { text: cleaned, attachments };
 }
 

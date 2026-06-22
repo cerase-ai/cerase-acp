@@ -1,9 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  sanitizeFilename,
-  prependUploadMarker,
   ingestInboundAttachments,
   ingestInboundBuffers,
+  prependUploadMarker,
+  sanitizeFilename,
 } from "./inbound-attachments.js";
 
 describe("sanitizeFilename", () => {
@@ -22,15 +22,13 @@ describe("sanitizeFilename", () => {
 
 describe("prependUploadMarker", () => {
   it("prepends the marker the skill consumes", () => {
-    expect(prependUploadMarker("ciao", ["uploads/1-0/a.pdf"]))
-      .toBe("[Uploaded files: uploads/1-0/a.pdf]\n\nciao");
+    expect(prependUploadMarker("ciao", ["uploads/1-0/a.pdf"])).toBe("[Uploaded files: uploads/1-0/a.pdf]\n\nciao");
   });
   it("returns text unchanged with no attachments", () => {
     expect(prependUploadMarker("ciao", [])).toBe("ciao");
   });
   it("stands alone for an attachment-only message", () => {
-    expect(prependUploadMarker("", ["uploads/1-0/voice.ogg"]))
-      .toBe("[Uploaded files: uploads/1-0/voice.ogg]");
+    expect(prependUploadMarker("", ["uploads/1-0/voice.ogg"])).toBe("[Uploaded files: uploads/1-0/voice.ogg]");
   });
 });
 
@@ -58,9 +56,7 @@ describe("ingestInboundAttachments", () => {
   });
 
   it("skips an oversized file but keeps the rest", async () => {
-    const fetcher = vi.fn(async (url: string) =>
-      url.includes("big") ? Buffer.alloc(20) : Buffer.from("ok"),
-    );
+    const fetcher = vi.fn(async (url: string) => (url.includes("big") ? Buffer.alloc(20) : Buffer.from("ok")));
     const writer = vi.fn(async () => {});
     const stored = await ingestInboundAttachments(
       "c",
@@ -96,11 +92,12 @@ describe("ingestInboundAttachments", () => {
   it("forwards auth headers to the fetcher (Slack url_private needs the bot token)", async () => {
     const fetcher = vi.fn(async () => Buffer.from("x"));
     const writer = vi.fn(async () => {});
-    await ingestInboundAttachments(
-      "c",
-      [{ name: "a.pdf", url: "https://slack/x" }],
-      { fetcher, writer, now: () => 1, headers: { Authorization: "Bearer xoxb-1" } },
-    );
+    await ingestInboundAttachments("c", [{ name: "a.pdf", url: "https://slack/x" }], {
+      fetcher,
+      writer,
+      now: () => 1,
+      headers: { Authorization: "Bearer xoxb-1" },
+    });
     expect(fetcher).toHaveBeenCalledWith("https://slack/x", { Authorization: "Bearer xoxb-1" });
   });
 });
@@ -108,11 +105,10 @@ describe("ingestInboundAttachments", () => {
 describe("ingestInboundBuffers", () => {
   it("stores pre-fetched bytes (Workspace Chat media) without a fetcher", async () => {
     const writer = vi.fn(async () => {});
-    const stored = await ingestInboundBuffers(
-      "cerase-agent-2",
-      [{ name: "doc.pdf", bytes: Buffer.from("PDF") }],
-      { writer, now: () => 5 },
-    );
+    const stored = await ingestInboundBuffers("cerase-agent-2", [{ name: "doc.pdf", bytes: Buffer.from("PDF") }], {
+      writer,
+      now: () => 5,
+    });
     expect(stored).toEqual(["uploads/5-0/doc.pdf"]);
     const [argv, bytes] = writer.mock.calls[0]!;
     expect((argv as string[]).join(" ")).toContain("uploads/5-0/doc.pdf");

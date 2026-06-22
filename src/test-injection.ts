@@ -10,10 +10,10 @@
 // Multi-chunk replies are concatenated (with the " ⏎" continuation
 // marker stripped) so the test can assert on the full reply text.
 
-import { createServer, type Server } from "node:http";
-import { AddressInfo } from "node:net";
-import { makeLogger } from "./logger.js";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Dispatcher } from "./dispatcher.js";
+import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.test-injection");
 
