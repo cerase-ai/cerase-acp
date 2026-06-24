@@ -106,6 +106,23 @@ export async function startInternalServer(opts: InternalServerOptions): Promise<
 async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: InternalServerOptions): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
+  // M-ACP-HEALTHCHECK-1 — UNAUTHENTICATED liveness probe for the compose
+  // healthcheck, served BEFORE the shared-secret gate. Returns 200 iff the
+  // internal server is listening, so the container goes unhealthy the moment
+  // the bridge's inject transport is down — unlike the old `node --version`
+  // check, which stayed green all through the crash-loop. It leaks only counts
+  // (never agent identities or secrets), so it needs no bearer.
+  if (req.method === "GET" && url.pathname === "/healthz") {
+    const payload: Record<string, unknown> = { status: "ok" };
+    if (opts.getAgentStatus) {
+      const agents = opts.getAgentStatus();
+      payload.adapters = agents.length;
+      payload.ready = agents.filter((a) => a.ready === true).length;
+    }
+    sendJson(res, 200, payload);
+    return;
+  }
+
   // Shared-secret gate (cluster-only endpoints) — evaluated once, applied
   // to every route below.
   const auth = req.headers.authorization ?? "";

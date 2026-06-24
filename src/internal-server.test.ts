@@ -187,6 +187,58 @@ describe("internal-server /internal/status", () => {
   });
 });
 
+// M-ACP-HEALTHCHECK-1 — an UNAUTHENTICATED liveness probe so the compose
+// healthcheck can tell the bridge is actually serving (the old `node --version`
+// healthcheck stayed green all through the crash-loop). It must not weaken the
+// shared-secret gate on the other routes.
+describe("internal-server /healthz (M-ACP-HEALTHCHECK-1)", () => {
+  let server: InternalServer;
+  let base: string;
+
+  beforeEach(async () => {
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [
+        { id: "a", channel: "web", attached: true, ready: true },
+        { id: "b", channel: "discord", attached: true, ready: false },
+      ],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it("GET /healthz → 200 {status:'ok'} with NO Authorization header", async () => {
+    const resp = await fetch(`${base}/healthz`); // deliberately no bearer
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toMatchObject({ status: "ok" });
+  });
+
+  it("reports adapter + ready counts (no identities/secrets) when a status provider is wired", async () => {
+    const resp = await fetch(`${base}/healthz`);
+    const body = (await resp.json()) as { status: string; adapters?: number; ready?: number };
+    expect(body.adapters).toBe(2);
+    expect(body.ready).toBe(1);
+  });
+
+  it("does NOT weaken the secret gate — /internal/inject + /internal/status still 401 without the bearer", async () => {
+    const inject = await fetch(`${base}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent_id: "a", user_id: "u", text: "x" }),
+    });
+    expect(inject.status).toBe(401);
+    const status = await fetch(`${base}/internal/status`);
+    expect(status.status).toBe(401);
+  });
+});
+
 // M-ACP-HARDEN-1 — the inject endpoint must not deliver text to an arbitrary
 // user on an arbitrary agent's channel even with the internal secret: it is
 // now gated on the agent's allowlist, on BOTH the model-turn and the

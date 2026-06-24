@@ -141,7 +141,7 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 |----------|---------|-------------|
 | `CERASE_ACP_CONFIG` | `/etc/cerase-acp/agents.yaml` | Path to the config the daemon loads. |
 | `CERASE_ACP_LOG_LEVEL` | `info` | pino level. `silent` mutes logs (CLI pipelines). |
-| `CERASE_ACP_INTERNAL_SECRET` | *(unset)* | Shared bearer for the internal server. When set, `/internal/inject` + `/internal/status` start (both require the bearer). |
+| `CERASE_ACP_INTERNAL_SECRET` | *(unset)* | Shared bearer for the internal server. When set, `/internal/inject` + `/internal/status` start (both require the bearer); `GET /healthz` is also served, unauthenticated, for the container healthcheck. |
 | `CERASE_ACP_INTERNAL_PORT` | `7476` | Port for the internal server. |
 | `CERASE_ACP_ADAPTER_RETRY_BASE_MS` | `5000` | Self-heal: first retry delay for an adapter whose `start()` failed. Doubles each attempt (half-jittered). |
 | `CERASE_ACP_ADAPTER_RETRY_MAX_MS` | `300000` | Self-heal: cap on the retry backoff interval. |
