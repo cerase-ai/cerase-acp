@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
@@ -61,6 +61,7 @@ describe("runBridge", () => {
   afterEach(async () => {
     if (handle) await handle.shutdown();
     handle = undefined;
+    vi.unstubAllEnvs();
   });
 
   it("test-mode: all adapter logins fail → bridge stays up + test server reachable", async () => {
@@ -102,6 +103,53 @@ describe("runBridge", () => {
         createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
       }),
     ).rejects.toThrow();
+  });
+
+  // M-ACP-WEB-RESILIENT-1 — a single channel adapter's start() failure (e.g.
+  // a bad Discord token → TokenInvalid) must NOT tear the bridge down: the
+  // internal-server + the healthy adapters (esp. the panel-only `web`
+  // maintainer transport) stay up, and an inject to a healthy agent still works.
+  it("production mode: one adapter fails, one succeeds → bridge stays up, status truthful, inject works", async () => {
+    const cfg = makeConfig(); // doc-qa allows 111, policy-qa allows 222
+    const SECRET = "m22-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0"); // ephemeral port
+
+    const made: Record<string, FakeAdapter> = {};
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        // doc-qa simulates the invalid Discord token; policy-qa is the healthy
+        // (web/maintainer-style) transport that must survive.
+        const a = makeFakeAdapter(agent, dispatcher, agent.id === "doc-qa" ? "fail" : "ok");
+        made[agent.id] = a;
+        return a;
+      },
+    });
+
+    // Bridge resolved despite doc-qa.start() rejecting; both starts attempted.
+    expect(made["doc-qa"].startCalls).toBe(1);
+    expect(made["policy-qa"].startCalls).toBe(1);
+    expect(handle.internalUrl).toBeDefined();
+
+    // /internal/status is truthful: the failed adapter reports ready:false
+    // (not null), the healthy one is present.
+    const statusRes = await fetch(`${handle.internalUrl}/internal/status`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    expect(statusRes.status).toBe(200);
+    const status = (await statusRes.json()) as { agents: Array<{ id: string; ready: boolean | null }> };
+    expect(status.agents.find((a) => a.id === "doc-qa")?.ready).toBe(false);
+    expect(status.agents.find((a) => a.id === "policy-qa")).toBeDefined();
+
+    // Inject to the healthy agent (allowed user 222) succeeds end-to-end.
+    const injectRes = await fetch(`${handle.internalUrl}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify({ agent_id: "policy-qa", user_id: "222", text: "ciao", surface_in_chat: false }),
+    });
+    expect(injectRes.status).toBe(202);
   });
 
   it("production mode: all adapters succeed → bridge resolves + no test server", async () => {

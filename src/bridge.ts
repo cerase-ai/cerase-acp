@@ -200,6 +200,12 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
 export interface RunBridgeHandle {
   /** Set only when bridgeE2eTest=true. */
   testInjectionUrl?: string;
+  /**
+   * Base URL of the internal server (`/internal/inject`, `/internal/status`,
+   * `/healthz`). Set only when the internal secret is configured. Lets tests
+   * drive the production inject/status path on the ephemeral port.
+   */
+  internalUrl?: string;
   shutdown(): Promise<void>;
 }
 
@@ -331,6 +337,13 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
   }
 
+  // M-ACP-WEB-RESILIENT-1 — agentIds whose most recent start() rejected.
+  // Tracked so getAgentStatus reports them ready:false (not null) even for
+  // adapters that expose no ready() signal of their own, and so the M23
+  // self-heal supervisor knows which adapters to retry. Cleared on a
+  // successful (re)start.
+  const startFailures = new Set<string>();
+
   // M-BRIDGE-LIVENESS-1 — the live per-agent liveness snapshot served by
   // GET /internal/status. Source of truth = the `adapters` map (an agent
   // dropped from agents.yaml is gone from here → the control-plane reads
@@ -341,12 +354,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       id,
       channel: config.agents.find((a) => a.id === id)?.channel ?? "unknown",
       attached: true,
-      // M-ACP-HARDEN-1: was `: true` — a hard-coded green for every adapter
-      // that doesn't implement ready() (telegram/slack/workspace), so a
+      // M-ACP-WEB-RESILIENT-1: an adapter whose start() failed is concretely
+      // not-ready — report `false`, never `null`, so the control-plane shows
+      // it Disconnesso rather than "stato sconosciuto".
+      // M-ACP-HARDEN-1: otherwise was `: true` — a hard-coded green for every
+      // adapter that doesn't implement ready() (telegram/slack/workspace), so a
       // gateway drop on those channels showed as healthy. Report `null`
       // (unknown) instead; only adapters with a real readiness signal
       // (discord.js client.isReady()) report a concrete boolean.
-      ready: adapter.ready ? adapter.ready() : null,
+      ready: startFailures.has(id) ? false : adapter.ready ? adapter.ready() : null,
     }));
 
   // SCHED-2 — productionised injection endpoint the control-plane
@@ -397,29 +413,42 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     );
   }
 
-  // Start adapters. In test-mode, swallow failures (log each one) so
-  // the bridge stays up. In production, fan out via Promise.all and
-  // let rejections bubble — a token error is a real config bug.
-  if (bridgeE2eTest) {
-    for (const adapter of adapters.values()) {
-      try {
-        await adapter.start();
-      } catch (err) {
-        logger.error(
-          { err, agentId: adapter.agentId },
-          "adapter.start() failed in BRIDGE_E2E_TEST mode — continuing with test server reachable",
-        );
-      }
-    }
-  } else {
+  // M-ACP-WEB-RESILIENT-1 — start each adapter independently. A single
+  // adapter's start() failure (e.g. a bad Discord token → TokenInvalid) is
+  // logged + recorded in `startFailures` but does NOT tear the bridge down:
+  // the internal-server, the panel-only `web` maintainer transport, and the
+  // other healthy adapters all stay up. This holds in BOTH modes — the only
+  // historical difference (test-mode swallowed, production fanned-out-and-
+  // rethrew) was exactly the crash-loop bug that took the web/maintainer chat
+  // down whenever the Discord token was invalid.
+  //
+  // Total-failure threshold: in production, throw only when EVERY adapter
+  // failed (started === 0 with adapters present) — that means no working chat
+  // transport at all, a real config/runtime error worth failing fast on so the
+  // orchestrator surfaces it. In test-mode we never throw (the test-injection
+  // server must stay reachable even with all-fake tokens).
+  let started = 0;
+  for (const adapter of adapters.values()) {
     try {
-      await Promise.all(Array.from(adapters.values()).map((a) => a.start()));
+      await adapter.start();
+      startFailures.delete(adapter.agentId);
+      started += 1;
     } catch (err) {
-      // Best-effort teardown so we don't leak resources on the way out.
-      logger.error({ err }, "adapter start failed in production mode — tearing down");
-      await Promise.allSettled([...Array.from(adapters.values()).map((a) => a.stop()), sessionManager.shutdown()]);
-      throw err;
+      startFailures.add(adapter.agentId);
+      logger.error(
+        { err, agentId: adapter.agentId },
+        "adapter.start() failed — this channel is DOWN; other channels stay up",
+      );
     }
+  }
+  if (!bridgeE2eTest && adapters.size > 0 && started === 0) {
+    logger.error({ agentCount: adapters.size }, "every adapter failed to start — no working transport, tearing down");
+    await Promise.allSettled([
+      ...Array.from(adapters.values()).map((a) => a.stop()),
+      internalServer?.close() ?? Promise.resolve(),
+      sessionManager.shutdown(),
+    ]);
+    throw new Error("all chat adapters failed to start");
   }
 
   logger.info({ agentCount: adapters.size, bridgeE2eTest }, "cerase-acp bridge ready");
@@ -467,6 +496,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
 
   return {
     testInjectionUrl: testServer?.url(),
+    internalUrl: internalServer ? `http://127.0.0.1:${internalServer.port()}` : undefined,
     async shutdown() {
       // Order: stop reloader → stop discord clients → close test server → kill ACP children.
       // Reverse of startup so dependents go first.
