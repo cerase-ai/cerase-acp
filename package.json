@@ -17,7 +17,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.28.1",
+    "@agentclientprotocol/sdk": "^0.29.0",
     "@slack/bolt": "^4.4.0",
     "discord.js": "^14.26.0",
     "googleapis": "^173.0.0",
