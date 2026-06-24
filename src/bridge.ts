@@ -12,6 +12,7 @@
 //   - `bridgeE2eTest: false` (production) → no test server; adapter
 //     starts run in Promise.all; any rejection bubbles up as fail-fast.
 
+import { AdapterSupervisor } from "./adapter-supervisor.js";
 import { isAllowed } from "./allowlist.js";
 import {
   applyApprovalLink,
@@ -344,6 +345,20 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // successful (re)start.
   const startFailures = new Set<string>();
 
+  // M-ACP-ADAPTER-SELFHEAL-1 — retry a failed channel adapter on a capped,
+  // jittered backoff until it connects (no container restart). Production only:
+  // in BRIDGE_E2E_TEST mode background retries would interfere with the
+  // deterministic test path. Recovery clears the not-ready mark so
+  // /internal/status reflects the comeback.
+  const supervisor = bridgeE2eTest
+    ? undefined
+    : new AdapterSupervisor({
+        baseDelayMs: Number(process.env.CERASE_ACP_ADAPTER_RETRY_BASE_MS ?? "5000"),
+        maxDelayMs: Number(process.env.CERASE_ACP_ADAPTER_RETRY_MAX_MS ?? "300000"),
+        onRecovered: (agentId) => startFailures.delete(agentId),
+        onStillFailing: (agentId) => startFailures.add(agentId),
+      });
+
   // M-BRIDGE-LIVENESS-1 — the live per-agent liveness snapshot served by
   // GET /internal/status. Source of truth = the `adapters` map (an agent
   // dropped from agents.yaml is gone from here → the control-plane reads
@@ -439,10 +454,17 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         { err, agentId: adapter.agentId },
         "adapter.start() failed — this channel is DOWN; other channels stay up",
       );
+      // M-ACP-ADAPTER-SELFHEAL-1: schedule a backoff retry so a transient
+      // failure (fixed token, Cloudflare ConnectTimeoutError) recovers itself.
+      supervisor?.scheduleRetry(adapter);
     }
   }
   if (!bridgeE2eTest && adapters.size > 0 && started === 0) {
+    // Total failure: no working transport at all. Fail fast (the orchestrator
+    // restarts the container) — but cancel the self-heal timers first so we
+    // don't leak them on the way out.
     logger.error({ agentCount: adapters.size }, "every adapter failed to start — no working transport, tearing down");
+    supervisor?.stop();
     await Promise.allSettled([
       ...Array.from(adapters.values()).map((a) => a.stop()),
       internalServer?.close() ?? Promise.resolve(),
@@ -498,9 +520,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     testInjectionUrl: testServer?.url(),
     internalUrl: internalServer ? `http://127.0.0.1:${internalServer.port()}` : undefined,
     async shutdown() {
-      // Order: stop reloader → stop discord clients → close test server → kill ACP children.
-      // Reverse of startup so dependents go first.
+      // Order: stop reloader + self-heal supervisor → stop discord clients →
+      // close test server → kill ACP children. Reverse of startup so
+      // dependents go first; stopping the supervisor first prevents a retry
+      // racing the teardown.
       if (reloader) reloader.stop();
+      supervisor?.stop();
       await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
       if (testServer) await testServer.close();
       if (internalServer) await internalServer.close();

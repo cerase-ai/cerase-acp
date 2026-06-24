@@ -152,6 +152,87 @@ describe("runBridge", () => {
     expect(injectRes.status).toBe(202);
   });
 
+  // M-ACP-ADAPTER-SELFHEAL-1 — a transient start() failure must recover on its
+  // own: the supervisor retries on a backoff and the agent flips not-ready →
+  // ready without a container restart, while the bridge never throws. Mirrors
+  // the real deployment: a healthy web/maintainer transport keeps the bridge
+  // above the total-failure threshold while the discord channel self-heals.
+  it("production mode: a transient start() failure self-heals after a backoff tick", async () => {
+    vi.useFakeTimers();
+    try {
+      const SECRET = "m23-secret";
+      vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+      vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_BASE_MS", "1000");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "5000");
+
+      const cfg: BridgeConfig = {
+        agents: [
+          { id: "web", bot_token: "n/a", allowed_users: ["111"], spawn: { command: "true", args: [] } },
+          { id: "discordy", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } },
+        ],
+        session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+      };
+
+      // `web` always starts (keeps the bridge up). `discordy` fails its first
+      // start() (transient) then succeeds on the retry; ready() reflects the
+      // live connection like the real discord.js client.isReady().
+      const liveById: Record<string, boolean> = {};
+      const failsLeftById: Record<string, number> = { web: 0, discordy: 1 };
+      const makeAdapter = (agentId: string): FakeAdapter & { ready(): boolean } => ({
+        agentId,
+        startCalls: 0,
+        stopCalls: 0,
+        async start() {
+          (this as FakeAdapter).startCalls += 1;
+          if (failsLeftById[agentId] > 0) {
+            failsLeftById[agentId] -= 1;
+            throw new Error(`transient login failure for ${agentId}`);
+          }
+          liveById[agentId] = true;
+        },
+        async stop() {
+          (this as FakeAdapter).stopCalls += 1;
+          liveById[agentId] = false;
+        },
+        ready: () => liveById[agentId] === true,
+        makeSendTarget: () => async () => {},
+      });
+
+      const made: Record<string, FakeAdapter> = {};
+      handle = await runBridge({
+        config: cfg,
+        bridgeE2eTest: false,
+        createAdapter: async (agent) => {
+          const a = makeAdapter(agent.id);
+          made[agent.id] = a;
+          return a;
+        },
+      });
+
+      const getReady = async (id: string) => {
+        const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        const body = (await res.json()) as { agents: Array<{ id: string; ready: boolean | null }> };
+        return body.agents.find((a) => a.id === id)?.ready;
+      };
+
+      // discordy's first start failed → bridge stayed up, it's concretely
+      // not-ready; the healthy web transport is ready.
+      expect(made.discordy.startCalls).toBe(1);
+      expect(await getReady("discordy")).toBe(false);
+      expect(await getReady("web")).toBe(true);
+
+      // Advance past the (jittered) backoff → supervisor retries and recovers.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(made.discordy.startCalls).toBe(2);
+      expect(await getReady("discordy")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("production mode: all adapters succeed → bridge resolves + no test server", async () => {
     const cfg = makeConfig();
     handle = await runBridge({

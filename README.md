@@ -135,6 +135,24 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `idle_timeout_minutes` | 60 | Kill an idle ACP child after this many minutes; respawn on next DM. |
 | `max_concurrent` | 16 | Safety ceiling on concurrent `(user, agent)` ACP sessions. |
 
+### Operational environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CERASE_ACP_CONFIG` | `/etc/cerase-acp/agents.yaml` | Path to the config the daemon loads. |
+| `CERASE_ACP_LOG_LEVEL` | `info` | pino level. `silent` mutes logs (CLI pipelines). |
+| `CERASE_ACP_INTERNAL_SECRET` | *(unset)* | Shared bearer for the internal server. When set, `/internal/inject` + `/internal/status` start (both require the bearer). |
+| `CERASE_ACP_INTERNAL_PORT` | `7476` | Port for the internal server. |
+| `CERASE_ACP_ADAPTER_RETRY_BASE_MS` | `5000` | Self-heal: first retry delay for an adapter whose `start()` failed. Doubles each attempt (half-jittered). |
+| `CERASE_ACP_ADAPTER_RETRY_MAX_MS` | `300000` | Self-heal: cap on the retry backoff interval. |
+
+**Adapter resilience.** A single channel adapter that fails to start (e.g. an
+invalid Discord token) no longer tears the bridge down — it stays not-ready
+while every other channel (and the panel-only `web` transport + the internal
+server) keeps serving. A failed channel adapter is then retried automatically on
+the capped, jittered backoff above until it connects, with no container restart.
+The bridge only exits when *every* adapter fails to start (no working transport).
+
 ## Discord setup
 
 ### 1. Create a Discord Application
