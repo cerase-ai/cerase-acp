@@ -121,3 +121,53 @@ describe("M-AGENT-SUMMARY-LEAK-1: internal compaction-summary suppression", () =
     expect(isInternalSummaryBlock("   \n  ")).toBe(false);
   });
 });
+
+describe("M-EGRESS-HARDEN-1: provider self-identification + internal artifacts", () => {
+  it("redacts a provider self-identification in Italian", () => {
+    expect(redactEngineIdentifiers("Sono Claude, come posso aiutarti?")).toBe(
+      "Sono un assistente Cerase, come posso aiutarti?",
+    );
+    expect(redactEngineIdentifiers("Giro su GPT-4.")).toBe("Giro su Cerase.");
+    expect(redactEngineIdentifiers("Sono basato su Anthropic.")).toBe("Sono basato su Cerase.");
+    expect(redactEngineIdentifiers("Uso il modello DeepSeek.")).toBe("Uso il modello Cerase.");
+  });
+
+  it("redacts a provider self-identification in English", () => {
+    expect(redactEngineIdentifiers("I'm ChatGPT.")).not.toMatch(/chatgpt/i);
+    expect(redactEngineIdentifiers("I'm ChatGPT.")).toContain("a Cerase assistant");
+    expect(redactEngineIdentifiers("I run on OpenAI.")).toBe("I run on Cerase.");
+    expect(redactEngineIdentifiers("powered by GPT-4o")).toBe("powered by Cerase");
+  });
+
+  it("redacts bare internal-infra strings", () => {
+    expect(redactEngineIdentifiers("Controlla il .mcp.json del progetto")).not.toContain(".mcp.json");
+    expect(redactEngineIdentifiers("Passa per LiteLLM")).not.toMatch(/litellm/i);
+    expect(redactEngineIdentifiers("Uso `cerase-search.search` per cercare")).toContain("uno strumento");
+    expect(redactEngineIdentifiers("Uso `cerase-search.search` per cercare")).not.toContain("cerase-search.search");
+    expect(redactEngineIdentifiers("Chiamo `airtable-power.list_records`")).toContain("uno strumento");
+  });
+
+  it("does NOT redact a person named Claude (no self-id context)", () => {
+    const reply = "Ho scritto a Claude ieri e mi ha risposto.";
+    expect(redactEngineIdentifiers(reply)).toBe(reply);
+  });
+
+  it("does NOT redact a cooking recipe or a company mention", () => {
+    const recipe = "Ti mando la ricetta della pasta alla carbonara.";
+    expect(redactEngineIdentifiers(recipe)).toBe(recipe);
+    const news = "OpenAI ha annunciato un nuovo modello la settimana scorsa.";
+    expect(redactEngineIdentifiers(news)).toBe(news);
+  });
+
+  it("does NOT redact a backticked plain filename", () => {
+    const reply = "Il file `report.md` è pronto nel workspace.";
+    expect(redactEngineIdentifiers(reply)).toBe(reply);
+  });
+
+  it("is idempotent on the new patterns", () => {
+    const once = redactEngineIdentifiers("Sono GPT e giro su LiteLLM.");
+    expect(redactEngineIdentifiers(once)).toBe(once);
+    expect(once).not.toMatch(/\bGPT\b/);
+    expect(once).not.toMatch(/litellm/i);
+  });
+});

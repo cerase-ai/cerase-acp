@@ -36,13 +36,49 @@ const ENGINE_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }>
 ];
 
 /**
- * Strip/replace known OpenCode engine identifiers from a user-facing reply.
- * Pure + idempotent. Empty/whitespace input is returned unchanged.
+ * M-EGRESS-HARDEN-1 — model/provider brand names + internal artifacts the model
+ * sometimes leaks despite the prompt-level hygiene rule (SpendLogs: "Claude",
+ * `.mcp.json`, backticked recipe names).
+ *
+ * The bare brand names (Claude, GPT, OpenAI, …) are HIGH false-positive — a
+ * person named Claude, a user asking about OpenAI — so they are redacted ONLY in
+ * a self-identification CONTEXT ("sono X" / "giro su X" / "I'm X" / "run on X"),
+ * never bare. Pure-infra strings with no legitimate user-facing meaning
+ * (`LiteLLM`, `.mcp.json`, a backticked internal recipe id) are redacted outright.
+ * REVIEW this set on every OpenCode/model-roster bump (same note as above).
+ */
+const PROVIDER_BRANDS = "Claude|ChatGPT|GPT(?:[\\s-]?\\d[\\w.]*)?|OpenAI|Anthropic|DeepSeek|Gemini|Llama|Mistral";
+
+const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+  // Self-identification, Italian: "sono Claude" / "sei GPT-4".
+  { pattern: new RegExp(`\\b(sono|sei)\\s+(?:${PROVIDER_BRANDS})\\b`, "gi"), replacement: "$1 un assistente Cerase" },
+  // Self-identification, English: "I'm Claude" / "I am GPT".
+  { pattern: new RegExp(`\\b(I['’]?m|I am)\\s+(?:${PROVIDER_BRANDS})\\b`, "gi"), replacement: "$1 a Cerase assistant" },
+  // "giro su X" / "basato su X" / "modello X" (X also covers the LiteLLM proxy).
+  { pattern: new RegExp(`\\b(giro su|girando su|basato su|alimentato da|costruito su|costruito con|sviluppato da|creato da|il modello|modello)\\s+(?:${PROVIDER_BRANDS}|LiteLLM)\\b`, "gi"), replacement: "$1 Cerase" },
+  // English equivalents: "run on X" / "powered by X" / "the model X".
+  { pattern: new RegExp(`\\b(run on|running on|powered by|built on|based on|developed by|made by|the model|model)\\s+(?:${PROVIDER_BRANDS}|LiteLLM)\\b`, "gi"), replacement: "$1 Cerase" },
+  // Bare internal-infra strings (no legitimate user-facing meaning).
+  { pattern: /\bLiteLLM\b/gi, replacement: "Cerase" },
+  { pattern: /\.mcp\.json\b/gi, replacement: "la configurazione" },
+  // Backticked internal recipe identifiers, e.g. `cerase-search.search`,
+  // `airtable-power.list_records`. The hyphen/underscore in the namespace keeps
+  // it from matching a plain filename like `report.md` / `index.html`.
+  { pattern: /`[a-z0-9]+(?:[-_][a-z0-9]+)+\.[a-z0-9_]+`/gi, replacement: "uno strumento" },
+];
+
+/**
+ * Strip/replace known OpenCode engine identifiers + leaked provider names /
+ * internal artifacts from a user-facing reply. Pure + idempotent. Empty input
+ * is returned unchanged.
  */
 export function redactEngineIdentifiers(text: string): string {
   if (!text) return text;
   let out = text;
   for (const { pattern, replacement } of ENGINE_REDACTIONS) {
+    out = out.replace(pattern, replacement);
+  }
+  for (const { pattern, replacement } of IDENTITY_AND_ARTIFACT_REDACTIONS) {
     out = out.replace(pattern, replacement);
   }
   return out;
