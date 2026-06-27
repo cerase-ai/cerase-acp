@@ -13,8 +13,13 @@ import { type FileWriter, writeAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.attachments");
 
-/** Discord free-tier ceiling — the largest common denominator. */
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * M-FILE-LIMITS-1 — inbound chat-upload cap, in bytes. Operator-tunable via
+ * CERASE_MAX_ATTACHMENT_MB (default 64). The CHANNEL's own upload limit
+ * (Discord ~25 MB, Telegram/Slack higher) is the real ceiling — it binds before
+ * this — so this is just the platform-side cap, no longer the old 8 MB floor.
+ */
+const DEFAULT_MAX_BYTES = (Number(process.env.CERASE_MAX_ATTACHMENT_MB) || 64) * 1024 * 1024;
 
 export interface InboundFile {
   /** Original filename as the channel reports it. */
