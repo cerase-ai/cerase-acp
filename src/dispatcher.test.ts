@@ -45,9 +45,11 @@ describe("Dispatcher", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: (agentId, userId) => async (text) => {
         sent.push({ agentId, userId, text });
+        return { ok: true };
       },
     });
-    await d.handleMessage("doc-qa", "111", "ping");
+    // M-ACP-FAILLOUD-1: a healthy turn + delivery resolves `{ ok: true }`.
+    await expect(d.handleMessage("doc-qa", "111", "ping")).resolves.toEqual({ ok: true });
     // M-ACP-DISCLOSURE-OFF: no AI disclosure is prepended — the reply is all
     // that's sent. Join + trim the streaming marker to reconstruct it.
     expect(sent.length).toBeGreaterThanOrEqual(1);
@@ -65,6 +67,7 @@ describe("Dispatcher", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
+        return { ok: true };
       },
     });
     await d.handleMessage("doc-qa", "999-not-allowed", "hi");
@@ -85,7 +88,7 @@ describe("Dispatcher", () => {
       config: cfg,
       sessionManager: mgr,
       turnMeta: tracker,
-      resolveSendTarget: () => async () => {},
+      resolveSendTarget: () => async () => ({ ok: true }),
     });
     await d.handleMessage("doc-qa", "111", "ciao");
     const next = tracker.prefix("doc-qa", "111", "again");
@@ -99,7 +102,7 @@ describe("Dispatcher", () => {
       config: cfg,
       sessionManager: mgr,
       turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async () => {},
+      resolveSendTarget: () => async () => ({ ok: true }),
     });
     await d.handleMessage("doc-qa", "111", "first");
     await d.handleMessage("doc-qa", "111", "second");
@@ -113,7 +116,7 @@ describe("Dispatcher", () => {
       config: cfg,
       sessionManager: mgr,
       turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async () => {},
+      resolveSendTarget: () => async () => ({ ok: true }),
     });
     await expect(d.handleMessage("ghost", "111", "hi")).rejects.toThrow(/ghost/);
   });
@@ -137,10 +140,16 @@ describe("Dispatcher", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
+        return { ok: true };
       },
     });
     // Italian input → Italian error copy, and the promise resolves (no throw).
-    await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toBeUndefined();
+    // M-ACP-FAILLOUD-1: a failed turn now resolves `{ ok: false }` (truthful)
+    // instead of `undefined`, while STILL delivering the localized error copy.
+    await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toEqual({
+      ok: false,
+      error: expect.any(Error),
+    });
     expect(sent.length).toBe(1);
     expect(sent[0]).toBe(pickErrorMessage("ciao, come va?"));
     expect(sent[0]).toMatch(/riprova|errore/i);
@@ -156,6 +165,7 @@ describe("Dispatcher", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
+        return { ok: true };
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
@@ -174,6 +184,7 @@ describe("Dispatcher", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
+        return { ok: true };
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
@@ -205,6 +216,7 @@ describe("no AI disclaimer on first contact (M-ACP-DISCLOSURE-OFF)", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
+        return { ok: true };
       },
     });
     await d.handleMessage("doc-qa", "111", "ciao, mi puoi aiutare?");
@@ -241,6 +253,7 @@ describe("402 overquota copy (M-ACP-2)", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
+        return { ok: true };
       },
     });
     await d.handleMessage("doc-qa", "111", "ciao, mi aiuti con una cosa?");

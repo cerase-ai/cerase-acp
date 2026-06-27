@@ -21,11 +21,12 @@ describe("web-adapter (C2-0 null-sink channel)", () => {
     await expect(a.stop()).resolves.toBeUndefined();
   });
 
-  it("makeSendTarget returns a sink that discards chunks without throwing", async () => {
+  it("makeSendTarget returns a sink that discards chunks and reports ok", async () => {
     const a = createWebAdapter(AGENT, DISPATCHER);
     const send = a.makeSendTarget("maintainer:org-123");
-    // The reply is read from the opencode timeline; sending here is a no-op.
-    await expect(send("hello from the maintainer")).resolves.toBeUndefined();
+    // The reply is read from the opencode timeline; discarding here IS success
+    // for the web channel (M-ACP-FAILLOUD-1) — it must report `{ ok: true }`.
+    await expect(send("hello from the maintainer")).resolves.toEqual({ ok: true });
   });
 
   it("does not implement sendFile (attachments unsupported on web)", () => {

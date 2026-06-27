@@ -33,6 +33,8 @@ function makeFakeAdapter(agent: AgentConfig): FakeAdapter {
     makeSendTarget() {
       return async () => {
         /* no-op in tests */
+        // M-ACP-FAILLOUD-1: the send target reports a delivery outcome.
+        return { ok: true };
       };
     },
   };

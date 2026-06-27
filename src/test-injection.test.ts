@@ -54,6 +54,7 @@ describe("test-injection server", () => {
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: (agentId, userId) => async (text) => {
         server!.recordReply(agentId, userId, text);
+        return { ok: true };
       },
     });
     server = await startTestInjectionServer({ dispatcher: d, port: 0 });
@@ -78,7 +79,7 @@ describe("test-injection server", () => {
       config: cfg,
       sessionManager: mgr,
       turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async () => {},
+      resolveSendTarget: () => async () => ({ ok: true }),
     });
     server = await startTestInjectionServer({ dispatcher: d, port: 0 });
     const res = await fetchJson(`${server.url()}/_test/last-reply?agent_id=doc-qa&user_id=any`);
@@ -92,7 +93,7 @@ describe("test-injection server", () => {
       config: cfg,
       sessionManager: mgr,
       turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async () => {},
+      resolveSendTarget: () => async () => ({ ok: true }),
     });
     server = await startTestInjectionServer({ dispatcher: d, port: 0 });
     const res = await fetchJson(`${server.url()}/_test/inject`, {
@@ -110,7 +111,7 @@ describe("test-injection server", () => {
       config: cfg,
       sessionManager: mgr,
       turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async () => {},
+      resolveSendTarget: () => async () => ({ ok: true }),
     });
     server = await startTestInjectionServer({ dispatcher: d, port: 0 });
     const res = await fetchJson(`${server.url()}/nope`);

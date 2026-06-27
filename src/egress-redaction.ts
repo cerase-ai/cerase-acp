@@ -55,9 +55,21 @@ const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replace
   // Self-identification, English: "I'm Claude" / "I am GPT".
   { pattern: new RegExp(`\\b(I['’]?m|I am)\\s+(?:${PROVIDER_BRANDS})\\b`, "gi"), replacement: "$1 a Cerase assistant" },
   // "giro su X" / "basato su X" / "modello X" (X also covers the LiteLLM proxy).
-  { pattern: new RegExp(`\\b(giro su|girando su|basato su|alimentato da|costruito su|costruito con|sviluppato da|creato da|il modello|modello)\\s+(?:${PROVIDER_BRANDS}|LiteLLM)\\b`, "gi"), replacement: "$1 Cerase" },
+  {
+    pattern: new RegExp(
+      `\\b(giro su|girando su|basato su|alimentato da|costruito su|costruito con|sviluppato da|creato da|il modello|modello)\\s+(?:${PROVIDER_BRANDS}|LiteLLM)\\b`,
+      "gi",
+    ),
+    replacement: "$1 Cerase",
+  },
   // English equivalents: "run on X" / "powered by X" / "the model X".
-  { pattern: new RegExp(`\\b(run on|running on|powered by|built on|based on|developed by|made by|the model|model)\\s+(?:${PROVIDER_BRANDS}|LiteLLM)\\b`, "gi"), replacement: "$1 Cerase" },
+  {
+    pattern: new RegExp(
+      `\\b(run on|running on|powered by|built on|based on|developed by|made by|the model|model)\\s+(?:${PROVIDER_BRANDS}|LiteLLM)\\b`,
+      "gi",
+    ),
+    replacement: "$1 Cerase",
+  },
   // Bare internal-infra strings (no legitimate user-facing meaning).
   { pattern: /\bLiteLLM\b/gi, replacement: "Cerase" },
   { pattern: /\.mcp\.json\b/gi, replacement: "la configurazione" },

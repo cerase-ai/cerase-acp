@@ -20,7 +20,7 @@
 
 import type { App } from "@slack/bolt";
 import { extractSlackFiles } from "./channel-attachments.js";
-import type { ChatAdapter } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
@@ -97,17 +97,25 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
       }
     },
     makeSendTarget(userId: string) {
-      return async (chunk: string) => {
-        if (!app) {
-          throw new Error(`slack adapter for agent "${agent.id}" not started — refusing to postMessage`);
+      return async (chunk: string): Promise<DeliveryResult> => {
+        // M-ACP-FAILLOUD-1: a postMessage failure (or a "not started" state)
+        // is returned as `{ ok: false }` rather than thrown, so the failure
+        // travels up the SendQueue → Dispatcher → inject status truthfully.
+        try {
+          if (!app) {
+            throw new Error(`slack adapter for agent "${agent.id}" not started — refusing to postMessage`);
+          }
+          // Slack's chat.postMessage with channel=<user-id> opens (or
+          // reuses) the user's IM channel automatically. No need to
+          // pre-resolve via conversations.open.
+          await app.client.chat.postMessage({
+            channel: userId,
+            text: chunk,
+          });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
         }
-        // Slack's chat.postMessage with channel=<user-id> opens (or
-        // reuses) the user's IM channel automatically. No need to
-        // pre-resolve via conversations.open.
-        await app.client.chat.postMessage({
-          channel: userId,
-          text: chunk,
-        });
       };
     },
   };

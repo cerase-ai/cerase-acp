@@ -16,6 +16,18 @@
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 
+/**
+ * M-ACP-FAILLOUD-1 — the outcome of a single delivery attempt to a chat
+ * channel. The adapter delivery methods return this instead of
+ * `Promise<void>` so a swallowed failure (e.g. `channel.send` rejecting
+ * because the slot is down / the gateway dropped) can be propagated up the
+ * stack — through the SendQueue, the Dispatcher, and finally surfaced as a
+ * truthful HTTP status on `/internal/inject` — instead of resolving as a
+ * blind success. Adapters MUST NOT throw on a send error anymore: they
+ * catch it and return `{ ok: false, error }`.
+ */
+export type DeliveryResult = { ok: true } | { ok: false; error: Error };
+
 export interface ChatAdapter {
   agentId: string;
   start(): Promise<void>;
@@ -58,7 +70,7 @@ export interface ChatAdapter {
    * affordance): same shape — keepalive in the message handler, NO
    * per-chunk re-trigger.
    */
-  makeSendTarget(userId: string): (chunk: string) => Promise<void>;
+  makeSendTarget(userId: string): (chunk: string) => Promise<DeliveryResult>;
 
   /**
    * CHAT-UX / ATTACH-1 — upload a workspace file as a chat attachment to
@@ -67,7 +79,7 @@ export interface ChatAdapter {
    * to a text note. Discord uses `channel.send({ files })`; Telegram
    * `sendDocument`; Slack `filesUploadV2`; Workspace Chat media upload.
    */
-  sendFile?(userId: string, file: OutgoingFile): Promise<void>;
+  sendFile?(userId: string, file: OutgoingFile): Promise<DeliveryResult>;
 }
 
 /** A file the agent attaches to its chat reply (read from its workspace). */

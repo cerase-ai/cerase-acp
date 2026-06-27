@@ -21,7 +21,7 @@ import {
   needsApprovalLink,
 } from "./approval-link.js";
 import { hasAttachments, parseAttachments } from "./attachment.js";
-import { type ChatAdapter, createChatAdapter } from "./chat-adapter.js";
+import { type ChatAdapter, createChatAdapter, type DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { type ConfigDiff, diffConfigs } from "./config-diff.js";
 import { ConfigReloader } from "./config-reloader.js";
@@ -256,7 +256,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // signed link (fetched over the internal channel — never given to
       // the agent). Only acts on chunks carrying the placeholder, so the
       // common path pays no extra HTTP.
-      return async (chunk: string) => {
+      // M-ACP-FAILLOUD-1: the wrapper forwards the inner adapter's
+      // DeliveryResult so a swallowed send failure can surface; a fully
+      // suppressed chunk (attachment-only, internal summary, DSML) reports
+      // `{ ok: true }` because there was nothing left to deliver.
+      return async (chunk: string): Promise<DeliveryResult> => {
         let text = chunk;
         // HITL-3: approval link substitution (unchanged).
         if (controlPlaneSecret && needsApprovalLink(text)) {
@@ -285,7 +289,13 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             try {
               const file = await readAgentWorkspaceFile(containerName, relPath);
               if (adapter.sendFile) {
-                await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
+                // M-ACP-FAILLOUD-1: sendFile now returns a result — log on
+                // failure and continue (attachments stay best-effort, exactly
+                // as the surrounding catch already degrades them).
+                const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
+                if (!fileResult.ok) {
+                  logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
+                }
               } else {
                 await inner(`📎 (allegati non supportati su questo canale: ${file.name})`);
               }
@@ -295,8 +305,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             }
           }
           text = parsed.text;
-          // If the reply was only the marker, don't send an empty message.
-          if (!text) return;
+          // If the reply was only the marker, don't send an empty message —
+          // the attachment(s) were the whole reply, handled best-effort above.
+          if (!text) return { ok: true };
         }
         // M-AGENT-SUMMARY-LEAK-1: the engine's internal context-compaction
         // summary block (session state / next actions / workspace paths, and
@@ -315,7 +326,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
               logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
             });
           }
-          return;
+          return { ok: true };
         }
         // M-AGENT-VOICE-1 (A): deterministic engine-identity redaction, the
         // last step before the reply leaves for any channel — never reveal we
@@ -327,7 +338,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         text = stripToolCallArtifacts(text);
         if (!text.trim()) {
           logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
-          return;
+          return { ok: true };
         }
         return inner(text);
       };
@@ -413,9 +424,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       config,
       sessionManager,
       turnMeta,
-      resolveSendTarget: (agentId, userId) => async (chunk) => {
-        serverRef?.recordReply(agentId, userId, chunk);
-      },
+      resolveSendTarget:
+        (agentId, userId) =>
+        async (chunk): Promise<DeliveryResult> => {
+          serverRef?.recordReply(agentId, userId, chunk);
+          return { ok: true };
+        },
     });
     testServer = await startTestInjectionServer({
       dispatcher: testDispatcher,

@@ -186,7 +186,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: In
 
   if (systemMessageOnly) {
     try {
-      await opts.dispatcher.sendSystemMessage(agentId, userId, text);
+      // M-ACP-FAILLOUD-1: the delivery IS the whole operation here — a `!ok`
+      // result (channel down) must surface as a truthful 500, not a blind 202.
+      const result = await opts.dispatcher.sendSystemMessage(agentId, userId, text);
+      if (!result.ok) {
+        logger.error({ err: result.error, agentId, userId }, "system-message-only inject delivery failed");
+        sendJson(res, 500, { error: "delivery failed" });
+        return;
+      }
     } catch (err) {
       logger.error({ err, agentId, userId }, "system-message-only inject failed");
       sendJson(res, 500, { error: "dispatch failed" });
@@ -199,14 +206,26 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: In
   try {
     if (surfaceInChat) {
       // Deterministic heads-up before the model turn (best-effort — a
-      // heads-up failure must not block the actual injection).
+      // heads-up failure must not block the actual injection). M-ACP-FAILLOUD-1:
+      // a `!ok` result stays best-effort (log + continue), as before.
       try {
-        await opts.dispatcher.sendSystemMessage(agentId, userId, headsUp);
+        const headsUpResult = await opts.dispatcher.sendSystemMessage(agentId, userId, headsUp);
+        if (!headsUpResult.ok) {
+          logger.warn({ err: headsUpResult.error, agentId }, "heads-up send failed; continuing with injection");
+        }
       } catch (err) {
         logger.warn({ err, agentId }, "heads-up send failed; continuing with injection");
       }
     }
-    await opts.dispatcher.handleMessage(agentId, userId, text);
+    // M-ACP-FAILLOUD-1: fail loud — a failed turn OR a swallowed delivery
+    // failure returns `{ ok: false }`; report 500 so the control-plane caller
+    // sees the truth instead of a 202 over a turn the user never received.
+    const result = await opts.dispatcher.handleMessage(agentId, userId, text);
+    if (!result.ok) {
+      logger.error({ err: result.error, agentId, userId }, "inject turn/delivery failed");
+      sendJson(res, 500, { error: "turn failed" });
+      return;
+    }
   } catch (err) {
     logger.error({ err, agentId, userId }, "scheduled inject dispatch failed");
     sendJson(res, 500, { error: "dispatch failed" });

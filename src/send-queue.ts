@@ -2,6 +2,7 @@
 //   - the 2000-character per-message limit (split on nice boundaries)
 //   - the rate-limit (~5 messages/sec on DMs; we space sends ≥100ms)
 
+import type { DeliveryResult } from "./chat-adapter.js";
 import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.send-queue");
@@ -41,8 +42,14 @@ export function chunkForDiscord(text: string): string[] {
 }
 
 export interface SendQueueOptions {
-  /** Where each chunk is dispatched. Errors are logged + the queue continues. */
-  send: (chunk: string) => Promise<void>;
+  /**
+   * Where each chunk is dispatched. M-ACP-FAILLOUD-1: the target now RETURNS
+   * a `DeliveryResult` instead of throwing on a channel error — a `!ok`
+   * result drives the one-retry + visible-marker path below and is recorded
+   * so `drain()` can report whether any chunk ultimately failed. A target
+   * that still throws is treated defensively as a `!ok` result.
+   */
+  send: (chunk: string) => Promise<DeliveryResult>;
   /** Minimum ms between two `send()` invocations. Default 100. */
   minIntervalMs?: number;
 }
@@ -51,13 +58,23 @@ export interface SendQueueOptions {
 export const DELIVERY_FAILURE_MARKER =
   "⚠️ Parte della risposta non è stata consegnata (errore del canale). / Part of the reply could not be delivered.";
 
+/**
+ * M-ACP-FAILLOUD-1 — the aggregate outcome of draining the queue. `ok` iff
+ * every chunk was delivered (after at most one retry each); otherwise the
+ * `failures` carry the chunk + the last error for each chunk that was lost.
+ */
+export type DrainResult = { ok: true } | { ok: false; failures: Array<{ chunk: string; error: Error }> };
+
 export class SendQueue {
   private failureMarkerQueued = false;
+  // M-ACP-FAILLOUD-1: chunks ultimately lost (after the one retry), so
+  // drain() can report a truthful aggregate outcome to the dispatcher.
+  private failures: Array<{ chunk: string; error: Error }> = [];
 
   private items: string[] = [];
   private running = false;
   private lastSentAt = 0;
-  private readonly send: (chunk: string) => Promise<void>;
+  private readonly send: (chunk: string) => Promise<DeliveryResult>;
   private readonly minIntervalMs: number;
   private donePromise: Promise<void> = Promise.resolve();
   private resolveDone: (() => void) | undefined;
@@ -79,10 +96,16 @@ export class SendQueue {
     void this.drainLoop();
   }
 
-  /** Resolves when the queue is empty AND no send is in flight. */
-  drain(): Promise<void> {
-    if (this.items.length === 0 && !this.running) return Promise.resolve();
-    return this.donePromise;
+  /**
+   * Resolves when the queue is empty AND no send is in flight. M-ACP-FAILLOUD-1:
+   * the resolved value reports whether every chunk was ultimately delivered, so
+   * the dispatcher can fail loud on a swallowed delivery failure.
+   */
+  drain(): Promise<DrainResult> {
+    const summarize = (): DrainResult =>
+      this.failures.length === 0 ? { ok: true } : { ok: false, failures: [...this.failures] };
+    if (this.items.length === 0 && !this.running) return Promise.resolve(summarize());
+    return this.donePromise.then(summarize);
   }
 
   private async drainLoop(): Promise<void> {
@@ -93,20 +116,16 @@ export class SendQueue {
         const wait = this.lastSentAt + this.minIntervalMs - Date.now();
         if (wait > 0) await sleep(wait);
         const chunk = this.items.shift()!;
-        try {
-          await this.send(chunk);
-        } catch (err) {
-          // M-ACP-2: one retry, then a VISIBLE delivery-failure marker
-          // (once per queue) instead of a silent hole in the reply.
-          logger.warn({ err }, "send-queue: send() threw — retrying once");
-          try {
-            await this.send(chunk);
-          } catch (retryErr) {
-            logger.error({ err: retryErr }, "send-queue: retry failed — dropping chunk, emitting marker");
-            if (!this.failureMarkerQueued) {
-              this.failureMarkerQueued = true;
-              this.items.unshift(DELIVERY_FAILURE_MARKER);
-            }
+        const result = await this.sendWithRetry(chunk);
+        if (!result.ok) {
+          // M-ACP-2 / M-ACP-FAILLOUD-1: the chunk is lost after its one retry.
+          // Record it (so drain() reports the failure) and emit a VISIBLE
+          // delivery-failure marker once per queue instead of a silent hole.
+          logger.error({ err: result.error }, "send-queue: retry failed — dropping chunk, emitting marker");
+          this.failures.push({ chunk, error: result.error });
+          if (!this.failureMarkerQueued) {
+            this.failureMarkerQueued = true;
+            this.items.unshift(DELIVERY_FAILURE_MARKER);
           }
         }
         this.lastSentAt = Date.now();
@@ -115,6 +134,26 @@ export class SendQueue {
       this.running = false;
       this.resolveDone?.();
       this.resolveDone = undefined;
+    }
+  }
+
+  /**
+   * M-ACP-2: one send attempt, and on failure exactly one retry (M-ACP-FAILLOUD-1
+   * preserves this). The send target now returns a DeliveryResult; a target that
+   * still throws is caught defensively and treated as a `!ok` result.
+   */
+  private async sendWithRetry(chunk: string): Promise<DeliveryResult> {
+    const first = await this.invokeSend(chunk);
+    if (first.ok) return first;
+    logger.warn({ err: first.error }, "send-queue: send reported failure — retrying once");
+    return this.invokeSend(chunk);
+  }
+
+  private async invokeSend(chunk: string): Promise<DeliveryResult> {
+    try {
+      return await this.send(chunk);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
     }
   }
 }

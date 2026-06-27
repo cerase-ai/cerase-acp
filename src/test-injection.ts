@@ -95,7 +95,15 @@ async function handleRequest(
     // follows can read /_test/last-reply without polling. Production
     // Discord adapter (M5 wiring) does the same.
     try {
-      await dispatcher.handleMessage(agentId, userId, text);
+      // M-ACP-FAILLOUD-1: surface a failed turn / swallowed delivery failure
+      // as a truthful 500 instead of a blind 202, mirroring /internal/inject.
+      const result = await dispatcher.handleMessage(agentId, userId, text);
+      if (!result.ok) {
+        logger.error({ err: result.error, agentId, userId }, "inject turn/delivery failed");
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "turn failed" }));
+        return;
+      }
     } catch (err) {
       logger.error({ err, agentId, userId }, "inject dispatch failed");
       res.writeHead(500, { "content-type": "application/json" });

@@ -49,6 +49,8 @@ function makeFakeAdapter(agent: AgentConfig, _: Dispatcher, behaviour: "ok" | "f
     makeSendTarget() {
       return async () => {
         /* no-op in tests */
+        // M-ACP-FAILLOUD-1: the send target reports a delivery outcome.
+        return { ok: true };
       };
     },
   };
@@ -152,6 +154,48 @@ describe("runBridge", () => {
     expect(injectRes.status).toBe(202);
   });
 
+  // M-ACP-FAILLOUD-1 — a swallowed turn/delivery failure must surface as a
+  // truthful HTTP status on /internal/inject instead of a blind 202 (which
+  // left the control-plane caller thinking the turn succeeded while the user
+  // got nothing, and the UI spinning forever). We drive the REAL production
+  // dispatcher: doc-qa's channel is "down" (every send reports `{ ok: false }`)
+  // → the delivery failure propagates to a 500; policy-qa's send succeeds → 202.
+  it("production mode: /internal/inject returns 500 on a delivery failure, 202 on success", async () => {
+    const cfg = makeConfig(); // doc-qa allows 111, policy-qa allows 222
+    const SECRET = "faillooud-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        // doc-qa's channel can't deliver; policy-qa's delivers fine.
+        const deliverOk = agent.id === "policy-qa";
+        a.makeSendTarget = () => async () =>
+          deliverOk ? { ok: true } : { ok: false, error: new Error("channel down") };
+        return a;
+      },
+    });
+    expect(handle.internalUrl).toBeDefined();
+
+    const inject = (agentId: string, userId: string) =>
+      fetch(`${handle?.internalUrl}/internal/inject`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+        body: JSON.stringify({ agent_id: agentId, user_id: userId, text: "ciao", surface_in_chat: false }),
+      });
+
+    // doc-qa: the turn runs but the reply can't be delivered → fail loud (500).
+    const failRes = await inject("doc-qa", "111");
+    expect(failRes.status).toBe(500);
+
+    // policy-qa: turn + delivery both succeed → 202.
+    const okRes = await inject("policy-qa", "222");
+    expect(okRes.status).toBe(202);
+  });
+
   // M-ACP-ADAPTER-SELFHEAL-1 — a transient start() failure must recover on its
   // own: the supervisor retries on a backoff and the agent flips not-ready →
   // ready without a container restart, while the bridge never throws. Mirrors
@@ -196,7 +240,7 @@ describe("runBridge", () => {
           liveById[agentId] = false;
         },
         ready: () => liveById[agentId] === true,
-        makeSendTarget: () => async () => {},
+        makeSendTarget: () => async () => ({ ok: true }),
       });
 
       const made: Record<string, FakeAdapter> = {};

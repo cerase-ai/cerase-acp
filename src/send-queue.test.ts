@@ -63,6 +63,7 @@ describe("SendQueue", () => {
     const q = new SendQueue({
       send: async (msg) => {
         sent.push(msg);
+        return { ok: true };
       },
       minIntervalMs: 100,
     });
@@ -79,6 +80,7 @@ describe("SendQueue", () => {
     const q = new SendQueue({
       send: async () => {
         timestamps.push(Date.now());
+        return { ok: true };
       },
       minIntervalMs: 100,
     });
@@ -99,6 +101,7 @@ describe("SendQueue", () => {
     const q = new SendQueue({
       send: async (msg) => {
         sent.push(msg);
+        return { ok: true };
       },
       minIntervalMs: 100,
     });
@@ -109,12 +112,14 @@ describe("SendQueue", () => {
     for (const c of sent) expect(c.length).toBeLessThanOrEqual(2000);
   });
 
-  it("continues after a send() throws — rest of the queue still drains", async () => {
+  it("continues after a send() reports failure — rest of the queue still drains", async () => {
     const sent: string[] = [];
     const q = new SendQueue({
+      // M-ACP-FAILLOUD-1: the send target now REPORTS failure instead of throwing.
       send: async (msg) => {
-        if (msg === "fail") throw new Error("network error");
+        if (msg === "fail") return { ok: false, error: new Error("network error") };
         sent.push(msg);
+        return { ok: true };
       },
       minIntervalMs: 50,
     });
@@ -122,10 +127,48 @@ describe("SendQueue", () => {
     q.enqueue("fail");
     q.enqueue("ok-2");
     await vi.advanceTimersByTimeAsync(2_000);
-    await q.drain();
+    const result = await q.drain();
     // M-ACP-2: the permanently-failing chunk is retried once, then a
     // visible delivery-failure marker is emitted; the queue continues.
     expect(sent).toEqual(["ok-1", DELIVERY_FAILURE_MARKER, "ok-2"]);
+    // M-ACP-FAILLOUD-1: drain() reports the failure so the dispatcher fails loud.
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]!.chunk).toBe("fail");
+    }
+  });
+
+  it("still continues + emits the marker if the send target THROWS (defensive)", async () => {
+    const sent: string[] = [];
+    const q = new SendQueue({
+      // A target that throws instead of returning is caught defensively and
+      // treated as a `!ok` result (M-ACP-FAILLOUD-1).
+      send: async (msg) => {
+        if (msg === "boom") throw new Error("network error");
+        sent.push(msg);
+        return { ok: true };
+      },
+      minIntervalMs: 50,
+    });
+    q.enqueue("ok-1");
+    q.enqueue("boom");
+    q.enqueue("ok-2");
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await q.drain();
+    expect(sent).toEqual(["ok-1", DELIVERY_FAILURE_MARKER, "ok-2"]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("drain() reports ok when every chunk is delivered", async () => {
+    const q = new SendQueue({
+      send: async () => ({ ok: true }),
+      minIntervalMs: 50,
+    });
+    q.enqueue("a");
+    q.enqueue("b");
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(q.drain()).resolves.toEqual({ ok: true });
   });
 });
 
@@ -143,14 +186,16 @@ describe("SendQueue delivery retry (M-ACP-2)", () => {
       send: async (text) => {
         if (failures > 0) {
           failures--;
-          throw new Error("platform hiccup");
+          return { ok: false, error: new Error("platform hiccup") };
         }
         received.push(text);
+        return { ok: true };
       },
     });
     q.enqueue("hello");
     await vi.advanceTimersByTimeAsync(5_000);
-    await q.drain();
+    // M-ACP-FAILLOUD-1: the retry succeeds → drain() reports ok.
+    await expect(q.drain()).resolves.toEqual({ ok: true });
     expect(received).toEqual(["hello"]);
   });
 
@@ -161,18 +206,24 @@ describe("SendQueue delivery retry (M-ACP-2)", () => {
       send: async (text) => {
         if (failures > 0) {
           failures--;
-          throw new Error("platform down");
+          return { ok: false, error: new Error("platform down") };
         }
         received.push(text);
+        return { ok: true };
       },
     });
     q.enqueue("lost chunk");
     q.enqueue("second chunk");
     await vi.advanceTimersByTimeAsync(10_000);
-    await q.drain();
+    const result = await q.drain();
     expect(received).toContain(DELIVERY_FAILURE_MARKER);
     expect(received).toContain("second chunk");
     expect(received).not.toContain("lost chunk");
     expect(received.filter((t) => t === DELIVERY_FAILURE_MARKER).length).toBe(1);
+    // M-ACP-FAILLOUD-1: the lost chunk is reported by drain().
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failures.map((f) => f.chunk)).toContain("lost chunk");
+    }
   });
 });

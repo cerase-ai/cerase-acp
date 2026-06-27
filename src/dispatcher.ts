@@ -5,16 +5,19 @@
 // `resolveSendTarget` is for.
 
 import { isAllowed } from "./allowlist.js";
+import type { DeliveryResult } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
-import { SendQueue } from "./send-queue.js";
+import { type DrainResult, SendQueue } from "./send-queue.js";
 import type { SessionManager } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import { detectLanguage, type TurnMetaTracker } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
 
-type SendTarget = (chunk: string) => Promise<void>;
+// M-ACP-FAILLOUD-1: the send target now reports delivery success/failure
+// instead of `Promise<void>`, so a swallowed channel error can surface.
+type SendTarget = (chunk: string) => Promise<DeliveryResult>;
 
 export interface DispatcherDeps {
   config: BridgeConfig;
@@ -109,20 +112,31 @@ export class Dispatcher {
    * channel WITHOUT running a model turn (e.g. the scheduled-message
    * heads-up "🕐 È scattato un messaggio programmato…"). Uses the same
    * send target the reply pipeline uses.
+   *
+   * M-ACP-FAILLOUD-1: returns the delivery outcome so the caller (the inject
+   * endpoint) can report a truthful status instead of a blind 202.
    */
-  async sendSystemMessage(agentId: string, userId: string, text: string): Promise<void> {
+  async sendSystemMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
     const send = this.deps.resolveSendTarget(agentId, userId);
-    await send(text);
+    return send(text);
   }
 
-  async handleMessage(agentId: string, userId: string, text: string): Promise<void> {
+  /**
+   * M-ACP-FAILLOUD-1 — `ok` iff the turn did NOT fail AND every delivery
+   * succeeded. A turn failure = `prompt()` threw (the existing `failed` flag);
+   * a delivery failure = the SendQueue lost a chunk after its retry, or a
+   * direct send (refusal / error-copy / empty-copy) ultimately failed. Every
+   * pre-existing behaviour (localized error/empty copy, credit-exhausted copy,
+   * allowlist refusal, the delivery-failure marker) is preserved.
+   */
+  async handleMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
     // Allowlist gate. isAllowed throws on unknown agent id — let that
     // propagate so the adapter logs it as a wiring bug.
     if (!isAllowed(this.deps.config, agentId, userId)) {
       logger.info({ agentId, userId }, "rejected DM: user not in allowlist");
       const send = this.deps.resolveSendTarget(agentId, userId);
-      await send(pickRefusalMessage(text));
-      return;
+      // The refusal is the whole response — its delivery outcome IS the result.
+      return this.safeSend(send, pickRefusalMessage(text), agentId, userId, "refusal message");
     }
 
     const send = this.deps.resolveSendTarget(agentId, userId);
@@ -142,6 +156,9 @@ export class Dispatcher {
     let produced = false;
     let failed = false;
     let creditExhausted = false;
+    let turnError: Error | undefined;
+    // M-ACP-FAILLOUD-1: the streamed-reply delivery outcome (from the queue).
+    let drainResult: DrainResult = { ok: true };
     try {
       await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
@@ -151,25 +168,69 @@ export class Dispatcher {
       });
     } catch (err) {
       failed = true;
+      turnError = err instanceof Error ? err : new Error(String(err));
       creditExhausted = isCreditExhaustedError(err);
       logger.error({ err, agentId, userId, creditExhausted }, "agent turn failed");
     } finally {
       buffer.end();
-      await queue.drain();
+      drainResult = await queue.drain();
     }
 
     // After any partial output has been flushed, tell the user what
-    // happened. Errors are best-effort: if even this send throws, the
-    // adapter's own catch logs it (no rethrow from here).
+    // happened. Best-effort: a failure here is logged + folded into the
+    // delivery outcome, never rethrown.
+    let deliveryOk = drainResult.ok;
     if (failed) {
       const copy = creditExhausted ? pickNoCreditsMessage(text) : pickErrorMessage(text);
-      await send(copy).catch((sendErr) =>
-        logger.error({ err: sendErr, agentId, userId }, "failed to deliver turn-error message"),
-      );
+      const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
+      if (!r.ok) deliveryOk = false;
     } else if (!produced) {
-      await send(pickEmptyMessage(text)).catch((sendErr) =>
-        logger.error({ err: sendErr, agentId, userId }, "failed to deliver empty-reply message"),
-      );
+      const r = await this.safeSend(send, pickEmptyMessage(text), agentId, userId, "empty-reply message");
+      if (!r.ok) deliveryOk = false;
     }
+
+    // M-ACP-FAILLOUD-1: fail loud. A failed turn always yields `{ ok: false }`
+    // (with the turn's own error); otherwise a swallowed delivery failure does.
+    if (failed) {
+      return { ok: false, error: turnError ?? new Error("agent turn failed") };
+    }
+    if (!deliveryOk) {
+      return { ok: false, error: this.deliveryError(drainResult) };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * M-ACP-FAILLOUD-1 — deliver a single best-effort message and report the
+   * outcome. A `!ok` result is logged; a send that still throws is caught and
+   * converted to a `!ok` result so it never escapes handleMessage.
+   */
+  private async safeSend(
+    send: SendTarget,
+    text: string,
+    agentId: string,
+    userId: string,
+    what: string,
+  ): Promise<DeliveryResult> {
+    try {
+      const r = await send(text);
+      if (!r.ok) {
+        logger.error({ err: r.error, agentId, userId }, `failed to deliver ${what}`);
+      }
+      return r;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      logger.error({ err: error, agentId, userId }, `failed to deliver ${what}`);
+      return { ok: false, error };
+    }
+  }
+
+  /** Reduce a drain outcome to a single representative Error for the result. */
+  private deliveryError(drainResult: DrainResult): Error {
+    if (!drainResult.ok && drainResult.failures.length > 0) {
+      const first = drainResult.failures[0]!;
+      return new Error(`delivery failed for ${drainResult.failures.length} chunk(s): ${first.error.message}`);
+    }
+    return new Error("delivery failed");
   }
 }

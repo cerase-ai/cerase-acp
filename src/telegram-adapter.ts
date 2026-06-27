@@ -17,7 +17,7 @@
 
 import type { Telegraf } from "telegraf";
 import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
-import type { ChatAdapter } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
@@ -141,15 +141,23 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
       }
     },
     makeSendTarget(userId: string) {
-      return async (chunk: string) => {
-        if (!bot) {
-          throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to sendMessage`);
+      return async (chunk: string): Promise<DeliveryResult> => {
+        // M-ACP-FAILLOUD-1: a sendMessage failure (or a "not started" state)
+        // is returned as `{ ok: false }` rather than thrown, so the failure
+        // travels up the SendQueue → Dispatcher → inject status truthfully.
+        try {
+          if (!bot) {
+            throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to sendMessage`);
+          }
+          // telegraf's Telegram API client lives at bot.telegram. The
+          // sendMessage method takes a chat_id (string for our purposes)
+          // and the text. No parse_mode → Telegram renders plain text,
+          // which matches the Discord adapter's no-formatting contract.
+          await bot.telegram.sendMessage(userId, chunk);
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
         }
-        // telegraf's Telegram API client lives at bot.telegram. The
-        // sendMessage method takes a chat_id (string for our purposes)
-        // and the text. No parse_mode → Telegram renders plain text,
-        // which matches the Discord adapter's no-formatting contract.
-        await bot.telegram.sendMessage(userId, chunk);
       };
     },
   };

@@ -25,7 +25,7 @@ function fakeAdapter(id: string): ChatAdapter {
     agentId: id,
     start: async () => {},
     stop: async () => {},
-    makeSendTarget: () => async () => {},
+    makeSendTarget: () => async () => ({ ok: true }),
   } as unknown as ChatAdapter;
 }
 

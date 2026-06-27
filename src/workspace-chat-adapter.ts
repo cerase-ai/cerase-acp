@@ -29,7 +29,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { chat_v1 } from "googleapis";
 import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
-import type { ChatAdapter } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
@@ -181,26 +181,34 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       }
     },
     makeSendTarget(userId: string) {
-      return async (chunk: string) => {
-        if (!chatClient) {
-          throw new Error(`workspace-chat adapter for agent "${agent.id}" not started — refusing to send`);
+      return async (chunk: string): Promise<DeliveryResult> => {
+        // M-ACP-FAILLOUD-1: any failure (not started, no DM space, a failed
+        // messages.create) is returned as `{ ok: false }` rather than thrown,
+        // so the failure travels up the SendQueue → Dispatcher → inject status.
+        try {
+          if (!chatClient) {
+            throw new Error(`workspace-chat adapter for agent "${agent.id}" not started — refusing to send`);
+          }
+          // The chat client posts to spaces.messages.create with the
+          // user's DM space name. We resolve the user's DM space via
+          // spaces.findDirectMessage which returns the canonical space
+          // name `spaces/AAA…`. Cached per user inside this closure
+          // would speed it up but is omitted for v0.1 simplicity.
+          const space = await chatClient.spaces.findDirectMessage({
+            name: `users/${userId}`,
+          });
+          const spaceName = space.data.name ?? undefined;
+          if (!spaceName) {
+            throw new Error(`workspace-chat: findDirectMessage returned no space name for user "${userId}"`);
+          }
+          await chatClient.spaces.messages.create({
+            parent: spaceName,
+            requestBody: { text: chunk },
+          });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
         }
-        // The chat client posts to spaces.messages.create with the
-        // user's DM space name. We resolve the user's DM space via
-        // spaces.findDirectMessage which returns the canonical space
-        // name `spaces/AAA…`. Cached per user inside this closure
-        // would speed it up but is omitted for v0.1 simplicity.
-        const space = await chatClient.spaces.findDirectMessage({
-          name: `users/${userId}`,
-        });
-        const spaceName = space.data.name ?? undefined;
-        if (!spaceName) {
-          throw new Error(`workspace-chat: findDirectMessage returned no space name for user "${userId}"`);
-        }
-        await chatClient.spaces.messages.create({
-          parent: spaceName,
-          requestBody: { text: chunk },
-        });
       };
     },
   };

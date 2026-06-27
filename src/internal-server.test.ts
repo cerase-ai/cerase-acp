@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { headsUpText, type InternalServer, startInternalServer } from "./internal-server.js";
 
 // Minimal Dispatcher fake — records the calls the endpoint makes.
-function makeFakeDispatcher() {
+// M-ACP-FAILLOUD-1: both methods now return a DeliveryResult; an optional
+// `outcome` lets a test simulate a failed turn/delivery so we can assert the
+// endpoint surfaces it as a 500.
+function makeFakeDispatcher(outcome: import("./chat-adapter.js").DeliveryResult = { ok: true }) {
   const calls: { handled: Array<[string, string, string]>; system: Array<[string, string, string]> } = {
     handled: [],
     system: [],
@@ -10,9 +13,11 @@ function makeFakeDispatcher() {
   const dispatcher = {
     async handleMessage(agentId: string, userId: string, text: string) {
       calls.handled.push([agentId, userId, text]);
+      return outcome;
     },
     async sendSystemMessage(agentId: string, userId: string, text: string) {
       calls.system.push([agentId, userId, text]);
+      return outcome;
     },
   } as unknown as import("./dispatcher.js").Dispatcher;
   return { dispatcher, calls };
@@ -105,6 +110,53 @@ describe("internal-server /internal/inject", () => {
   it("404s for any other path", async () => {
     const resp = await fetch(`${base}/nope`, { headers: { authorization: `Bearer ${SECRET}` } });
     expect(resp.status).toBe(404);
+  });
+});
+
+// M-ACP-FAILLOUD-1 — a failed turn / swallowed delivery failure must surface
+// as a truthful 500 instead of a blind 202, so the control-plane caller sees
+// the failure (and the UI stops spinning) instead of a false success.
+describe("internal-server /internal/inject fail-loud (M-ACP-FAILLOUD-1)", () => {
+  let server: InternalServer;
+  let base: string;
+
+  const startWith = async (outcome: import("./chat-adapter.js").DeliveryResult) => {
+    server = await startInternalServer({
+      dispatcher: makeFakeDispatcher(outcome).dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+  };
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const post = (body: unknown) =>
+    fetch(`${base}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify(body),
+    });
+
+  it("500s when the dispatcher reports a failed turn/delivery", async () => {
+    await startWith({ ok: false, error: new Error("turn failed") });
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", surface_in_chat: false });
+    expect(resp.status).toBe(500);
+  });
+
+  it("202s when the dispatcher reports success", async () => {
+    await startWith({ ok: true });
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", surface_in_chat: false });
+    expect(resp.status).toBe(202);
+  });
+
+  it("500s a system_message_only inject when delivery fails", async () => {
+    await startWith({ ok: false, error: new Error("channel down") });
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", system_message_only: true });
+    expect(resp.status).toBe(500);
   });
 });
 

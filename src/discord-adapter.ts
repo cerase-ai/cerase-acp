@@ -6,7 +6,7 @@
 // BRIDGE_E2E_TEST endpoint, without unit-testing discord.js mocks.
 
 import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partials } from "discord.js";
-import type { ChatAdapter } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
@@ -116,41 +116,57 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         logger.warn({ err, agentId: agent.id }, "error during discord client destroy");
       }
     },
-    async sendFile(userId: string, file: { name: string; bytes: Buffer; caption?: string }) {
-      let channel = dmChannels.get(userId);
-      if (!channel) {
-        const user = await client.users.fetch(userId);
-        channel = (await user.createDM()) as DMChannel;
-        dmChannels.set(userId, channel);
-      }
-      // CHAT-UX / ATTACH-1: upload the workspace file as a real Discord
-      // attachment. `attachment` accepts a Buffer directly.
-      await channel.send({
-        content: file.caption,
-        files: [{ attachment: file.bytes, name: file.name }],
-      });
-    },
-    makeSendTarget(userId: string) {
-      return async (chunk: string) => {
+    async sendFile(userId: string, file: { name: string; bytes: Buffer; caption?: string }): Promise<DeliveryResult> {
+      // M-ACP-FAILLOUD-1: return the outcome instead of throwing, so the
+      // bridge can log + degrade gracefully on an attachment-upload failure.
+      try {
         let channel = dmChannels.get(userId);
         if (!channel) {
           const user = await client.users.fetch(userId);
           channel = (await user.createDM()) as DMChannel;
           dmChannels.set(userId, channel);
         }
-        await channel.send(chunk);
-        // OPT-67 (2026-06-02): post-send sendTyping removed. Was added
-        // in M18 to close the visual gap until the next 7s keepalive
-        // tick — but it leaves a ghost typing indicator visible for
-        // ~10s after the FINAL chunk of a turn (Discord auto-stop
-        // window), which reads as "still thinking" when the agent
-        // is actually done. The keepalive setInterval running in
-        // parallel from `startTypingKeepalive` covers intermediate
-        // chunks just fine (worst-case 7s gap between Discord auto-
-        // clear on send and the next keepalive sendTyping). The
-        // bridge's MessageCreate `finally` block calls stopTyping()
-        // immediately when handleMessage returns, so no tick fires
-        // after the last channel.send → typing clears cleanly.
+        // CHAT-UX / ATTACH-1: upload the workspace file as a real Discord
+        // attachment. `attachment` accepts a Buffer directly.
+        await channel.send({
+          content: file.caption,
+          files: [{ attachment: file.bytes, name: file.name }],
+        });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    },
+    makeSendTarget(userId: string) {
+      return async (chunk: string): Promise<DeliveryResult> => {
+        // M-ACP-FAILLOUD-1: a failed channel.send (slot down, gateway drop,
+        // user blocked the bot) is returned as `{ ok: false }` rather than
+        // thrown — the SendQueue retries once, then the failure surfaces all
+        // the way to the inject HTTP status instead of being swallowed.
+        try {
+          let channel = dmChannels.get(userId);
+          if (!channel) {
+            const user = await client.users.fetch(userId);
+            channel = (await user.createDM()) as DMChannel;
+            dmChannels.set(userId, channel);
+          }
+          await channel.send(chunk);
+          // OPT-67 (2026-06-02): post-send sendTyping removed. Was added
+          // in M18 to close the visual gap until the next 7s keepalive
+          // tick — but it leaves a ghost typing indicator visible for
+          // ~10s after the FINAL chunk of a turn (Discord auto-stop
+          // window), which reads as "still thinking" when the agent
+          // is actually done. The keepalive setInterval running in
+          // parallel from `startTypingKeepalive` covers intermediate
+          // chunks just fine (worst-case 7s gap between Discord auto-
+          // clear on send and the next keepalive sendTyping). The
+          // bridge's MessageCreate `finally` block calls stopTyping()
+          // immediately when handleMessage returns, so no tick fires
+          // after the last channel.send → typing clears cleanly.
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+        }
       };
     },
   };

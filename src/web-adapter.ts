@@ -12,7 +12,7 @@
 // pipeline (session-manager, prompt-queue, allowlist, turn-meta) is
 // channel-agnostic and unchanged, exactly the CHANNEL-1 contract.
 
-import type { ChatAdapter } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { makeLogger } from "./logger.js";
@@ -29,7 +29,7 @@ export function createWebAdapter(agent: AgentConfig, _dispatcher: Dispatcher): C
       // Nothing to tear down.
     },
     makeSendTarget(userId: string) {
-      return async (chunk: string) => {
+      return async (chunk: string): Promise<DeliveryResult> => {
         // The reply lives in opencode's session DB and is surfaced by the
         // Filament timeline; on the `web` channel there is nowhere else to
         // send it, so the chunk is intentionally discarded.
@@ -37,6 +37,10 @@ export function createWebAdapter(agent: AgentConfig, _dispatcher: Dispatcher): C
           { agentId: agent.id, userId, chunkLen: chunk.length },
           "web channel: reply chunk discarded (read from the opencode timeline)",
         );
+        // M-ACP-FAILLOUD-1: discarding IS success for the web channel — the
+        // reply is read from the opencode timeline, never from here. Report
+        // ok so a maintainer turn is never mislabelled as a delivery failure.
+        return { ok: true };
       };
     },
   };
