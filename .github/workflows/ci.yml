@@ -8,8 +8,13 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # M-CI-COST-1: skip CI on planning-only commits.
+    paths-ignore:
+      - 'devplan/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'devplan/**'
   # M-CI-1: callable as a gate from docker-publish.yml.
   workflow_call:
 

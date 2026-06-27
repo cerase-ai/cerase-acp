@@ -13,8 +13,13 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # M-CI-COST-1: skip image builds on planning-only commits.
+    paths-ignore:
+      - 'devplan/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'devplan/**'
   workflow_dispatch:
 
 env:
@@ -22,10 +27,12 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/cerase-acp
 
 # M-CI-1: serialise publishes per ref so two rapid pushes can't race
-# and move :latest backwards. No cancel-in-progress — tag builds finish.
+# and move :latest backwards.
+# M-CI-COST-1: cancel superseded branch builds (cheaper + safer for :latest);
+# tag builds must finish.
 concurrency:
   group: publish-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   # M-CI-1: gate the publish on a green suite. needs: only works within
