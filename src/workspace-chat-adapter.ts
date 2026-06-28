@@ -32,7 +32,7 @@ import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
+import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
@@ -154,8 +154,14 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
               logger.warn({ err, agentId: agent.id, name: att.name }, "workspace-chat media download failed — skipped");
             }
           }
-          const relPaths = await ingestInboundBuffers(`cerase-${agent.id}`, buffers);
-          outText = prependUploadMarker(text, relPaths);
+          const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers);
+          outText = prependUploadMarker(text, stored);
+          // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
+          // instead of dropping them silently; the stored files still flow.
+          const notice = buildOversizeNotice(rejected);
+          if (notice) {
+            await dispatcher.sendSystemMessage(agent.id, userId, notice);
+          }
         }
         await dispatcher.handleMessage(agent.id, userId, outText);
         // Acknowledge synchronously; reply chunks are sent

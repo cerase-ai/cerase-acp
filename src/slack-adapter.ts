@@ -23,7 +23,7 @@ import { extractSlackFiles } from "./channel-attachments.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.slack");
@@ -71,10 +71,16 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
           // Slack file URLs (url_private) require the bot token to download.
           let outText = text;
           if (slackFiles.length > 0) {
-            const relPaths = await ingestInboundAttachments(`cerase-${agent.id}`, slackFiles, {
+            const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, slackFiles, {
               headers: { Authorization: `Bearer ${agent.bot_token}` },
             });
-            outText = prependUploadMarker(text, relPaths);
+            outText = prependUploadMarker(text, stored);
+            // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
+            // instead of dropping them silently; the stored files still flow.
+            const notice = buildOversizeNotice(rejected);
+            if (notice) {
+              await dispatcher.sendSystemMessage(agent.id, userId, notice);
+            }
           }
           await dispatcher.handleMessage(agent.id, userId, outText);
         } catch (err) {

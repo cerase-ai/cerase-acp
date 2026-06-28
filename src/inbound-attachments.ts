@@ -14,12 +14,13 @@ import { type FileWriter, writeAgentWorkspaceFile } from "./workspace-files.js";
 const logger = makeLogger("cerase-acp.attachments");
 
 /**
- * M-FILE-LIMITS-1 — inbound chat-upload cap, in bytes. Operator-tunable via
+ * M-FILE-LIMITS-1 — inbound chat-upload cap, in MB. Operator-tunable via
  * CERASE_MAX_ATTACHMENT_MB (default 64). The CHANNEL's own upload limit
  * (Discord ~25 MB, Telegram/Slack higher) is the real ceiling — it binds before
  * this — so this is just the platform-side cap, no longer the old 8 MB floor.
  */
-const DEFAULT_MAX_BYTES = (Number(process.env.CERASE_MAX_ATTACHMENT_MB) || 64) * 1024 * 1024;
+export const MAX_ATTACHMENT_MB = Number(process.env.CERASE_MAX_ATTACHMENT_MB) || 64;
+const DEFAULT_MAX_BYTES = MAX_ATTACHMENT_MB * 1024 * 1024;
 
 export interface InboundFile {
   /** Original filename as the channel reports it. */
@@ -30,6 +31,30 @@ export interface InboundFile {
 
 /** Injectable for tests: GET a URL → bytes. Defaults to global fetch. */
 export type UrlFetcher = (url: string, headers?: Record<string, string>) => Promise<Buffer>;
+
+/**
+ * M-FILE-LIMITS-1 (fail-loud) — a file the ingest refused because it exceeded
+ * the size cap. Surfaced to the caller so the adapter can TELL the user the
+ * upload was dropped, instead of the old silent skip.
+ */
+export interface RejectedFile {
+  /** Original filename as the channel reported it. */
+  name: string;
+  /** The fetched size that blew the cap, in bytes. */
+  sizeBytes: number;
+  /** Why it was refused. Only `oversize` today; an enum for future reasons. */
+  reason: "oversize";
+}
+
+/**
+ * The outcome of an ingest: the workspace paths that were stored, plus any
+ * files refused by the cap. `rejected` is non-empty → the adapter must notify
+ * the user (M-FILE-LIMITS-1 fail-loud); the stored files still flow normally.
+ */
+export interface IngestResult {
+  stored: string[];
+  rejected: RejectedFile[];
+}
 
 export interface IngestOptions {
   maxBytes?: number;
@@ -65,26 +90,30 @@ export function sanitizeFilename(name: string): string {
 /**
  * Shared core: write each named buffer into the agent workspace under
  * `uploads/<ts>-<i>/<sanitized-name>`, returning the stored workspace-relative
- * paths. A file that fails to fetch/write is logged and skipped — one bad
- * attachment never drops the whole turn.
+ * paths plus the files refused by the size cap. A file that fails to
+ * fetch/write is logged and skipped — one bad attachment never drops the whole
+ * turn — but an over-cap file is recorded in `rejected` so the adapter can
+ * fail loud (M-FILE-LIMITS-1) instead of dropping it silently.
  */
 async function storeInbound(
   containerName: string,
   items: Array<{ name: string; get: () => Promise<Buffer> }>,
   opts?: IngestOptions,
-): Promise<string[]> {
+): Promise<IngestResult> {
   const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
   const now = opts?.now ?? (() => Date.now());
   const stamp = now();
 
   const stored: string[] = [];
+  const rejected: RejectedFile[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     const relPath = `uploads/${stamp}-${i}/${sanitizeFilename(item.name)}`;
     try {
       const bytes = await item.get();
       if (bytes.length > maxBytes) {
-        logger.warn({ containerName, name: item.name, size: bytes.length }, "inbound attachment over cap — skipped");
+        logger.warn({ containerName, name: item.name, size: bytes.length }, "inbound attachment over cap — rejected");
+        rejected.push({ name: item.name, sizeBytes: bytes.length, reason: "oversize" });
         continue;
       }
       await writeAgentWorkspaceFile(containerName, relPath, bytes, { maxBytes, writer: opts?.writer });
@@ -93,7 +122,7 @@ async function storeInbound(
       logger.warn({ err, containerName, name: item.name }, "inbound attachment fetch/write failed — skipped");
     }
   }
-  return stored;
+  return { stored, rejected };
 }
 
 /**
@@ -105,7 +134,7 @@ export async function ingestInboundAttachments(
   containerName: string,
   files: InboundFile[],
   opts?: IngestOptions,
-): Promise<string[]> {
+): Promise<IngestResult> {
   const fetcher = opts?.fetcher ?? realFetcher;
   return storeInbound(
     containerName,
@@ -123,7 +152,7 @@ export async function ingestInboundBuffers(
   containerName: string,
   files: Array<{ name: string; bytes: Buffer }>,
   opts?: IngestOptions,
-): Promise<string[]> {
+): Promise<IngestResult> {
   return storeInbound(
     containerName,
     files.map((f) => ({ name: f.name, get: async () => f.bytes })),
@@ -143,4 +172,23 @@ export function prependUploadMarker(text: string, relPaths: string[]): string {
   const marker = `[Uploaded files: ${relPaths.join(", ")}]`;
   const body = text.trim();
   return body === "" ? marker : `${marker}\n\n${body}`;
+}
+
+/**
+ * M-FILE-LIMITS-1 (fail-loud) — build the Italian, user-facing notice telling
+ * the user which uploads were dropped for exceeding the size cap. Returns
+ * `undefined` when nothing was rejected (so the caller sends nothing). Every
+ * real adapter calls this after ingest and, if a string comes back, delivers
+ * it via `dispatcher.sendSystemMessage` — replacing the old silent drop.
+ */
+export function buildOversizeNotice(rejected: RejectedFile[]): string | undefined {
+  const oversize = rejected.filter((r) => r.reason === "oversize");
+  if (oversize.length === 0) {
+    return undefined;
+  }
+  if (oversize.length === 1) {
+    return `Il file «${oversize[0]!.name}» supera il limite di ${MAX_ATTACHMENT_MB} MB e non è stato caricato.`;
+  }
+  const names = oversize.map((r) => `«${r.name}»`).join(", ");
+  return `I file ${names} superano il limite di ${MAX_ATTACHMENT_MB} MB e non sono stati caricati.`;
 }

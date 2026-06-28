@@ -20,7 +20,7 @@ import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attach
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
@@ -105,8 +105,14 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
               logger.warn({ err, agentId: agent.id, fileId: ref.fileId }, "telegram getFileLink failed — skipped");
             }
           }
-          const relPaths = await ingestInboundAttachments(`cerase-${agent.id}`, files);
-          const text = prependUploadMarker(caption, relPaths);
+          const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, files);
+          const text = prependUploadMarker(caption, stored);
+          // M-FILE-LIMITS-1 (fail-loud): notify BEFORE the empty-message
+          // early-return, so an all-oversize/no-caption upload isn't silent.
+          const notice = buildOversizeNotice(rejected);
+          if (notice) {
+            await dispatcher.sendSystemMessage(agent.id, userId, notice);
+          }
           if (!text) return; // nothing downloaded and no caption
           await dispatcher.handleMessage(agent.id, userId, text);
         } catch (err) {

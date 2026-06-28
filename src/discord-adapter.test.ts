@@ -73,3 +73,27 @@ describe("cross-adapter typing invariants (OPT-67)", () => {
     });
   }
 });
+
+// M-FILE-LIMITS-1 (fail-loud). Every real adapter that ingests inbound
+// attachments must, when the size cap rejects a file, TELL the user instead
+// of dropping it silently. Driving the wired-in SDK handlers end-to-end needs
+// a full discord.js / telegraf / @slack/bolt / googleapis harness (the same
+// reason the OPT-67 tests above grep the source); a structural pin is the
+// right level here. The notice-building + cap logic itself is covered
+// behaviourally in inbound-attachments.test.ts (buildOversizeNotice + ingest
+// `rejected` shape). This guards that each adapter actually CALLS it.
+describe("cross-adapter fail-loud on oversize attachment (M-FILE-LIMITS-1)", () => {
+  const adapterFiles = ["discord-adapter.ts", "telegram-adapter.ts", "slack-adapter.ts", "workspace-chat-adapter.ts"];
+
+  for (const fname of adapterFiles) {
+    it(`${fname}: imports buildOversizeNotice and delivers it via sendSystemMessage`, () => {
+      const src = readFileSync(join(here, fname), "utf8");
+      // Imported from the shared module…
+      expect(src).toMatch(/import\s*\{[^}]*buildOversizeNotice[^}]*\}\s*from\s*"\.\/inbound-attachments\.js"/);
+      // …called on the ingest `rejected` set…
+      expect(src).toMatch(/buildOversizeNotice\(/);
+      // …and the resulting notice is sent to the user (not just logged).
+      expect(src).toMatch(/sendSystemMessage\(/);
+    });
+  }
+});

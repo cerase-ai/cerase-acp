@@ -9,7 +9,7 @@ import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partia
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
@@ -72,8 +72,14 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         // C4-2 — download inbound files into the agent workspace + prepend the
         // [Uploaded files: …] marker the message-attachment-receiver skill reads.
         if (inbound.length > 0) {
-          const relPaths = await ingestInboundAttachments(`cerase-${agent.id}`, inbound);
-          text = prependUploadMarker(text, relPaths);
+          const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, inbound);
+          text = prependUploadMarker(text, stored);
+          // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
+          // instead of dropping them silently; the stored files still flow.
+          const notice = buildOversizeNotice(rejected);
+          if (notice) {
+            await dispatcher.sendSystemMessage(agent.id, userId, notice);
+          }
         }
         await dispatcher.handleMessage(agent.id, userId, text);
       } finally {
