@@ -171,3 +171,29 @@ describe("M-EGRESS-HARDEN-1: provider self-identification + internal artifacts",
     expect(once).not.toMatch(/litellm/i);
   });
 });
+
+describe("M-ASSISTANT-MULTITASK-1: scrub the internal subagent/task primitive", () => {
+  it("scrubs bare subagent / sub-agent jargon", () => {
+    expect(redactEngineIdentifiers("Avvio un subagent per cercare.")).not.toMatch(/sub-?agent/i);
+    expect(redactEngineIdentifiers("Avvio un subagent per cercare.")).toContain("lavoro in parallelo");
+    expect(redactEngineIdentifiers("Delego a un sub-agent.")).not.toMatch(/sub-?agent/i);
+  });
+
+  it("scrubs the named engine primitive (task tool / task subagent / `task(...)`)", () => {
+    expect(redactEngineIdentifiers("Uso il task tool per questo.")).not.toMatch(/task[\s-]?tool/i);
+    expect(redactEngineIdentifiers("Lancio un task subagent.")).not.toMatch(/task[\s-]?subagent/i);
+    expect(redactEngineIdentifiers("Chiamo `task(general)` adesso.")).not.toContain("`task(");
+  });
+
+  it("does NOT scrub the board word 'task' (legitimate user-facing noun)", () => {
+    const board = "Ho creato il task e l'ho messo in Fatto.";
+    expect(redactEngineIdentifiers(board)).toBe(board);
+    const plural = "Ecco le tue task per oggi.";
+    expect(redactEngineIdentifiers(plural)).toBe(plural);
+  });
+
+  it("is idempotent", () => {
+    const once = redactEngineIdentifiers("Avvio un subagent e un task tool.");
+    expect(redactEngineIdentifiers(once)).toBe(once);
+  });
+});

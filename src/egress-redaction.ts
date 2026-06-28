@@ -80,6 +80,35 @@ const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replace
 ];
 
 /**
+ * M-ASSISTANT-MULTITASK-1 — when the opt-in parallel-work behaviour is on, the
+ * assistant fans independent sub-tasks out to the engine's built-in `task` /
+ * subagent primitive. It must narrate that like a colleague ("intanto porto
+ * avanti X e Y") and NEVER expose the internal nouns. The SlotWriter voice rule
+ * keeps the common path clean; this is the deterministic backstop for a degraded
+ * turn that leaks the scaffolding word.
+ *
+ * HIGH-PRECISION on `task`: the bare word is a legitimate user-facing noun — a
+ * board work-item ("ho creato il task", "le tue task") — so it is NEVER scrubbed
+ * bare (that would mangle the cerase-tasks board language). Only the unambiguous
+ * ENGINE-primitive surface is scrubbed:
+ *   - `subagent` / `sub-agent` (no legitimate user-facing meaning at all);
+ *   - the paired `task tool` / `task subagent` phrase;
+ *   - a backticked `task(...)` invocation spelled out as text.
+ * Each collapses to the colleague phrase "lavoro in parallelo", which reads in
+ * place of the noun ("avvio un subagent" → "avvio un lavoro in parallelo").
+ * REVIEW this set on every OpenCode bump (same note as the engine list above).
+ */
+const MULTITASK_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+  // The engine primitive named explicitly ("task tool" / "task subagent"). Run
+  // BEFORE the bare-subagent pass so "task subagent" collapses as one unit.
+  { pattern: /\btask[\s-]?(?:tool|subagents?|sub-agents?)\b/gi, replacement: "lavoro in parallelo" },
+  // A backticked `task(...)` call spelled out as text — internal call syntax.
+  { pattern: /`task\([^`]*\)`/gi, replacement: "lavoro in parallelo" },
+  // Bare engine "subagent(s)" — internal jargon, never user-facing.
+  { pattern: /\bsub[\s-]?agents?\b/gi, replacement: "lavoro in parallelo" },
+];
+
+/**
  * Strip/replace known OpenCode engine identifiers + leaked provider names /
  * internal artifacts from a user-facing reply. Pure + idempotent. Empty input
  * is returned unchanged.
@@ -91,6 +120,9 @@ export function redactEngineIdentifiers(text: string): string {
     out = out.replace(pattern, replacement);
   }
   for (const { pattern, replacement } of IDENTITY_AND_ARTIFACT_REDACTIONS) {
+    out = out.replace(pattern, replacement);
+  }
+  for (const { pattern, replacement } of MULTITASK_REDACTIONS) {
     out = out.replace(pattern, replacement);
   }
   return out;
