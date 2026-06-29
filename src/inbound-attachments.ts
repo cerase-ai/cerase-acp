@@ -15,12 +15,31 @@ const logger = makeLogger("cerase-acp.attachments");
 
 /**
  * M-FILE-LIMITS-1 — inbound chat-upload cap, in MB. Operator-tunable via
- * CERASE_MAX_ATTACHMENT_MB (default 64). The CHANNEL's own upload limit
- * (Discord ~25 MB, Telegram/Slack higher) is the real ceiling — it binds before
- * this — so this is just the platform-side cap, no longer the old 8 MB floor.
+ * CERASE_MAX_ATTACHMENT_MB (default 64). This is the operator's global setting;
+ * the EFFECTIVE per-channel cap is `min(this, the channel's platform ceiling)` —
+ * see `effectiveMaxMb`. Whichever is lower binds.
  */
 export const MAX_ATTACHMENT_MB = Number(process.env.CERASE_MAX_ATTACHMENT_MB) || 64;
 const DEFAULT_MAX_BYTES = MAX_ATTACHMENT_MB * 1024 * 1024;
+
+/** The chat channels that ingest inbound attachments (the web panel doesn't). */
+export type Channel = "discord" | "telegram" | "slack" | "workspace-chat";
+
+/**
+ * Each channel's real platform ceiling for an inbound file, in MB. The
+ * EFFECTIVE cap is `min(MAX_ATTACHMENT_MB, this)`. Discord caps DM uploads at
+ * ~25 MB; Telegram's Bot API getFile download tops out at 20 MB (the LOWEST of
+ * the lot — lower than Discord); Slack allows up to ~1 GB. A channel with NO
+ * entry here falls back to the global setting alone — workspace-chat is the
+ * internal web chat, which has no platform ceiling, so it is intentionally
+ * omitted and the operator's MAX_ATTACHMENT_MB binds.
+ */
+const CHANNEL_MAX_MB: Partial<Record<Channel, number>> = { discord: 25, telegram: 20, slack: 1024 };
+
+/** The effective inbound cap for a channel, in MB: min(global setting, channel ceiling). */
+export function effectiveMaxMb(channel: Channel): number {
+  return Math.min(MAX_ATTACHMENT_MB, CHANNEL_MAX_MB[channel] ?? Number.POSITIVE_INFINITY);
+}
 
 export interface InboundFile {
   /** Original filename as the channel reports it. */
@@ -98,9 +117,13 @@ export function sanitizeFilename(name: string): string {
 async function storeInbound(
   containerName: string,
   items: Array<{ name: string; get: () => Promise<Buffer> }>,
+  channel: Channel,
   opts?: IngestOptions,
 ): Promise<IngestResult> {
-  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+  // The effective cap is the lower of the operator's setting (or an explicit
+  // per-call override) and this channel's platform ceiling.
+  const channelBytes = effectiveMaxMb(channel) * 1024 * 1024;
+  const maxBytes = Math.min(opts?.maxBytes ?? DEFAULT_MAX_BYTES, channelBytes);
   const now = opts?.now ?? (() => Date.now());
   const stamp = now();
 
@@ -133,12 +156,14 @@ async function storeInbound(
 export async function ingestInboundAttachments(
   containerName: string,
   files: InboundFile[],
+  channel: Channel,
   opts?: IngestOptions,
 ): Promise<IngestResult> {
   const fetcher = opts?.fetcher ?? realFetcher;
   return storeInbound(
     containerName,
     files.map((f) => ({ name: f.name, get: () => fetcher(f.url, opts?.headers) })),
+    channel,
     opts,
   );
 }
@@ -151,11 +176,13 @@ export async function ingestInboundAttachments(
 export async function ingestInboundBuffers(
   containerName: string,
   files: Array<{ name: string; bytes: Buffer }>,
+  channel: Channel,
   opts?: IngestOptions,
 ): Promise<IngestResult> {
   return storeInbound(
     containerName,
     files.map((f) => ({ name: f.name, get: async () => f.bytes })),
+    channel,
     opts,
   );
 }
@@ -181,14 +208,17 @@ export function prependUploadMarker(text: string, relPaths: string[]): string {
  * real adapter calls this after ingest and, if a string comes back, delivers
  * it via `dispatcher.sendSystemMessage` — replacing the old silent drop.
  */
-export function buildOversizeNotice(rejected: RejectedFile[]): string | undefined {
+export function buildOversizeNotice(rejected: RejectedFile[], channel: Channel): string | undefined {
   const oversize = rejected.filter((r) => r.reason === "oversize");
   if (oversize.length === 0) {
     return undefined;
   }
+  // Report the EFFECTIVE per-channel cap, so the user sees the real ceiling
+  // that bound (e.g. 25 MB on Discord), not just the global setting.
+  const cap = effectiveMaxMb(channel);
   if (oversize.length === 1) {
-    return `Il file «${oversize[0]!.name}» supera il limite di ${MAX_ATTACHMENT_MB} MB e non è stato caricato.`;
+    return `Il file «${oversize[0]!.name}» supera il limite di ${cap} MB e non è stato caricato.`;
   }
   const names = oversize.map((r) => `«${r.name}»`).join(", ");
-  return `I file ${names} superano il limite di ${MAX_ATTACHMENT_MB} MB e non sono stati caricati.`;
+  return `I file ${names} superano il limite di ${cap} MB e non sono stati caricati.`;
 }

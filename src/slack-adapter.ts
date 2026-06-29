@@ -71,13 +71,13 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
           // Slack file URLs (url_private) require the bot token to download.
           let outText = text;
           if (slackFiles.length > 0) {
-            const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, slackFiles, {
+            const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, slackFiles, "slack", {
               headers: { Authorization: `Bearer ${agent.bot_token}` },
             });
             outText = prependUploadMarker(text, stored);
             // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
             // instead of dropping them silently; the stored files still flow.
-            const notice = buildOversizeNotice(rejected);
+            const notice = buildOversizeNotice(rejected, "slack");
             if (notice) {
               await dispatcher.sendSystemMessage(agent.id, userId, notice);
             }

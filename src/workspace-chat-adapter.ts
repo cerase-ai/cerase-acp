@@ -154,11 +154,11 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
               logger.warn({ err, agentId: agent.id, name: att.name }, "workspace-chat media download failed — skipped");
             }
           }
-          const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers);
+          const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
           outText = prependUploadMarker(text, stored);
           // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
           // instead of dropping them silently; the stored files still flow.
-          const notice = buildOversizeNotice(rejected);
+          const notice = buildOversizeNotice(rejected, "workspace-chat");
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
           }

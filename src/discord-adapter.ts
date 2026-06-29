@@ -72,11 +72,11 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         // C4-2 — download inbound files into the agent workspace + prepend the
         // [Uploaded files: …] marker the message-attachment-receiver skill reads.
         if (inbound.length > 0) {
-          const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, inbound);
+          const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, inbound, "discord");
           text = prependUploadMarker(text, stored);
           // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
           // instead of dropping them silently; the stored files still flow.
-          const notice = buildOversizeNotice(rejected);
+          const notice = buildOversizeNotice(rejected, "discord");
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
           }

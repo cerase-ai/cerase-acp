@@ -83,15 +83,25 @@ describe("cross-adapter typing invariants (OPT-67)", () => {
 // behaviourally in inbound-attachments.test.ts (buildOversizeNotice + ingest
 // `rejected` shape). This guards that each adapter actually CALLS it.
 describe("cross-adapter fail-loud on oversize attachment (M-FILE-LIMITS-1)", () => {
-  const adapterFiles = ["discord-adapter.ts", "telegram-adapter.ts", "slack-adapter.ts", "workspace-chat-adapter.ts"];
+  // Each adapter must pass its own channel literal so the effective per-channel
+  // cap (min(setting, channel ceiling)) and the oversize notice's MB figure are
+  // computed for the right platform.
+  const channelByAdapter: Record<string, string> = {
+    "discord-adapter.ts": "discord",
+    "telegram-adapter.ts": "telegram",
+    "slack-adapter.ts": "slack",
+    "workspace-chat-adapter.ts": "workspace-chat",
+  };
 
-  for (const fname of adapterFiles) {
+  for (const [fname, channel] of Object.entries(channelByAdapter)) {
     it(`${fname}: imports buildOversizeNotice and delivers it via sendSystemMessage`, () => {
       const src = readFileSync(join(here, fname), "utf8");
       // Imported from the shared module…
       expect(src).toMatch(/import\s*\{[^}]*buildOversizeNotice[^}]*\}\s*from\s*"\.\/inbound-attachments\.js"/);
-      // …called on the ingest `rejected` set…
-      expect(src).toMatch(/buildOversizeNotice\(/);
+      // …called on the ingest `rejected` set, with this adapter's channel literal…
+      expect(src).toMatch(new RegExp(`buildOversizeNotice\\([^)]*"${channel}"`));
+      // …the ingest itself also passes the channel literal…
+      expect(src).toMatch(new RegExp(`ingestInbound(?:Attachments|Buffers)\\([^;]*"${channel}"`));
       // …and the resulting notice is sent to the user (not just logged).
       expect(src).toMatch(/sendSystemMessage\(/);
     });

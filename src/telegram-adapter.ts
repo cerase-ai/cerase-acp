@@ -105,11 +105,11 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
               logger.warn({ err, agentId: agent.id, fileId: ref.fileId }, "telegram getFileLink failed — skipped");
             }
           }
-          const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, files);
+          const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, files, "telegram");
           const text = prependUploadMarker(caption, stored);
           // M-FILE-LIMITS-1 (fail-loud): notify BEFORE the empty-message
           // early-return, so an all-oversize/no-caption upload isn't silent.
-          const notice = buildOversizeNotice(rejected);
+          const notice = buildOversizeNotice(rejected, "telegram");
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
           }
