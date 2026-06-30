@@ -6,13 +6,25 @@ updates:
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     labels: [deps, js]
+    # M-CI-COST-2: collapse all npm updates into one PR.
+    groups:
+      npm:
+        patterns: ["*"]
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 3
     labels: [deps, docker]
+    # M-CI-COST-2: collapse all docker updates into one PR.
+    groups:
+      docker:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: monthly }
     open-pull-requests-limit: 3
     labels: [deps, ci]
+    # M-CI-COST-2: collapse all github-actions updates into one PR.
+    groups:
+      actions:
+        patterns: ["*"]
