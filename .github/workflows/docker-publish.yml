@@ -7,17 +7,16 @@ name: Build & publish Docker image
 #   - push to main           → tags: latest, main, sha-<short>
 #   - push of a `v*` git tag → tags: <tag>, <semver>, latest (only if not pre-release)
 #   - manual workflow_dispatch (any branch)
-#   - pull_request (build only — no push — to validate the Dockerfile)
+#
+# M-CI-COST-2: the team pushes directly to main (PRs are dependabot-only) and
+# the PR build was validation-only (no push) — the most expensive PR step.
+# Dropped the pull_request trigger; a Dockerfile break is caught on merge to main.
 
 on:
   push:
     branches: [main]
     tags: ['v*']
     # M-CI-COST-1: skip image builds on planning-only commits.
-    paths-ignore:
-      - 'devplan/**'
-  pull_request:
-    branches: [main]
     paths-ignore:
       - 'devplan/**'
   workflow_dispatch:
