@@ -7,9 +7,18 @@
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first.
+// M-ACP-INJECT-ACK-1: the 202 means ACCEPTED (validation + allowlist passed),
+// not "turn completed" — the caller (AcpInjector) uses a 15s fire-and-forget
+// timeout, and awaiting the full model turn made every >15s turn throw
+// ChatInjectFailed client-side while the turn actually ran, so the scheduled
+// dispatcher re-fired it (duplicate DMs). The heads-up + turn run as a logged
+// background task; failures stay observable (M-ACP-FAILLOUD) via loud logs +
+// the `inject` block of GET /internal/status.
 // E3: when `system_message_only` is true it instead delivers `text` straight
 // to the DM as a system message and runs NO model turn (the E2 bind-time
-// connect nudge — a notification, not a prompt the agent should answer).
+// connect nudge — a notification, not a prompt the agent should answer);
+// that path is a fast channel send, so it stays synchronous and keeps its
+// truthful 500 on delivery failure.
 // This is the productionised counterpart of the BRIDGE_E2E_TEST-gated
 // /_test/inject (test-injection.ts).
 
@@ -77,9 +86,58 @@ export function headsUpText(body: string): string {
   return `🕐 Ricevuto messaggio temporizzato:\n\`\`\`\n${body}\n\`\`\`\nora lo prendo in carico.`;
 }
 
+/**
+ * M-ACP-INJECT-ACK-1 — the observable outcome of the detached inject turns,
+ * served as the additive `inject` block of GET /internal/status. Because the
+ * endpoint now acks 202 at acceptance, this (plus loud logs) is where a
+ * failed background turn surfaces — the M-ACP-FAILLOUD guarantee that a 202
+ * is never silently followed by nothing.
+ */
+export interface InjectActivity {
+  in_flight: number;
+  succeeded: number;
+  failed: number;
+  last_failure: { agent_id: string; user_id: string; at: string; error: string } | null;
+}
+
+/** Per-server-instance tracker behind {@link InjectActivity}. */
+class InjectTracker {
+  private activity: InjectActivity = { in_flight: 0, succeeded: 0, failed: 0, last_failure: null };
+
+  start(): void {
+    this.activity.in_flight += 1;
+  }
+
+  succeed(): void {
+    this.activity.in_flight -= 1;
+    this.activity.succeeded += 1;
+  }
+
+  fail(agentId: string, userId: string, error: unknown): void {
+    this.activity.in_flight -= 1;
+    this.activity.failed += 1;
+    this.activity.last_failure = {
+      agent_id: agentId,
+      user_id: userId,
+      at: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  snapshot(): InjectActivity {
+    return {
+      ...this.activity,
+      last_failure: this.activity.last_failure ? { ...this.activity.last_failure } : null,
+    };
+  }
+}
+
 export async function startInternalServer(opts: InternalServerOptions): Promise<InternalServer> {
+  // M-ACP-INJECT-ACK-1 — one tracker per server instance, shared by every
+  // request so /internal/status reports the aggregate detached-turn outcome.
+  const injects = new InjectTracker();
   const server = createServer((req, res) => {
-    handleRequest(req, res, opts).catch((err) => {
+    handleRequest(req, res, opts, injects).catch((err) => {
       logger.error({ err }, "unhandled error in internal-server handler");
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal" });
@@ -103,7 +161,12 @@ export async function startInternalServer(opts: InternalServerOptions): Promise<
   };
 }
 
-async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: InternalServerOptions): Promise<void> {
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  opts: InternalServerOptions,
+  injects: InjectTracker,
+): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
   // M-ACP-HEALTHCHECK-1 — UNAUTHENTICATED liveness probe for the compose
@@ -140,7 +203,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: In
       return;
     }
     const agents = opts.getAgentStatus ? opts.getAgentStatus() : [];
-    sendJson(res, 200, { agents });
+    // M-ACP-INJECT-ACK-1: additive `inject` block — the control-plane's
+    // BridgeStatusClient reads only `agents`, so this is back-compatible.
+    sendJson(res, 200, { agents, inject: injects.snapshot() });
     return;
   }
 
@@ -203,6 +268,37 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: In
     return;
   }
 
+  // M-ACP-INJECT-ACK-1 — ack ACCEPTANCE now, before the heads-up + model
+  // turn: the caller (AcpInjector, 15s timeout, fire-and-forget) must never
+  // time out on a long turn that is in fact running — that made the
+  // scheduled-message dispatcher re-fire it (duplicate DMs) and the panel
+  // keep the draft. The turn runs as a logged background task below; its
+  // failures stay observable (M-ACP-FAILLOUD) via logger.error + the
+  // `inject` block of GET /internal/status — never a silent 202-then-nothing.
+  sendJson(res, 202, { status: "accepted" });
+
+  injects.start();
+  // `runInjectTurn` never rejects by construction (it catches everything and
+  // records the outcome); the trailing catch is unhandled-rejection insurance
+  // so a detached-task bug can't crash the process.
+  runInjectTurn(opts, injects, { agentId, userId, text, surfaceInChat, headsUp }).catch((err) => {
+    logger.error({ err, agentId, userId }, "detached inject task rejected unexpectedly");
+    injects.fail(agentId, userId, err);
+  });
+}
+
+/**
+ * M-ACP-INJECT-ACK-1 — the detached heads-up + model turn behind an already
+ * ack'd inject. Everything is caught here: a failed heads-up stays
+ * best-effort (log + continue, as before), a failed/throwing turn is logged
+ * loudly and recorded on the tracker so /internal/status surfaces it.
+ */
+async function runInjectTurn(
+  opts: InternalServerOptions,
+  injects: InjectTracker,
+  p: { agentId: string; userId: string; text: string; surfaceInChat: boolean; headsUp: string },
+): Promise<void> {
+  const { agentId, userId, text, surfaceInChat, headsUp } = p;
   try {
     if (surfaceInChat) {
       // Deterministic heads-up before the model turn (best-effort — a
@@ -218,21 +314,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, opts: In
       }
     }
     // M-ACP-FAILLOUD-1: fail loud — a failed turn OR a swallowed delivery
-    // failure returns `{ ok: false }`; report 500 so the control-plane caller
-    // sees the truth instead of a 202 over a turn the user never received.
+    // failure returns `{ ok: false }`. The HTTP ack is already gone, so the
+    // truth surfaces through the log + the /internal/status inject block
+    // (and the dispatcher has already sent the user-facing error copy).
     const result = await opts.dispatcher.handleMessage(agentId, userId, text);
     if (!result.ok) {
-      logger.error({ err: result.error, agentId, userId }, "inject turn/delivery failed");
-      sendJson(res, 500, { error: "turn failed" });
+      logger.error({ err: result.error, agentId, userId }, "detached inject turn/delivery failed");
+      injects.fail(agentId, userId, result.error);
       return;
     }
+    injects.succeed();
   } catch (err) {
-    logger.error({ err, agentId, userId }, "scheduled inject dispatch failed");
-    sendJson(res, 500, { error: "dispatch failed" });
-    return;
+    logger.error({ err, agentId, userId }, "detached inject dispatch failed");
+    injects.fail(agentId, userId, err);
   }
-
-  sendJson(res, 202, { status: "accepted" });
 }
 
 /**
