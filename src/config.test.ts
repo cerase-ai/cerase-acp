@@ -285,4 +285,29 @@ session:
     expect(cfg.agents[0]!.channel).toBe("workspace_chat");
     expect(cfg.agents[0]!.workspace_chat_credentials_path).toBe("/var/cerase/workspace-chat-creds/wc-agent.json");
   });
+
+  // M-ACP-WSCHAT-GUARD-1: the caller-identity verification knob must survive
+  // loadConfig so the adapter's fail-closed startup guard can read it. It is
+  // optional at the SCHEMA level on purpose — the requirement is enforced in
+  // the adapter's start() so a missing value downs only the workspace_chat
+  // channel, never the whole agents.yaml load.
+  it("M-ACP-WSCHAT-GUARD-1: workspace_chat_verification_audience is plumbed through loadConfig", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: wc-agent
+    channel: workspace_chat
+    workspace_chat_credentials_path: /var/cerase/workspace-chat-creds/wc-agent.json
+    workspace_chat_verification_audience: "123456789012"
+    allowed_users: ["ops@guidance.studio"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.workspace_chat_verification_audience).toBe("123456789012");
+  });
 });

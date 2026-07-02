@@ -119,6 +119,33 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
   return {
     agentId: agent.id,
     async start() {
+      // M-ACP-WSCHAT-GUARD-1 — fail-closed caller-identity gate. The
+      // webhook listener below trusts the request BODY for the sender
+      // identity (event.user.email): anyone who can reach the port could
+      // impersonate any allowed user. Refuse to start unless the operator
+      // explicitly configured the verification audience (the Google Cloud
+      // project number the Bearer JWT Google Chat sends with each request
+      // is issued for) — so this listener can never be enabled by accident
+      // without caller verification in place. Thrown from start() (not the
+      // factory / config superRefine) so only THIS channel goes down; the
+      // bridge keeps every other adapter up (M-ACP-WEB-RESILIENT-1).
+      if (!agent.workspace_chat_verification_audience) {
+        throw new Error(
+          `agent "${agent.id}" channel='workspace_chat' refuses to start: caller-identity verification is not configured. ` +
+            `The webhook listener derives the message sender from the request body, so it must never be exposed without ` +
+            `verifying the caller. Set workspace_chat_verification_audience in agents.yaml (the Google Cloud project ` +
+            `number used to verify the Bearer token Google Chat attaches to each webhook request) to enable this channel.`,
+        );
+      }
+      // NOTE: enforcement of the Google-signed request check against this
+      // audience on each inbound request is a separate future milestone;
+      // until it ships, keep the listener reachable only via the
+      // appliance's Traefik route — never exposed directly.
+      logger.warn(
+        { agentId: agent.id, audience: agent.workspace_chat_verification_audience },
+        "workspace-chat verification audience configured — per-request signed-request enforcement not yet implemented; keep the listener behind Traefik only",
+      );
+
       // Lazy import the Google Chat client. @googleapis/chat is a thin
       // wrapper around the underlying googleapis package + the auth
       // helpers from google-auth-library.
