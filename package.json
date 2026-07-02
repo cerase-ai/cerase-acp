@@ -18,7 +18,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.28.1",
+    "@agentclientprotocol/sdk": "^1.1.0",
     "@slack/bolt": "^4.4.0",
     "discord.js": "^14.26.0",
     "googleapis": "^173.0.0",
@@ -28,12 +28,12 @@
     "zod": "^4.4.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.0",
-    "@types/node": "^20.19.0",
+    "@biomejs/biome": "^2.5.2",
+    "@types/node": "^26.1.0",
     "pino-pretty": "^13.1.0",
-    "tsx": "^4.22.0",
-    "typescript": "~5.9.0",
-    "vitest": "^4.1.0"
+    "tsx": "^4.22.5",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.9"
   },
   "overrides": {
     "form-data": ">=4.0.6",
