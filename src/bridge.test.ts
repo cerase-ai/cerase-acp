@@ -154,13 +154,16 @@ describe("runBridge", () => {
     expect(injectRes.status).toBe(202);
   });
 
-  // M-ACP-FAILLOUD-1 — a swallowed turn/delivery failure must surface as a
-  // truthful HTTP status on /internal/inject instead of a blind 202 (which
-  // left the control-plane caller thinking the turn succeeded while the user
-  // got nothing, and the UI spinning forever). We drive the REAL production
-  // dispatcher: doc-qa's channel is "down" (every send reports `{ ok: false }`)
-  // → the delivery failure propagates to a 500; policy-qa's send succeeds → 202.
-  it("production mode: /internal/inject returns 500 on a delivery failure, 202 on success", async () => {
+  // M-ACP-FAILLOUD-1 + M-ACP-INJECT-ACK-1 — /internal/inject acks 202 at
+  // ACCEPTANCE (validation + allowlist) and runs the turn detached, so a
+  // slow model turn no longer trips the control-plane's fire-and-forget
+  // timeout. The fail-loud guarantee moved with it: a swallowed
+  // turn/delivery failure must surface in the additive `inject` block of
+  // GET /internal/status — never a silent 202-then-nothing. We drive the
+  // REAL production dispatcher: doc-qa's channel is "down" (every send
+  // reports `{ ok: false }`) → recorded as the last inject failure;
+  // policy-qa's send succeeds → counted as succeeded.
+  it("production mode: /internal/inject acks 202; a detached delivery failure surfaces in the status inject block", async () => {
     const cfg = makeConfig(); // doc-qa allows 111, policy-qa allows 222
     const SECRET = "faillooud-secret";
     vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
@@ -187,13 +190,32 @@ describe("runBridge", () => {
         body: JSON.stringify({ agent_id: agentId, user_id: userId, text: "ciao", surface_in_chat: false }),
       });
 
-    // doc-qa: the turn runs but the reply can't be delivered → fail loud (500).
+    // Both injects pass validation + allowlist → 202 ACCEPTED; the turn +
+    // delivery run as a detached background task (M-ACP-INJECT-ACK-1).
     const failRes = await inject("doc-qa", "111");
-    expect(failRes.status).toBe(500);
-
-    // policy-qa: turn + delivery both succeed → 202.
+    expect(failRes.status).toBe(202);
     const okRes = await inject("policy-qa", "222");
     expect(okRes.status).toBe(202);
+
+    // The detached outcomes surface in the `inject` block of
+    // GET /internal/status: doc-qa's delivery failure is recorded as
+    // last_failure (fail loud), policy-qa's turn as a success.
+    await vi.waitFor(
+      async () => {
+        const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          inject: { in_flight: number; succeeded: number; failed: number; last_failure: { agent_id: string } | null };
+        };
+        expect(body.inject.in_flight).toBe(0);
+        expect(body.inject.failed).toBe(1);
+        expect(body.inject.succeeded).toBe(1);
+        expect(body.inject.last_failure?.agent_id).toBe("doc-qa");
+      },
+      { timeout: 8000, interval: 100 },
+    );
   });
 
   // M-ACP-ADAPTER-SELFHEAL-1 — a transient start() failure must recover on its
