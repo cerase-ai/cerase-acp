@@ -25,6 +25,7 @@ import { type ChatAdapter, createChatAdapter, type DeliveryResult } from "./chat
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { type ConfigDiff, diffConfigs } from "./config-diff.js";
 import { ConfigReloader } from "./config-reloader.js";
+import { checkTenantCredit } from "./credit-check.js";
 import { Dispatcher } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
 import { type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
@@ -246,6 +247,16 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     config,
     sessionManager,
     turnMeta,
+    // M-MUTE-SURFACE-2 — proactive out-of-credits gate. Wired only when the
+    // control-plane internal bearer is configured (same secret as
+    // session-summary; without it there's nothing to authenticate with).
+    // Unset → the dispatcher's back-compat path proceeds as before.
+    // checkTenantCredit THROWS on any non-402/200 or network error, and the
+    // dispatcher fails open on a throw — a control-plane glitch must not block
+    // chat.
+    creditCheck: controlPlaneSecret
+      ? (agentId) => checkTenantCredit(agentId, { controlPlaneUrl, internalSecret: controlPlaneSecret })
+      : undefined,
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {

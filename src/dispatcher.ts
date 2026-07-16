@@ -25,6 +25,17 @@ export interface DispatcherDeps {
   turnMeta: TurnMetaTracker;
   /** Returns the function the bridge will call to deliver each chunk. */
   resolveSendTarget: (agentId: string, userId: string) => SendTarget;
+  /**
+   * M-MUTE-SURFACE-2 — proactive out-of-credits gate. Called BEFORE the
+   * ACP child is spawned / `prompt()` is invoked. Resolves `{exhausted:
+   * true}` when the tenant is below the credit safety buffer (the
+   * control-plane's 402), `{exhausted: false}` otherwise. Optional so the
+   * CLI/test ingresses stay back-compatible; a bridge that can't reach the
+   * control-plane MUST fail open (throw here → the dispatcher proceeds),
+   * because blocking chat on a control-plane glitch is worse than the rare
+   * overspend the reactive catch below still covers.
+   */
+  creditCheck?: (agentId: string) => Promise<{ exhausted: boolean }>;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -140,6 +151,29 @@ export class Dispatcher {
     }
 
     const send = this.deps.resolveSendTarget(agentId, userId);
+
+    // M-MUTE-SURFACE-2 — proactive out-of-credits gate, BEFORE spawning the
+    // ACP child / calling prompt(). opencode swallows the LiteLLM 429/402, so
+    // the reactive catch (below) never fires on exhaustion — the turn HANGS
+    // until the watchdog. Check first: if the tenant is out, reply the
+    // no-credits copy and return WITHOUT starting a turn. The reply IS the
+    // whole response, so its delivery outcome IS the result.
+    //
+    // Fail-open: no dep (back-compat) → proceed; a check that THROWS
+    // (control-plane unreachable) → log + proceed. A bridge that can't reach
+    // the control-plane must never block chat; the reactive catch stays as a
+    // belt for the rare overspend window.
+    if (this.deps.creditCheck) {
+      try {
+        const { exhausted } = await this.deps.creditCheck(agentId);
+        if (exhausted) {
+          logger.info({ agentId, userId }, "credit gate: tenant exhausted — replying no-credits, not spawning");
+          return this.safeSend(send, pickNoCreditsMessage(text), agentId, userId, "no-credits message");
+        }
+      } catch (err) {
+        logger.warn({ err, agentId, userId }, "credit gate: pre-check failed — proceeding (fail-open)");
+      }
+    }
 
     const queue = new SendQueue({ send });
     const buffer = new StreamBuffer({

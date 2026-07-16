@@ -263,3 +263,113 @@ describe("402 overquota copy (M-ACP-2)", () => {
     expect(sent[0]).not.toBe(pickErrorMessage("ciao, mi aiuti con una cosa?"));
   });
 });
+
+// M-MUTE-SURFACE-2 — the REACTIVE credit copy above (M-ACP-2) is DEAD in
+// production: opencode swallows the LiteLLM 429/402, so `prompt()` never
+// throws the credit text — it HANGS until the 10-min watchdog. The bridge
+// now checks credits PROACTIVELY (before spawning/prompting) via the
+// injected `creditCheck` dep; on exhaustion it replies the no-credits copy
+// and never starts a turn. Fail-open: a missing dep or a failing check must
+// never block chat.
+describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
+  function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
+    return { prompt } as unknown as SessionManager;
+  }
+  const okTurn: SessionManager["prompt"] = async (_a, _u, _t, onUpdate) => {
+    onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } as never);
+  };
+
+  it("out of credits: replies the no-credits copy and NEVER spawns/prompts", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    let promptCalled = false;
+    const d = new Dispatcher({
+      config: cfg,
+      // A prompt stub that FAILS the test if the gate lets it run.
+      sessionManager: makeStubMgr(async () => {
+        promptCalled = true;
+        throw new Error("prompt must not be called when credits are exhausted");
+      }),
+      turnMeta: new TurnMetaTracker(),
+      creditCheck: async () => ({ exhausted: true }),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ciao, mi aiuti con una cosa?");
+    expect(promptCalled).toBe(false);
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe(pickNoCreditsMessage("ciao, mi aiuti con una cosa?"));
+    expect(sent[0]).toMatch(/credit/i);
+  });
+
+  it("has credits: proceeds through the normal turn (prompt IS called)", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    let promptCalled = false;
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(async (a, u, t, onUpdate) => {
+        promptCalled = true;
+        await okTurn(a, u, t, onUpdate);
+      }),
+      turnMeta: new TurnMetaTracker(),
+      creditCheck: async () => ({ exhausted: false }),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ping");
+    expect(promptCalled).toBe(true);
+    expect(sent.join("")).toContain("ok");
+    expect(sent.join("")).not.toBe(pickNoCreditsMessage("ping"));
+  });
+
+  it("credit-check throws: fails OPEN — proceeds through the normal turn", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    let promptCalled = false;
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(async (a, u, t, onUpdate) => {
+        promptCalled = true;
+        await okTurn(a, u, t, onUpdate);
+      }),
+      turnMeta: new TurnMetaTracker(),
+      creditCheck: async () => {
+        throw new Error("control-plane unreachable");
+      },
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ping");
+    expect(promptCalled).toBe(true);
+    expect(sent.join("")).toContain("ok");
+  });
+
+  it("no creditCheck dep (back-compat): proceeds through the normal turn", async () => {
+    const cfg = makeConfig("x");
+    const sent: string[] = [];
+    let promptCalled = false;
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: makeStubMgr(async (a, u, t, onUpdate) => {
+        promptCalled = true;
+        await okTurn(a, u, t, onUpdate);
+      }),
+      turnMeta: new TurnMetaTracker(),
+      // creditCheck intentionally omitted
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ping");
+    expect(promptCalled).toBe(true);
+    expect(sent.join("")).toContain("ok");
+  });
+});
