@@ -572,6 +572,23 @@ export class SessionManager {
         cwd: agent.cwd,
         mcpServers: [],
       }));
+
+      // M-CUSTOM-PRIMARY-AGENT-1 — select the de-identified "cerase" primary agent
+      // (opencode.json `agent.cerase`, rendered by control-plane's SlotWriter) so
+      // opencode uses the Cerase base prompt instead of its built-in "You are
+      // opencode…" one. `opencode acp` exposes no `--agent` flag; the ACP way is to
+      // set the session mode (opencode maps its primary agents to session modes).
+      // Best-effort: if the mode is unavailable (older slot render), the session
+      // keeps opencode's default agent rather than failing — a working assistant
+      // beats a dead session.
+      try {
+        await connection.setSessionMode({ sessionId, modeId: "cerase" });
+      } catch (modeErr) {
+        logger.warn(
+          { err: modeErr, agentId: agent.id, userId },
+          "setSessionMode(cerase) failed — session keeps opencode's default agent",
+        );
+      }
     } catch (err) {
       logger.error({ err, agentId: agent.id, userId }, "ACP handshake failed — killing child");
       try {
