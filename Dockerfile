@@ -20,7 +20,13 @@
 # ---------- build stage ----------
 # OPT-22: bumped from node:20 — Node 22 LTS active, no reason to stay
 # on 20 on Ubuntu 26.04. Pure TypeScript build, no native deps.
-FROM node:22 AS build
+#
+# M-ACP-NPM-STRIP-1: pinned to an immutable digest. `node:22` is a MUTABLE tag —
+# it is re-pushed on every patch release, so the same Dockerfile silently builds
+# a different image tomorrow. cerase-agent pinned by digest under M-SUPPLY-PIN-1;
+# this image was left on the moving tag. Refresh both digests together when the
+# node line moves.
+FROM node:22.22.3@sha256:2d178f2785b96dfbf62a416ca2e40f50e30150b4ff3320d706f0d96e90600eb3 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -32,10 +38,22 @@ RUN npm prune --omit=dev
 
 # ---------- runtime stage ----------
 # OPT-22: bumped from node:20-slim (see build-stage comment).
-FROM node:22-slim AS runtime
+# M-ACP-NPM-STRIP-1: digest-pinned, same digest cerase-agent runs — one node
+# across the fleet, and a base that cannot change under either image.
+FROM node:22.22.3-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752 AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini docker.io \
  && rm -rf /var/lib/apt/lists/*
+
+# M-ACP-NPM-STRIP-1: drop the npm bundled in the node base, exactly as
+# cerase-agent does. The runtime CMD is `node dist/index.js` — npm is used only
+# in the build stage above, which is discarded. Left here it is dead weight
+# carrying the whole npm-bundled CVE class (npm 10.9.8 / sigstore 3.1.0 /
+# picomatch), the same set that blocked cerase-agent's Trivy gate. node,
+# corepack and yarn remain; nothing in src/ shells out to npm or npx.
+RUN rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/bin/npm \
+           /usr/local/bin/npx
 
 WORKDIR /app
 COPY --from=build /build/dist ./dist

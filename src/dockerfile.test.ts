@@ -19,10 +19,53 @@ describe("Dockerfile", () => {
     expect(fromLines.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("runtime stage is node:22-slim (OPT-22 LTS bump)", () => {
+  it("runtime stage is node 22 slim (OPT-22 LTS bump)", () => {
     const fromLines = dockerfile.split("\n").filter((l) => /^FROM\s/i.test(l));
     const last = fromLines.at(-1)!;
-    expect(last).toMatch(/node:22-slim/);
+    expect(last).toMatch(/node:22[.\d]*-slim/);
+  });
+
+  // M-ACP-NPM-STRIP-1 — the three findings that milestone opened, locked here.
+  it("pins every base image to an immutable digest", () => {
+    // `node:22-slim` is a MUTABLE tag: it can be re-pushed, so the same
+    // Dockerfile silently builds a different image tomorrow. cerase-agent
+    // pinned by digest under M-SUPPLY-PIN-1; this image was left unpinned and
+    // nobody noticed, because it has no scan gate either (see below).
+    const fromLines = dockerfile.split("\n").filter((l) => /^FROM\s/i.test(l));
+    for (const line of fromLines) {
+      expect(line, `unpinned base image: ${line.trim()}`).toMatch(/@sha256:[0-9a-f]{64}/);
+    }
+  });
+
+  it("strips the bundled npm from the RUNTIME stage", () => {
+    // The runtime CMD is `node dist/index.js` — npm is used only in the
+    // discarded build stage. Left in the runtime layer it is dead weight that
+    // carries the whole npm-bundled CVE class (npm 10.9.8 / sigstore 3.1.0 /
+    // picomatch), which is exactly what blocked cerase-agent's Trivy gate.
+    const runtime = dockerfile.slice(dockerfile.lastIndexOf("\nFROM "));
+    expect(runtime).toMatch(/rm -rf[^\n]*\/usr\/local\/lib\/node_modules\/npm/s);
+    expect(runtime).toMatch(/\/usr\/local\/bin\/npx/s);
+  });
+
+  it("keeps npm in the BUILD stage, which needs it", () => {
+    // The strip must not be so eager it breaks `npm ci` / `npm run build`.
+    const build = dockerfile.slice(0, dockerfile.lastIndexOf("\nFROM "));
+    expect(build).toMatch(/npm ci/);
+    expect(build).not.toMatch(/rm -rf[^\n]*node_modules\/npm/s);
+  });
+});
+
+describe("CI", () => {
+  const ci = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+
+  it("scans the built image with Trivy and blocks on HIGH/CRITICAL", () => {
+    // M-ACP-NPM-STRIP-1: the npm exposure was invisible here not because it was
+    // absent but because the ALARM was — two node images in the fleet, one
+    // gated by Trivy and one not. A vulnerability nobody scans for is not a
+    // vulnerability anyone finds.
+    expect(ci).toMatch(/trivy-action/);
+    expect(ci).toMatch(/severity:\s*HIGH,CRITICAL/);
+    expect(ci).toMatch(/exit-code:\s*['"]1['"]/);
   });
 
   it("installs tini and runs it as PID 1", () => {

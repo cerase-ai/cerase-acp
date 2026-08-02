@@ -43,6 +43,31 @@ jobs:
       - name: Run vitest suite
         run: npm test
 
+  image-scan:
+    # M-ACP-NPM-STRIP-1 (2026-08-02): cerase-acp had NO image scan at all, while
+    # its sibling cerase-agent — the same node base, the same bundled npm — was
+    # gated by Trivy. The exposure here was never absent, only unalarmed, and an
+    # asymmetry like that is how one of two identical images stays vulnerable.
+    # Blocking, like cerase-agent's: HIGH/CRITICAL fails the job.
+    name: trivy image scan (hard block)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the runtime image
+        run: docker build -t cerase-acp:scan .
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: cerase-acp:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
   gitleaks:
     name: gitleaks (hard block)
     runs-on: ubuntu-latest
