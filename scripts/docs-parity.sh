@@ -5,8 +5,8 @@
 #
 # ⚠️ **This is not hygiene, it is the gate.** The PoC is not done while a doc
 # tells the next person to run something that no longer exists, and this repo has
-# already paid for that twice: four documents taught `./cli.sh deploy` for months
-# after it stopped working, and the repo split moved
+# already paid for that twice: four documents taught the removed deploy verb for
+# months after M-DEPLOY-UX-1 removed it, and the repo split moved
 # `docs/deploy/restore-runbook.md` into cerase-ops leaving pointers behind.
 # `tests/unit/docs_parity.bats` guarded the CLI's own verbs; this generalises the
 # same idea to every tracked markdown file, and — being a plain script with no
