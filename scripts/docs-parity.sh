@@ -100,14 +100,37 @@ _looks_like_path() {
     return 1
 }
 
-# Every tracked path, once, for the suffix match below.
+# Every tracked path, once, plus every directory prefix implied by one.
+#
+# ⚠️ **Resolution is against the TRACKED SET, never against the working
+# filesystem, and that is not a nicety.** The first version used `[ -e ]`, which
+# on a developer's machine finds untracked runtime state (`agent-runtime/bridge/
+# agents.yaml` is generated at boot) and sibling repos. CI has neither. The guard
+# was green here and red on the runner — the guard written to stop documents
+# lying was itself lying about being green. Reading only what git tracks makes
+# the two identical, which is the whole point of a guard.
 TRACKED="$(git ls-files)"
+TRACKED_DIRS="$(git ls-files | while IFS= read -r f; do
+    d="$f"
+    while d="$(dirname "$d")"; [ "$d" != "." ]; do printf '%s\n' "$d"; done
+done | sort -u)"
 
 _resolves() {   # <target> <document's dir>
     local target="${1%%:*}" base="$2"
+    target="${target%/}"
 
-    [ -e "$base/$target" ] && return 0
-    [ -e "$target" ] && return 0
+    local joined
+    joined="$(cd "$base" 2>/dev/null && printf '%s' "$(realpath -m --relative-to="$ROOT" "$target" 2>/dev/null)")"
+
+    # Three readings, all legitimate in prose: as written, relative to the
+    # DOCUMENT, and relative to the REPO ROOT with a leading `./` — which is how
+    # every page writes `./run-tests.sh` from inside docs/.
+    local candidate
+    for candidate in "$target" "$joined" "${target#./}"; do
+        [ -n "$candidate" ] || continue
+        grep -qxF -- "$candidate" <<<"$TRACKED" && return 0
+        grep -qxF -- "$candidate" <<<"$TRACKED_DIRS" && return 0
+    done
 
     # ⚠️ App-relative paths resolve too, and they have to: `architecture.md`
     # says `config/activitylog.php` and `routes/console.php`, which are correct
@@ -129,7 +152,8 @@ _resolves() {   # <target> <document's dir>
     # whose CI depends on a checkout it does not control. The cost is stated
     # plainly: a stale cross-repo path is not caught by this guard, by anyone.
     case "$target" in
-        cerase-*/*) return 0 ;;
+        # Written as a repo name, or reached with `../` from inside one.
+        cerase-*/*|../cerase-*/*|../*/*) return 0 ;;
     esac
 
     return 1
