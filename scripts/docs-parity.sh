@@ -109,18 +109,57 @@ _looks_like_path() {
 # was green here and red on the runner — the guard written to stop documents
 # lying was itself lying about being green. Reading only what git tracks makes
 # the two identical, which is the whole point of a guard.
-TRACKED="$(git ls-files)"
-TRACKED_DIRS="$(git ls-files | while IFS= read -r f; do
-    d="$f"
-    while d="$(dirname "$d")"; [ "$d" != "." ]; do printf '%s\n' "$d"; done
-done | sort -u)"
+#
+# ⚠️ An associative array, not a string with `grep` per candidate. The string
+# version was O(files × candidates) and took **52 seconds locally** — it pushed
+# the CI unit job past its 10-minute cap and the whole publish came back as
+# "cancelled", which reads like somebody hit a button. A guard that costs a
+# publish is a guard people remove.
+declare -A TRACKED_SET=()
+while IFS= read -r path; do
+    # Every directory prefix, so `docs/privacy` resolves as well as the files in it.
+    d="$path"
+    while :; do
+        TRACKED_SET["$d"]=1
+        [[ "$d" == */* ]] || break
+        d="${d%/*}"
+    done
+    # ⚠️ And every trailing SUFFIX, which is what makes app-relative names work:
+    # `architecture.md` says `routes/console.php` and
+    # `docs/conventions/filament-render-tests.md`, both correct inside the Laravel
+    # app and wrong from the repo root. Dropping this silently produced 44 new
+    # "missing" hits the moment the lookup was rewritten — the suffix match was
+    # carrying them.
+    d="$path"
+    while [[ "$d" == */* ]]; do
+        d="${d#*/}"
+        # Each suffix AND each of ITS directory prefixes, so `tests/Browser/`
+        # resolves as a directory the same way `tests/Browser/X.php` resolves as
+        # a file. Suffix-without-prefixes left exactly one hit behind.
+        p2="$d"
+        while :; do
+            TRACKED_SET["$p2"]=1
+            [[ "$p2" == */* ]] || break
+            p2="${p2%/*}"
+        done
+    done
+done < <(git ls-files)
 
 _resolves() {   # <target> <document's dir>
     local target="${1%%:*}" base="$2"
     target="${target%/}"
 
-    local joined
-    joined="$(cd "$base" 2>/dev/null && printf '%s' "$(realpath -m --relative-to="$ROOT" "$target" 2>/dev/null)")"
+    # Joined in bash rather than by shelling out to realpath: this runs once per
+    # backticked string in every document, and a process each was most of the 52
+    # seconds.
+    local joined="$target"
+    if [ "$base" != "." ]; then
+        joined="$base/$target"
+        while [[ "$joined" == *"/./"* ]]; do joined="${joined//\/.\//\/}"; done
+        while [[ "$joined" =~ ([^/]+)/\.\./ ]]; do
+            joined="${joined/${BASH_REMATCH[1]}\/..\//}"
+        done
+    fi
 
     # Three readings, all legitimate in prose: as written, relative to the
     # DOCUMENT, and relative to the REPO ROOT with a leading `./` — which is how
@@ -128,17 +167,8 @@ _resolves() {   # <target> <document's dir>
     local candidate
     for candidate in "$target" "$joined" "${target#./}"; do
         [ -n "$candidate" ] || continue
-        grep -qxF -- "$candidate" <<<"$TRACKED" && return 0
-        grep -qxF -- "$candidate" <<<"$TRACKED_DIRS" && return 0
+        [ -n "${TRACKED_SET[$candidate]:-}" ] && return 0
     done
-
-    # ⚠️ App-relative paths resolve too, and they have to: `architecture.md`
-    # says `config/activitylog.php` and `routes/console.php`, which are correct
-    # names for files inside the Laravel app and wrong relative to the repo
-    # root. A suffix match over the tracked set accepts them without this script
-    # needing to know that `control-plane/` is an app root.
-    grep -qxF -- "$target" <<<"$TRACKED" && return 0
-    grep -qF -- "/$target" <<<"$TRACKED" && return 0
 
     # ⚠️ A SIBLING REPO's path is always accepted, and NOT conditionally on the
     # sibling being checked out next door. That condition was the first version
