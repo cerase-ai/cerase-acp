@@ -117,11 +117,19 @@ _resolves() {   # <target> <document's dir>
     grep -qxF -- "$target" <<<"$TRACKED" && return 0
     grep -qF -- "/$target" <<<"$TRACKED" && return 0
 
-    # A sibling repo's path, which this repo cannot resolve and should not fail
-    # on — `cerase-ops/cerase-tenant.sh` from inside cerase-core is a correct
-    # cross-reference, not a broken one.
+    # ⚠️ A SIBLING REPO's path is always accepted, and NOT conditionally on the
+    # sibling being checked out next door. That condition was the first version
+    # and it passed on a developer's machine — where all eight repos sit side by
+    # side — then failed in CI, which clones ONE repo. Four repos went red on the
+    # first push for exactly this.
+    #
+    # The rule the guard can honestly enforce is "does THIS repo name something
+    # that does not exist HERE". A `cerase-<repo>/…` path is by construction not
+    # here, and a repo that fails its own CI over a sibling's contents is a repo
+    # whose CI depends on a checkout it does not control. The cost is stated
+    # plainly: a stale cross-repo path is not caught by this guard, by anyone.
     case "$target" in
-        cerase-*/*) [ -d "$(dirname "$ROOT")/${target%%/*}" ] && return 0 ;;
+        cerase-*/*) return 0 ;;
     esac
 
     return 1
