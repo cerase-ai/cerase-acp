@@ -180,7 +180,20 @@ async function handleRequest(
     if (opts.getAgentStatus) {
       const agents = opts.getAgentStatus();
       payload.adapters = agents.length;
-      payload.ready = agents.filter((a) => a.ready === true).length;
+      // `ready` is only meaningful for adapters that HAVE a readiness — a web
+      // agent reports `ready: null` because there is no connection to be ready.
+      // Counting `=== true` over all of them made a completely healthy bridge
+      // answer `{"adapters":3,"ready":2}` on guidance (2026-08-10): one web
+      // agent, two Discord, nothing wrong. A number that reads as "one is down"
+      // when nothing is down is what an alert gets wired to, and then muted.
+      //
+      // So the denominator is published too, over the adapters the question
+      // applies to. `readyOf` is 0 on a bridge of only web agents, and
+      // `ready === readyOf` is the comparison a caller should make — never
+      // `ready === adapters`.
+      const rateable = agents.filter((a) => a.ready !== null && a.ready !== undefined);
+      payload.ready = rateable.filter((a) => a.ready === true).length;
+      payload.readyOf = rateable.length;
     }
     sendJson(res, 200, payload);
     return;

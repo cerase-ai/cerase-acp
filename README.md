@@ -146,6 +146,23 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `CERASE_ACP_ADAPTER_RETRY_BASE_MS` | `5000` | Self-heal: first retry delay for an adapter whose `start()` failed. Doubles each attempt (half-jittered). |
 | `CERASE_ACP_ADAPTER_RETRY_MAX_MS` | `300000` | Self-heal: cap on the retry backoff interval. |
 
+The six below were read by the code and documented nowhere until 2026-08-10
+(`M21`). They are listed because an undocumented default is a decision somebody
+made once and nobody can find — not because you normally set them.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CERASE_CONTROL_PLANE_URL` | `http://cerase-control-plane:8000` | Where the bridge reaches the control-plane. The compose hostname; change it only outside the appliance network. |
+| `CERASE_INTERNAL_SECRET` | *(unset)* | The bearer the bridge presents **to** the control-plane. Distinct from `CERASE_ACP_INTERNAL_SECRET`, which is the bearer the bridge **demands**. Two directions, two secrets — confusing them is why the appliance keeps them separately named. |
+| `CERASE_AGENT_WORKSPACE_ROOT` | `/home/agent/cerase/workspace` | Root the workspace-file broker serves from, inside the agent slot. |
+| `CERASE_MAX_ATTACHMENT_MB` | `64` | Ceiling on an inbound attachment. Anything larger is refused with a message the user can read, not truncated. |
+| `WORKSPACE_CHAT_PORT` | `7475` | Port the panel-only `web` transport listens on. |
+| `OPENCODE_SERVER_PASSWORD` | *(unset)* | Credential for the OpenCode REST server, when the slot runs one. |
+
+`BRIDGE_E2E_TEST=1` also exists and is **not** an operational knob: it enables a
+test-injection endpoint and the daemon logs *"never enable in production"* on
+startup when it is set.
+
 **Adapter resilience.** A single channel adapter that fails to start (e.g. an
 invalid Discord token) no longer tears the bridge down — it stays not-ready
 while every other channel (and the panel-only `web` transport + the internal

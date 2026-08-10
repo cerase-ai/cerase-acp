@@ -461,6 +461,84 @@ describe("internal-server /healthz (M-ACP-HEALTHCHECK-1)", () => {
     expect(body.ready).toBe(1);
   });
 
+  // Found on guidance 2026-08-10: a completely healthy bridge answered
+  // {"adapters":3,"ready":2}. One web agent (ready:null — there is no connection
+  // to be ready), two Discord, nothing wrong. `ready` was counted over ALL
+  // adapters, so the denominator a reader assumes (`adapters`) was wrong.
+  it("a web agent has no readiness, so it is not counted as un-ready", async () => {
+    await server.close();
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [
+        { id: "web", channel: "web", attached: true, ready: null },
+        { id: "d1", channel: "discord", attached: true, ready: true },
+        { id: "d2", channel: "discord", attached: true, ready: true },
+      ],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    const body = (await (await fetch(`${base}/healthz`)).json()) as {
+      adapters?: number;
+      ready?: number;
+      readyOf?: number;
+    };
+    expect(body.adapters).toBe(3);
+    // The shape that matters: ready EQUALS readyOf on a healthy bridge, and
+    // readyOf is never `adapters` when a web agent is attached.
+    expect(body.ready).toBe(2);
+    expect(body.readyOf).toBe(2);
+  });
+
+  it("a bridge of only web agents is healthy with readyOf 0, not 'all down'", async () => {
+    await server.close();
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [{ id: "web", channel: "web", attached: true, ready: null }],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    const body = (await (await fetch(`${base}/healthz`)).json()) as {
+      status: string;
+      adapters?: number;
+      ready?: number;
+      readyOf?: number;
+    };
+    expect(body.status).toBe("ok");
+    expect(body.adapters).toBe(1);
+    expect(body.ready).toBe(0);
+    expect(body.readyOf).toBe(0);
+  });
+
+  it("a genuinely disconnected Discord adapter still shows as un-ready", async () => {
+    // Non-vacuity for the two above: the fix must not make everything look ready.
+    await server.close();
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [
+        { id: "web", channel: "web", attached: true, ready: null },
+        { id: "d1", channel: "discord", attached: true, ready: true },
+        { id: "d2", channel: "discord", attached: false, ready: false },
+      ],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    const body = (await (await fetch(`${base}/healthz`)).json()) as { ready?: number; readyOf?: number };
+    expect(body.ready).toBe(1);
+    expect(body.readyOf).toBe(2);
+  });
+
   it("does NOT weaken the secret gate — /internal/inject + /internal/status still 401 without the bearer", async () => {
     const inject = await fetch(`${base}/internal/inject`, {
       method: "POST",
