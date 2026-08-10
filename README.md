@@ -28,7 +28,7 @@ For each configured agent template:
   bridge restarts via mem0 + the persisted workspace.
 - Prepends a `[turn_meta: gap=…, lang=…]` block to each
   `session/prompt`. The agent reads this per the system-prompt rules
-  in `cerase/agent-runtime/agent/srv/AGENTS.md`.
+  in `cerase-core/agent-runtime/slots/slot-default/srv/AGENTS.md`.
 
 ## Architecture (PoC v0.1)
 
@@ -84,6 +84,9 @@ session:
 ```bash
 npm ci && npm run build
 
+# The suite. Vitest, no Docker, no chat platform, no network.
+npm test
+
 # one-shot prompt
 ./scripts/cerase-acp-cli prompt \
   --config agents.yaml --agent local --user me "hello"
@@ -103,7 +106,7 @@ is a typed template declaring its chat channel, credentials, allowlist
 of authorised users, ACP spawn command, and optional working directory.
 
 The daemon reads the config path from `CERASE_ACP_CONFIG` (default:
-`/etc/cerase-acp/agents.yaml` in the container, `./agents.yaml` for local
+`/etc/cerase-acp/agents.yaml` in the container, an `agents.yaml` beside the checkout for local
 CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 
 ### Supported channels
@@ -169,6 +172,18 @@ while every other channel (and the panel-only `web` transport + the internal
 server) keeps serving. A failed channel adapter is then retried automatically on
 the capped, jittered backoff above until it connects, with no container restart.
 The bridge only exits when *every* adapter fails to start (no working transport).
+
+## How this repo's artefact reaches a machine
+
+Every push to `main` and every `v*` tag builds and publishes
+`ghcr.io/cerase-ai/cerase-acp` (`.github/workflows/docker-publish.yml`), gated on
+a green CI run. Nothing is built on the appliance: `cerase-core`'s
+`docker-compose.yml` pulls the image by tag, so an operator brings this repo's
+work onto a box with `./cli.sh update cerase-acp` from inside `cerase-core` —
+never by building here.
+
+To iterate without waiting for CI, `./cli.sh build cerase-acp` in `cerase-core`
+builds this checkout and retags it onto the exact GHCR ref the compose resolves.
 
 ## Discord setup
 
@@ -326,7 +341,7 @@ npm test
 ```
 
 vitest. Tests live alongside source as `src/**/*.test.ts`. The
-`src/__tests__/fake-acp-child.ts` fixture lets the session-manager
+`src/__tests__/fake-acp-child.mjs` fixture lets the session-manager
 tests exercise the full ACP stdio loop without OpenCode or LiteLLM
 running.
 
@@ -357,7 +372,7 @@ saving.
 ## License
 
 Private — Guidance Studio. Pending open-source decision (see umbrella
-roadmap in `cerase/devplan/v0.x.md`).
+roadmap in `cerase-core/devplan/v0.x.md`).
 
 ## Status
 
