@@ -2,3 +2,4 @@
 # Re-sync from cerase-core:  ./scripts/sync-tooling.sh
 # M-REPO-TOOLING-PIN-1 — the first divergence is otherwise silent.
 6b9e5f13ca84461517a84b0f4ccfb125c52e0bfaef1d6a6df902b261e15ba1ef  scripts/docs-parity.sh
+5ad4ee30bd5ae33ca0a557c4e7a4965251b624445c0d1bd4886d847539b3feb4  scripts/secrets-guard.sh
