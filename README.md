@@ -371,8 +371,17 @@ saving.
 
 ## License
 
-Private — Guidance Studio. Pending open-source decision (see umbrella
-roadmap in `cerase-core/devplan/v0.x.md`).
+**MIT.** See [`LICENSE`](LICENSE). The repository is public.
+
+Decided by the operator on 2026-08-12, and written here because the repo said
+three different things at once: it was already public, it already carried an MIT
+`LICENSE`, and this section called the decision pending. A reader deciding
+whether they may use the code has no way to tell which of the three is binding —
+and the answer that matters legally is the `LICENSE` file, which had been MIT
+the whole time. A repository is public the moment it is created public; the
+licence is what says what a reader may do with it, and leaving prose that
+contradicts it is how a permission gets withdrawn in someone's head but not in
+law.
 
 ## Status
 
