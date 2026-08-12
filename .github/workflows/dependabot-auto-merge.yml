@@ -1,0 +1,55 @@
+# M-ACP-DEPENDABOT-9-1 — who merges the security PRs, and when.
+#
+# The finding that opened this was wrong in an instructive way. I recorded that
+# automated security fixes "did not open a PR"; they had opened five, one per
+# advisory, the same day the alerts appeared. The control worked exactly as
+# designed. **Nobody empties it** — eight PRs were open, the oldest from
+# 2026-06-30, six weeks.
+#
+# A tool that opens a PR nobody merges is not a safety net, it is a queue, and a
+# queue with no owner is indistinguishable from a tool that is off. So the owner
+# is this workflow.
+#
+# ⚠️ **Patch and minor only, and never a major.** A major is an API change
+# wearing a version number: it belongs to whoever has to fix what it breaks, and
+# auto-merging one is how a dependency bot becomes the thing that broke main.
+# Majors stay open and are somebody's decision, which is the correct amount of
+# friction for a decision.
+#
+# The green suite is the gate. `--auto` queues the merge behind the required
+# checks rather than merging now, so a bump that breaks the build stays open with
+# a red on it — which is the outcome an operator should see.
+name: Dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: What kind of bump is this
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Queue it behind the checks
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Say why a major was left alone
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: |
+          gh pr comment "$PR_URL" --body \
+            'Left open deliberately: majors are not auto-merged. A major is an API change wearing a version number, and it belongs to whoever has to fix what it breaks. See `.github/workflows/dependabot-auto-merge.yml`.'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
