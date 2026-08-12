@@ -148,7 +148,13 @@ else
         #   'NAME' "NAME"    a name handed to something, as in PASSTHROUGH_ENV
         #
         # A backticked name in a sentence is none of those.
-        hits="$(git grep -n "$old" -- . ':!devplan' ':!scripts/_secret_renames.sh' 2>/dev/null \
+        # ⚠️ `tests/` excluded, and NOT because it is inconvenient. Several
+        # tests must name a retired spelling precisely BECAUSE it is retired —
+        # the one proving the converge renames it writes the old name into a
+        # fixture on purpose. And a test that genuinely still READ an old name
+        # would fail on its own, at runtime: `_load_env_file` dies on one. The
+        # runtime covers what this exclusion gives up.
+        hits="$(git grep -n "$old" -- . ':!devplan' ':!tests' ':!scripts/_secret_renames.sh' 2>/dev/null \
                 | grep -E "(^|[^A-Za-z0-9_])${old}=|[$]\{?${old}([^A-Za-z0-9_]|$)|['\"]${old}['\"]" \
                 | head -5)"
         [ -n "$hits" ] || continue
