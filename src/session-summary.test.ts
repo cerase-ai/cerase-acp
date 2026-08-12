@@ -16,7 +16,9 @@ describe("postSessionSummary", () => {
     const fakeFetch = (async (url: string, init?: RequestInit) => {
       seenUrl = url;
       seenMethod = init?.method ?? "";
-      seenAuth = (init?.headers as Record<string, string>).Authorization;
+      // See approval-link.test.ts: `?.` on the cast, so an undefined `init`
+      // fails the header assertion instead of throwing inside the double.
+      seenAuth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
       seenBody = init?.body as string;
       return { ok: true } as Response;
     }) as unknown as typeof fetch;

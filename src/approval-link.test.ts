@@ -47,7 +47,12 @@ describe("fetchPendingApprovalLink", () => {
     let seenUrl = "";
     const fakeFetch = (async (url: string, init?: RequestInit) => {
       seenUrl = url;
-      seenAuth = (init?.headers as Record<string, string>).Authorization;
+      // `?.` on the cast too: with `init` undefined this read throws a
+      // TypeError inside the fake, and the assertion that fails is
+      // `seenAuth === "Bearer s"` — which reads as "the caller sent no
+      // Authorization header" rather than "the fake crashed". A test double
+      // that can fail for its own reasons reports the wrong defect.
+      seenAuth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
       return { ok: true, json: async () => ({ approval_link: LINK }) } as Response;
     }) as unknown as typeof fetch;
 
