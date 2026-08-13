@@ -154,9 +154,34 @@ else
         # fixture on purpose. And a test that genuinely still READ an old name
         # would fail on its own, at runtime: `_load_env_file` dies on one. The
         # runtime covers what this exclusion gives up.
+        # ⚠️ **One use this rule cannot forbid: reading a retired name out of a
+        # file written before the rename.** `cerase-ops` opens historical copies
+        # of an appliance's `.env` under ~/.cerase-ops/appliance-env-backups/ to
+        # recover the passphrase for a pre-cutover archive. Those files are
+        # RECORDS of what a box held then; `_converge_secret_names` migrates the
+        # live `.env` and can do nothing about an artefact. Reading both
+        # spellings is the only way to open an old backup, and forbidding it
+        # would trade a naming rule for unreadable archives.
+        #
+        # An explicit MARKER, in the eight lines above the use, never an
+        # inference from context — the same choice `a0-g4-allow` makes in
+        # cerase-ops, and for the same reason: a rule nobody can predict is a
+        # rule that gets worked around. The marker asserts nothing about the
+        # LIVE path, which `_load_env_file` still kills on sight.
+        #
+        # Cost of getting this wrong, measured 2026-08-14: without it the guard
+        # reddened `cerase-ops` CI on thirteen consecutive pushes over thirteen
+        # hours, and `cerase-provisioner` went fifteen commits stale — including
+        # the fix for a read-only command that destroyed the key to the archive
+        # it was about to restore.
         hits="$(git grep -n "$old" -- . ':!devplan' ':!tests' ':!scripts/_secret_renames.sh' 2>/dev/null \
                 | grep -E "(^|[^A-Za-z0-9_])${old}=|[$]\{?${old}([^A-Za-z0-9_]|$)|['\"]${old}['\"]" \
-                | head -5)"
+                | while IFS= read -r hit; do
+                    hf="${hit%%:*}"; rest="${hit#*:}"; hl="${rest%%:*}"
+                    awk -v n="$hl" 'NR>=n-8 && NR<=n' "$ROOT/$hf" 2>/dev/null \
+                      | grep -q 'secrets-guard-allow-retired-read' && continue
+                    printf '%s\n' "$hit"
+                  done | head -5)"
         [ -n "$hits" ] || continue
         _fail "retired credential name still IN USE: ${old} → $(_cerase_rename_for "$old")
 $(printf '     %s\n' "$hits")"
