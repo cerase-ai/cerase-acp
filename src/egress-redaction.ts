@@ -137,7 +137,7 @@ export function redactEngineIdentifiers(text: string): string {
  * `<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke …> …` (the markers use the fullwidth
  * vertical bar U+FF5C). That is internal scaffolding, never an answer, and once
  * leaked verbatim into a user's chat. This is the egress safety net (the real
- * fix is the affordance — see [[feedback_never_blame_the_model]] — but the
+ * fix is the affordance the model was given, never the model itself — but the
  * boundary must never pass raw tool-call syntax to a user).
  *
  * Deterministic + tolerant of drift: it targets any angle-bracket marker that
