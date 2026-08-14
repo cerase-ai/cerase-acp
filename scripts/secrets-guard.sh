@@ -185,5 +185,5 @@ if [ "$findings" -eq 0 ]; then
 fi
 
 echo ""
-echo "${DIM}A0 · M-SECRETS-ARCHITECTURE-1 — the rename list is scripts/_secret_renames.sh.${NC}"
+echo "${DIM}The rename list is scripts/_secret_renames.sh.${NC}"
 exit 1
