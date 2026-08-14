@@ -19,14 +19,14 @@
 # the cutover is a state the tree drifts out of the first time somebody copies a
 # line from an old document.
 #
-# ⚠️ The rename list is DATA (`scripts/_secret_renames.sh`) and this reads it.
+# The rename list is DATA (`scripts/_secret_renames.sh`) and this reads it.
 # A guard carrying its own copy of the list is a second list, and the two would
 # disagree exactly when it mattered.
 #
-# ⚠️ **`devplan/` is excluded from G3, deliberately.** It holds the rename table
-# itself and the historical record of why each name changed. A guard that forced
-# the devplan to stop naming the old spellings would delete the reasoning for
-# the very change it enforces.
+# `devplan/` is excluded from G3, deliberately: it holds the rename table
+# itself and the historical record of why each name changed. A guard that
+# forced the devplan to stop naming the old spellings would delete the
+# reasoning for the very change it enforces.
 #
 # Usage:  scripts/secrets-guard.sh [--quiet]
 # Exit:   0 clean · 1 a finding
@@ -42,11 +42,11 @@ RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; DIM=$'\033[2m'; NC=$'\033[0m'
 [ -t 1 ] || { RED=""; GREEN=""; DIM=""; NC=""; }
 
 findings=0
-# ⚠️ No BACKTICKS in any message passed here. Inside a double-quoted string a
-# backtick is command substitution, so `.env` in a finding does not print a file
-# name — it tries to RUN one. Two of the three G2 rules shipped broken that way
-# and printed "command not found" instead of the defect they had found. Caught
-# by deliberately breaking each rule and reading what came out.
+# No BACKTICKS in any message passed here. Inside a double-quoted string a
+# backtick is command substitution, so `.env` in a finding does not print a
+# file name — it tries to RUN one. Two of the three G2 rules shipped broken
+# that way and printed "command not found" instead of the defect they had
+# found.
 _fail() { echo "${RED}✗${NC} $1"; findings=$((findings + 1)); }
 
 # ── G2 ────────────────────────────────────────────────────────────
@@ -70,14 +70,14 @@ _fail() { echo "${RED}✗${NC} $1"; findings=$((findings + 1)); }
 #                                           state in every repo here; a named
 #                                           variant is somebody's private copy.
 #
-# ⚠️ Rule 3 was first written as "untracked credential file, in a tool repo
+# Rule 3 was first written as "untracked credential file, in a tool repo
 # only", with a tool/machine discriminator that GUESSED from the presence of
 # `cli.sh`. It reddened `cerase-dash` and `cerase-marketplace` — two Laravel
-# apps whose local `.env` is ordinary developer state — and a guard that reds on
-# normal work is a guard somebody switches off, after which rules 1 and 2 stop
-# protecting anything either. The name is the honest signal: the file this
-# milestone opened on was `.env.guidance-ops`, a named variant, and no
-# convention here produces one.
+# apps whose local `.env` is ordinary developer state — and a guard that reds
+# on normal work is a guard somebody switches off, after which rules 1 and 2
+# stop protecting anything either. The name is the honest signal: a plain
+# `.env` is ordinary local state, and no convention here produces a named
+# variant like `.env.guidance-ops`.
 
 # 1 — tracked.
 while IFS= read -r f; do
@@ -122,8 +122,8 @@ for cand in "$ROOT/scripts/_secret_renames.sh" "$ROOT/../cerase-core/scripts/_se
 done
 
 if [ -z "$RENAMES" ]; then
-    # ⚠️ NOT a silent pass. A guard that cannot find its input and reports
-    # success is the shape this whole milestone is about.
+    # NOT a silent pass. A guard that cannot find its input and reports
+    # success is the shape this whole class of bug takes.
     _fail "no scripts/_secret_renames.sh reachable — G3 could not run, and that is a finding, not a pass."
 else
     # shellcheck source=scripts/_secret_renames.sh
@@ -131,12 +131,9 @@ else
 
     while IFS= read -r old; do
         [ -n "$old" ] || continue
-        # ⚠️ **USES, not mentions**, and this is the eleventh time a guard in
-        # this workspace has fired on the prose explaining it. The previous ten
-        # were fixed one at a time — strip the comments here, describe instead
-        # of quoting there. This one fixes the class: a retired name matters
-        # when something ASSIGNS or READS it, and a document explaining what was
-        # renamed has to be able to say what was renamed.
+        # USES, not mentions: a retired name matters when something ASSIGNS
+        # or READS it, and a document explaining what was renamed has to be
+        # able to say what was renamed.
         #
         # Two passes rather than one clever pattern: `git grep` finds every
         # candidate (its matcher is the same everywhere CI runs, unlike the
@@ -148,14 +145,14 @@ else
         #   'NAME' "NAME"    a name handed to something, as in PASSTHROUGH_ENV
         #
         # A backticked name in a sentence is none of those.
-        # ⚠️ `tests/` excluded, and NOT because it is inconvenient. Several
+        # `tests/` excluded, and NOT because it is inconvenient. Several
         # tests must name a retired spelling precisely BECAUSE it is retired —
         # the one proving the converge renames it writes the old name into a
         # fixture on purpose. And a test that genuinely still READ an old name
         # would fail on its own, at runtime: `_load_env_file` dies on one. The
         # runtime covers what this exclusion gives up.
-        # ⚠️ **One use this rule cannot forbid: reading a retired name out of a
-        # file written before the rename.** `cerase-ops` opens historical copies
+        # One use this rule cannot forbid: reading a retired name out of a
+        # file written before the rename. `cerase-ops` opens historical copies
         # of an appliance's `.env` under ~/.cerase-ops/appliance-env-backups/ to
         # recover the passphrase for a pre-cutover archive. Those files are
         # RECORDS of what a box held then; `_converge_secret_names` migrates the
@@ -168,12 +165,6 @@ else
         # cerase-ops, and for the same reason: a rule nobody can predict is a
         # rule that gets worked around. The marker asserts nothing about the
         # LIVE path, which `_load_env_file` still kills on sight.
-        #
-        # Cost of getting this wrong, measured 2026-08-14: without it the guard
-        # reddened `cerase-ops` CI on thirteen consecutive pushes over thirteen
-        # hours, and `cerase-provisioner` went fifteen commits stale — including
-        # the fix for a read-only command that destroyed the key to the archive
-        # it was about to restore.
         hits="$(git grep -n "$old" -- . ':!devplan' ':!tests' ':!scripts/_secret_renames.sh' 2>/dev/null \
                 | grep -E "(^|[^A-Za-z0-9_])${old}=|[$]\{?${old}([^A-Za-z0-9_]|$)|['\"]${old}['\"]" \
                 | while IFS= read -r hit; do

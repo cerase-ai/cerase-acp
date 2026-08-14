@@ -49,7 +49,7 @@ function makeFakeAdapter(agent: AgentConfig, _: Dispatcher, behaviour: "ok" | "f
     makeSendTarget() {
       return async () => {
         /* no-op in tests */
-        // M-ACP-FAILLOUD-1: the send target reports a delivery outcome.
+        // The send target reports a delivery outcome.
         return { ok: true };
       };
     },
@@ -107,10 +107,6 @@ describe("runBridge", () => {
     ).rejects.toThrow();
   });
 
-  // M-ACP-WEB-RESILIENT-1 — a single channel adapter's start() failure (e.g.
-  // a bad Discord token → TokenInvalid) must NOT tear the bridge down: the
-  // internal-server + the healthy adapters (esp. the panel-only `web`
-  // maintainer transport) stay up, and an inject to a healthy agent still works.
   it("production mode: one adapter fails, one succeeds → bridge stays up, status truthful, inject works", async () => {
     const cfg = makeConfig(); // doc-qa allows 111, policy-qa allows 222
     const SECRET = "m22-secret";
@@ -154,15 +150,14 @@ describe("runBridge", () => {
     expect(injectRes.status).toBe(202);
   });
 
-  // M-ACP-FAILLOUD-1 + M-ACP-INJECT-ACK-1 — /internal/inject acks 202 at
-  // ACCEPTANCE (validation + allowlist) and runs the turn detached, so a
-  // slow model turn no longer trips the control-plane's fire-and-forget
-  // timeout. The fail-loud guarantee moved with it: a swallowed
-  // turn/delivery failure must surface in the additive `inject` block of
-  // GET /internal/status — never a silent 202-then-nothing. We drive the
-  // REAL production dispatcher: doc-qa's channel is "down" (every send
-  // reports `{ ok: false }`) → recorded as the last inject failure;
-  // policy-qa's send succeeds → counted as succeeded.
+  // /internal/inject acks 202 at acceptance (validation + allowlist) and runs
+  // the turn detached, so a slow model turn no longer trips the
+  // control-plane's fire-and-forget timeout. A swallowed turn/delivery
+  // failure must surface in the additive `inject` block of GET
+  // /internal/status — never a silent 202-then-nothing. This drives the real
+  // production dispatcher: doc-qa's channel is "down" (every send reports
+  // `{ ok: false }`) → recorded as the last inject failure; policy-qa's send
+  // succeeds → counted as succeeded.
   it("production mode: /internal/inject acks 202; a detached delivery failure surfaces in the status inject block", async () => {
     const cfg = makeConfig(); // doc-qa allows 111, policy-qa allows 222
     const SECRET = "faillooud-secret";
@@ -190,8 +185,8 @@ describe("runBridge", () => {
         body: JSON.stringify({ agent_id: agentId, user_id: userId, text: "ciao", surface_in_chat: false }),
       });
 
-    // Both injects pass validation + allowlist → 202 ACCEPTED; the turn +
-    // delivery run as a detached background task (M-ACP-INJECT-ACK-1).
+    // Both injects pass validation + allowlist → 202 accepted; the turn +
+    // delivery run as a detached background task.
     const failRes = await inject("doc-qa", "111");
     expect(failRes.status).toBe(202);
     const okRes = await inject("policy-qa", "222");
@@ -218,11 +213,11 @@ describe("runBridge", () => {
     );
   });
 
-  // M-ACP-ADAPTER-SELFHEAL-1 — a transient start() failure must recover on its
-  // own: the supervisor retries on a backoff and the agent flips not-ready →
-  // ready without a container restart, while the bridge never throws. Mirrors
-  // the real deployment: a healthy web/maintainer transport keeps the bridge
-  // above the total-failure threshold while the discord channel self-heals.
+  // A transient start() failure must recover on its own: the supervisor
+  // retries on a backoff and the agent flips not-ready → ready without a
+  // container restart, while the bridge never throws. Mirrors the real
+  // deployment: a healthy web/maintainer transport keeps the bridge above the
+  // total-failure threshold while the discord channel self-heals.
   it("production mode: a transient start() failure self-heals after a backoff tick", async () => {
     vi.useFakeTimers();
     try {

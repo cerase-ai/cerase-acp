@@ -115,7 +115,7 @@ describe("SendQueue", () => {
   it("continues after a send() reports failure — rest of the queue still drains", async () => {
     const sent: string[] = [];
     const q = new SendQueue({
-      // M-ACP-FAILLOUD-1: the send target now REPORTS failure instead of throwing.
+      // The send target reports failure instead of throwing.
       send: async (msg) => {
         if (msg === "fail") return { ok: false, error: new Error("network error") };
         sent.push(msg);
@@ -128,10 +128,10 @@ describe("SendQueue", () => {
     q.enqueue("ok-2");
     await vi.advanceTimersByTimeAsync(2_000);
     const result = await q.drain();
-    // M-ACP-2: the permanently-failing chunk is retried once, then a
+    // The permanently-failing chunk is retried once, then a
     // visible delivery-failure marker is emitted; the queue continues.
     expect(sent).toEqual(["ok-1", DELIVERY_FAILURE_MARKER, "ok-2"]);
-    // M-ACP-FAILLOUD-1: drain() reports the failure so the dispatcher fails loud.
+    // drain() reports the failure so the dispatcher fails loud.
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failures).toHaveLength(1);
@@ -143,7 +143,7 @@ describe("SendQueue", () => {
     const sent: string[] = [];
     const q = new SendQueue({
       // A target that throws instead of returning is caught defensively and
-      // treated as a `!ok` result (M-ACP-FAILLOUD-1).
+      // treated as a `!ok` result.
       send: async (msg) => {
         if (msg === "boom") throw new Error("network error");
         sent.push(msg);
@@ -172,7 +172,7 @@ describe("SendQueue", () => {
   });
 });
 
-// M-ACP-2 — a failed chunk is retried once; persistent failure emits a
+// A failed chunk is retried once; persistent failure emits a
 // visible delivery-failure marker instead of silently dropping mid-reply
 // content (the user used to see a reply with a hole in it).
 describe("SendQueue delivery retry (M-ACP-2)", () => {
@@ -194,7 +194,7 @@ describe("SendQueue delivery retry (M-ACP-2)", () => {
     });
     q.enqueue("hello");
     await vi.advanceTimersByTimeAsync(5_000);
-    // M-ACP-FAILLOUD-1: the retry succeeds → drain() reports ok.
+    // The retry succeeds → drain() reports ok.
     await expect(q.drain()).resolves.toEqual({ ok: true });
     expect(received).toEqual(["hello"]);
   });
@@ -220,7 +220,7 @@ describe("SendQueue delivery retry (M-ACP-2)", () => {
     expect(received).toContain("second chunk");
     expect(received).not.toContain("lost chunk");
     expect(received.filter((t) => t === DELIVERY_FAILURE_MARKER).length).toBe(1);
-    // M-ACP-FAILLOUD-1: the lost chunk is reported by drain().
+    // The lost chunk is reported by drain().
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failures.map((f) => f.chunk)).toContain("lost chunk");

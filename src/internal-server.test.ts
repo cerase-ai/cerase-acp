@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { headsUpText, type InternalServer, startInternalServer } from "./internal-server.js";
 
 // Minimal Dispatcher fake — records the calls the endpoint makes.
-// M-ACP-FAILLOUD-1: both methods now return a DeliveryResult; an optional
+// Both methods return a DeliveryResult; an optional
 // `outcome` lets a test simulate a failed turn/delivery so we can assert the
 // endpoint surfaces it as a 500.
 function makeFakeDispatcher(outcome: import("./chat-adapter.js").DeliveryResult = { ok: true }) {
@@ -67,7 +67,7 @@ describe("internal-server /internal/inject", () => {
   it("injects the message (202) and posts a heads-up by default", async () => {
     const resp = await post({ agent_id: "a1", user_id: "u1", text: "manda la rassegna" });
     expect(resp.status).toBe(202);
-    // M-ACP-INJECT-ACK-1: the turn now runs detached — wait for it.
+    // The turn runs detached — wait for it.
     await vi.waitFor(() => {
       expect(calls.handled).toEqual([["a1", "u1", "manda la rassegna"]]);
       expect(calls.system).toEqual([["a1", "u1", headsUpText("manda la rassegna")]]);
@@ -122,12 +122,12 @@ describe("internal-server /internal/inject", () => {
   });
 });
 
-// M-ACP-FAILLOUD-1 (+ M-ACP-INJECT-ACK-1) — failures must never be silent.
-// The system-message-only path still reports a truthful 500 (the delivery IS
-// the whole operation and is fast). The model-turn path now acks 202 at
-// ACCEPTANCE (the caller uses a 15s fire-and-forget timeout; awaiting the
-// full turn caused duplicate scheduled DMs), so its failures surface via the
-// `inject` block of GET /internal/status + loud logs instead of the HTTP code.
+// Failures must never be silent. The system-message-only path still reports
+// a truthful 500 (the delivery is the whole operation and is fast). The
+// model-turn path acks 202 at acceptance (the caller uses a 15s
+// fire-and-forget timeout; awaiting the full turn caused duplicate scheduled
+// DMs), so its failures surface via the `inject` block of GET
+// /internal/status + loud logs instead of the HTTP code.
 describe("internal-server /internal/inject fail-loud (M-ACP-FAILLOUD-1)", () => {
   let server: InternalServer;
   let base: string;
@@ -205,13 +205,13 @@ describe("internal-server /internal/inject fail-loud (M-ACP-FAILLOUD-1)", () => 
   });
 });
 
-// M-ACP-INJECT-ACK-1 — the 202 must reflect ACCEPTANCE of the inject, not
-// completion of the model turn: the control-plane's AcpInjector uses a 15s
-// HTTP timeout and treats inject as fire-and-forget, so awaiting the full
-// turn made every >15s turn throw ChatInjectFailed client-side while the
-// turn actually ran → the scheduled dispatcher re-fired (duplicate DMs) and
-// the panel kept the draft. The turn is a logged background task whose
-// failures stay observable (M-ACP-FAILLOUD): never a silent 202-then-nothing.
+// The 202 must reflect acceptance of the inject, not completion of the model
+// turn: the control-plane's AcpInjector uses a 15s HTTP timeout and treats
+// inject as fire-and-forget, so awaiting the full turn made every >15s turn
+// throw ChatInjectFailed client-side while the turn actually ran → the
+// scheduled dispatcher re-fired (duplicate DMs) and the panel kept the
+// draft. The turn is a logged background task whose failures stay
+// observable: never a silent 202-then-nothing.
 describe("internal-server /internal/inject acks before the turn (M-ACP-INJECT-ACK-1)", () => {
   let server: InternalServer;
   let base: string;
@@ -337,9 +337,9 @@ describe("internal-server /internal/inject acks before the turn (M-ACP-INJECT-AC
   });
 });
 
-// M-BRIDGE-LIVENESS-1 — GET /internal/status surfaces the REAL per-agent
-// runtime liveness (attached + client-ready) so the control-plane can show
-// "Attivo ma disconnesso" instead of a green badge over a down bridge.
+// GET /internal/status surfaces the real per-agent runtime liveness (attached
+// + client-ready) so the control-plane can show "Attivo ma disconnesso"
+// instead of a green badge over a down bridge.
 describe("internal-server /internal/status", () => {
   let server: InternalServer;
   let base: string;
@@ -375,7 +375,7 @@ describe("internal-server /internal/status", () => {
   it("returns the per-agent liveness reported by getAgentStatus", async () => {
     const resp = await getStatus();
     expect(resp.status).toBe(200);
-    // M-ACP-INJECT-ACK-1: the payload also carries the additive `inject`
+    // The payload also carries the additive `inject`
     // block (detached-turn observability) — zeroed when nothing ran.
     expect(await resp.json()).toEqual({
       agents: liveAgents,
@@ -421,10 +421,10 @@ describe("internal-server /internal/status", () => {
   });
 });
 
-// M-ACP-HEALTHCHECK-1 — an UNAUTHENTICATED liveness probe so the compose
-// healthcheck can tell the bridge is actually serving (the old `node --version`
-// healthcheck stayed green all through the crash-loop). It must not weaken the
-// shared-secret gate on the other routes.
+// An unauthenticated liveness probe so the compose healthcheck can tell the
+// bridge is actually serving (the old `node --version` healthcheck stayed
+// green all through the crash-loop). It must not weaken the shared-secret
+// gate on the other routes.
 describe("internal-server /healthz (M-ACP-HEALTHCHECK-1)", () => {
   let server: InternalServer;
   let base: string;
@@ -461,10 +461,6 @@ describe("internal-server /healthz (M-ACP-HEALTHCHECK-1)", () => {
     expect(body.ready).toBe(1);
   });
 
-  // Found on guidance 2026-08-10: a completely healthy bridge answered
-  // {"adapters":3,"ready":2}. One web agent (ready:null — there is no connection
-  // to be ready), two Discord, nothing wrong. `ready` was counted over ALL
-  // adapters, so the denominator a reader assumes (`adapters`) was wrong.
   it("a web agent has no readiness, so it is not counted as un-ready", async () => {
     await server.close();
     const fake = makeFakeDispatcher();
@@ -551,10 +547,10 @@ describe("internal-server /healthz (M-ACP-HEALTHCHECK-1)", () => {
   });
 });
 
-// M-ACP-HARDEN-1 — the inject endpoint must not deliver text to an arbitrary
-// user on an arbitrary agent's channel even with the internal secret: it is
-// now gated on the agent's allowlist, on BOTH the model-turn and the
-// system-message-only paths, before any send.
+// The inject endpoint must not deliver text to an arbitrary user on an
+// arbitrary agent's channel even with the internal secret: it is gated on
+// the agent's allowlist, on both the model-turn and the system-message-only
+// paths, before any send.
 describe("internal-server /internal/inject allowlist (M-ACP-HARDEN-1)", () => {
   let server: InternalServer;
   let calls: ReturnType<typeof makeFakeDispatcher>["calls"];

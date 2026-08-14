@@ -74,14 +74,14 @@ describe("cross-adapter typing invariants (OPT-67)", () => {
   }
 });
 
-// M-FILE-LIMITS-1 (fail-loud). Every real adapter that ingests inbound
-// attachments must, when the size cap rejects a file, TELL the user instead
-// of dropping it silently. Driving the wired-in SDK handlers end-to-end needs
-// a full discord.js / telegraf / @slack/bolt / googleapis harness (the same
-// reason the OPT-67 tests above grep the source); a structural pin is the
-// right level here. The notice-building + cap logic itself is covered
-// behaviourally in inbound-attachments.test.ts (buildOversizeNotice + ingest
-// `rejected` shape). This guards that each adapter actually CALLS it.
+// Every real adapter that ingests inbound attachments must, when the size
+// cap rejects a file, tell the user instead of dropping it silently. Driving
+// the wired-in SDK handlers end-to-end needs a full discord.js / telegraf /
+// @slack/bolt / googleapis harness (the same reason the tests above grep the
+// source); a structural pin is the right level here. The notice-building +
+// cap logic itself is covered behaviourally in inbound-attachments.test.ts
+// (buildOversizeNotice + ingest `rejected` shape). This guards that each
+// adapter actually calls it.
 describe("cross-adapter fail-loud on oversize attachment (M-FILE-LIMITS-1)", () => {
   // Each adapter must pass its own channel literal so the effective per-channel
   // cap (min(setting, channel ceiling)) and the oversize notice's MB figure are

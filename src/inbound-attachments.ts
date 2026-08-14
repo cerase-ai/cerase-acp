@@ -14,7 +14,7 @@ import { type FileWriter, writeAgentWorkspaceFile } from "./workspace-files.js";
 const logger = makeLogger("cerase-acp.attachments");
 
 /**
- * M-FILE-LIMITS-1 — inbound chat-upload cap, in MB. Operator-tunable via
+ * Inbound chat-upload cap, in MB. Operator-tunable via
  * CERASE_MAX_ATTACHMENT_MB (default 64). This is the operator's global setting;
  * the EFFECTIVE per-channel cap is `min(this, the channel's platform ceiling)` —
  * see `effectiveMaxMb`. Whichever is lower binds.
@@ -52,9 +52,9 @@ export interface InboundFile {
 export type UrlFetcher = (url: string, headers?: Record<string, string>) => Promise<Buffer>;
 
 /**
- * M-FILE-LIMITS-1 (fail-loud) — a file the ingest refused because it exceeded
- * the size cap. Surfaced to the caller so the adapter can TELL the user the
- * upload was dropped, instead of the old silent skip.
+ * A file the ingest refused because it exceeded
+ * the size cap (fail-loud). Surfaced to the caller so the adapter can TELL
+ * the user the upload was dropped, instead of silently skipping it.
  */
 export interface RejectedFile {
   /** Original filename as the channel reported it. */
@@ -68,7 +68,7 @@ export interface RejectedFile {
 /**
  * The outcome of an ingest: the workspace paths that were stored, plus any
  * files refused by the cap. `rejected` is non-empty → the adapter must notify
- * the user (M-FILE-LIMITS-1 fail-loud); the stored files still flow normally.
+ * the user (fail-loud); the stored files still flow normally.
  */
 export interface IngestResult {
   stored: string[];
@@ -112,7 +112,7 @@ export function sanitizeFilename(name: string): string {
  * paths plus the files refused by the size cap. A file that fails to
  * fetch/write is logged and skipped — one bad attachment never drops the whole
  * turn — but an over-cap file is recorded in `rejected` so the adapter can
- * fail loud (M-FILE-LIMITS-1) instead of dropping it silently.
+ * fail loud instead of dropping it silently.
  */
 async function storeInbound(
   containerName: string,
@@ -202,11 +202,11 @@ export function prependUploadMarker(text: string, relPaths: string[]): string {
 }
 
 /**
- * M-FILE-LIMITS-1 (fail-loud) — build the Italian, user-facing notice telling
- * the user which uploads were dropped for exceeding the size cap. Returns
- * `undefined` when nothing was rejected (so the caller sends nothing). Every
- * real adapter calls this after ingest and, if a string comes back, delivers
- * it via `dispatcher.sendSystemMessage` — replacing the old silent drop.
+ * Build the Italian, user-facing notice telling
+ * the user which uploads were dropped for exceeding the size cap (fail-loud).
+ * Returns `undefined` when nothing was rejected (so the caller sends
+ * nothing). Every real adapter calls this after ingest and, if a string
+ * comes back, delivers it via `dispatcher.sendSystemMessage`.
  */
 export function buildOversizeNotice(rejected: RejectedFile[], channel: Channel): string | undefined {
   const oversize = rejected.filter((r) => r.reason === "oversize");

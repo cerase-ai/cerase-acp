@@ -1,5 +1,5 @@
 /**
- * M-AGENT-VOICE-1 (A) — deterministic egress redaction of the underlying
+ * Deterministic egress redaction of the underlying
  * engine's identity from user-facing replies.
  *
  * Cerase runs on OpenCode, but the user must never see that — even if the
@@ -36,7 +36,7 @@ const ENGINE_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }>
 ];
 
 /**
- * M-EGRESS-HARDEN-1 — model/provider brand names + internal artifacts the model
+ * Model/provider brand names + internal artifacts the model
  * sometimes leaks despite the prompt-level hygiene rule (SpendLogs: "Claude",
  * `.mcp.json`, backticked recipe names).
  *

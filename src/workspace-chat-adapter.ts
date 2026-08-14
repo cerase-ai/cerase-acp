@@ -1,4 +1,4 @@
-// CHANNEL-4 (2026-05-31): Google Workspace Chat chat adapter.
+// Google Workspace Chat chat adapter.
 //
 // DM-only adapter implementing the ChatAdapter contract for a
 // Workspace Chat bot. No upstream OSS adapter exists, so we wire
@@ -119,7 +119,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
   return {
     agentId: agent.id,
     async start() {
-      // M-ACP-WSCHAT-GUARD-1 — fail-closed caller-identity gate. The
+      // Fail-closed caller-identity gate. The
       // webhook listener below trusts the request BODY for the sender
       // identity (event.user.email): anyone who can reach the port could
       // impersonate any allowed user. Refuse to start unless the operator
@@ -127,8 +127,8 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       // project number the Bearer JWT Google Chat sends with each request
       // is issued for) — so this listener can never be enabled by accident
       // without caller verification in place. Thrown from start() (not the
-      // factory / config superRefine) so only THIS channel goes down; the
-      // bridge keeps every other adapter up (M-ACP-WEB-RESILIENT-1).
+      // factory / config superRefine) so only this channel goes down; the
+      // bridge keeps every other adapter up.
       if (!agent.workspace_chat_verification_audience) {
         throw new Error(
           `agent "${agent.id}" channel='workspace_chat' refuses to start: caller-identity verification is not configured. ` +
@@ -183,7 +183,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           }
           const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
           outText = prependUploadMarker(text, stored);
-          // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
+          // Tell the user about over-cap files
           // instead of dropping them silently; the stored files still flow.
           const notice = buildOversizeNotice(rejected, "workspace-chat");
           if (notice) {
@@ -215,7 +215,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     },
     makeSendTarget(userId: string) {
       return async (chunk: string): Promise<DeliveryResult> => {
-        // M-ACP-FAILLOUD-1: any failure (not started, no DM space, a failed
+        // Any failure (not started, no DM space, a failed
         // messages.create) is returned as `{ ok: false }` rather than thrown,
         // so the failure travels up the SendQueue → Dispatcher → inject status.
         try {

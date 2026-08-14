@@ -8,12 +8,12 @@ import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp");
 
-// M-ACP-CRASH-1: defense-in-depth. A stray unhandled rejection (a discarded
-// promise chain in this code or a dependency) must NOT take the whole
-// multi-tenant bridge down — one user's recoverable failure should never
-// disconnect every other user. Log loudly and keep serving; the in-band
-// error handling (dispatcher turn-error copy, per-spawn catch) already
-// surfaces real failures to the affected user.
+// Defense-in-depth: a stray unhandled rejection (a discarded promise chain
+// in this code or a dependency) must not take the whole multi-tenant bridge
+// down — one user's recoverable failure should never disconnect every other
+// user. Log loudly and keep serving; the in-band error handling (dispatcher
+// turn-error copy, per-spawn catch) already surfaces real failures to the
+// affected user.
 process.on("unhandledRejection", (reason) => {
   logger.error({ reason }, "unhandledRejection — logged, bridge kept alive");
 });

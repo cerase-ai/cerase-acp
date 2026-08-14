@@ -1,4 +1,4 @@
-// M-MUTE-SURFACE-2 — proactive out-of-credits check.
+// Proactive out-of-credits check.
 //
 // opencode swallows the LiteLLM 429/402 that the credit gate raises, so the
 // dispatcher's REACTIVE credit copy never fires — the turn HANGS until the

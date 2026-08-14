@@ -73,7 +73,6 @@ describe("ingestInboundAttachments", () => {
     );
 
     expect(result.stored).toEqual(["uploads/7-1/small.txt"]);
-    // M-FILE-LIMITS-1: the over-cap file is surfaced, not silently dropped.
     expect(result.rejected).toEqual([{ name: "big.bin", sizeBytes: 20, reason: "oversize" }]);
     expect(writer).toHaveBeenCalledTimes(1);
   });

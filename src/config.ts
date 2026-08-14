@@ -13,7 +13,7 @@ const AgentIdSchema = z
     message: "agent id must be alphanumeric + '-' (no spaces, no leading dash)",
   });
 
-// CHANNEL-1 (2026-05-31): the bridge is no longer Discord-only. Each
+// The bridge is no longer Discord-only. Each
 // agent declares which chat channel it speaks via `channel` (default
 // 'discord' for back-compat with every existing agents.yaml). Per-channel
 // credential fields are flat on the agent (rather than nested under a
@@ -52,17 +52,16 @@ const AgentSchema = z
     bot_token: z.string().optional(),
     slack_app_token: z.string().optional(),
     workspace_chat_credentials_path: z.string().optional(),
-    // M-ACP-WSCHAT-GUARD-1: caller-identity verification config for the
-    // workspace_chat webhook listener — the Google Cloud project number
-    // the Bearer JWT that Google Chat attaches to each webhook request is
-    // issued for (the `aud` claim to verify against). The adapter REFUSES
-    // to start when this is absent (fail-closed: the listener derives the
-    // sender from the request body, so it must never come up without
-    // caller verification configured). Deliberately NOT required via
-    // superRefine: a config-level requirement would fail the whole
-    // agents.yaml load and take every channel down on reload — the
-    // adapter-level guard downs only this channel, consistent with the
-    // M-ACP-WEB-RESILIENT-1 per-adapter isolation.
+    // Caller-identity verification config for the workspace_chat webhook
+    // listener — the Google Cloud project number the Bearer JWT that Google
+    // Chat attaches to each webhook request is issued for (the `aud` claim to
+    // verify against). The adapter refuses to start when this is absent
+    // (fail-closed: the listener derives the sender from the request body, so
+    // it must never come up without caller verification configured).
+    // Deliberately not required via superRefine: a config-level requirement
+    // would fail the whole agents.yaml load and take every channel down on
+    // reload — the adapter-level guard downs only this channel, consistent
+    // with per-adapter isolation.
     workspace_chat_verification_audience: z.string().min(1).optional(),
     allowed_users: z.array(z.string().min(1)),
     // Working directory advertised to the ACP child via `session/new`.

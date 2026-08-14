@@ -1,4 +1,4 @@
-// C2-0 (2026-06-08): the `web` null-sink channel.
+// The `web` null-sink channel.
 //
 // A panel-only agent — the maintainer assistant — has no external chat
 // client. Turns arrive via the internal inject endpoint (/internal/inject,
@@ -37,7 +37,7 @@ export function createWebAdapter(agent: AgentConfig, _dispatcher: Dispatcher): C
           { agentId: agent.id, userId, chunkLen: chunk.length },
           "web channel: reply chunk discarded (read from the opencode timeline)",
         );
-        // M-ACP-FAILLOUD-1: discarding IS success for the web channel — the
+        // Discarding is success for the web channel — the
         // reply is read from the opencode timeline, never from here. Report
         // ok so a maintainer turn is never mislabelled as a delivery failure.
         return { ok: true };

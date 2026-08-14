@@ -48,7 +48,6 @@ describe("Dispatcher", () => {
         return { ok: true };
       },
     });
-    // M-ACP-FAILLOUD-1: a healthy turn + delivery resolves `{ ok: true }`.
     await expect(d.handleMessage("doc-qa", "111", "ping")).resolves.toEqual({ ok: true });
     // M-ACP-DISCLOSURE-OFF: no AI disclosure is prepended — the reply is all
     // that's sent. Join + trim the streaming marker to reconstruct it.
@@ -143,9 +142,9 @@ describe("Dispatcher", () => {
         return { ok: true };
       },
     });
-    // Italian input → Italian error copy, and the promise resolves (no throw).
-    // M-ACP-FAILLOUD-1: a failed turn now resolves `{ ok: false }` (truthful)
-    // instead of `undefined`, while STILL delivering the localized error copy.
+    // Italian input → Italian error copy, and the promise resolves (no throw):
+    // a failed turn resolves `{ ok: false }` while still delivering the
+    // localized error copy.
     await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toEqual({
       ok: false,
       error: expect.any(Error),
@@ -264,13 +263,12 @@ describe("402 overquota copy (M-ACP-2)", () => {
   });
 });
 
-// M-MUTE-SURFACE-2 — the REACTIVE credit copy above (M-ACP-2) is DEAD in
-// production: opencode swallows the LiteLLM 429/402, so `prompt()` never
-// throws the credit text — it HANGS until the 10-min watchdog. The bridge
-// now checks credits PROACTIVELY (before spawning/prompting) via the
-// injected `creditCheck` dep; on exhaustion it replies the no-credits copy
-// and never starts a turn. Fail-open: a missing dep or a failing check must
-// never block chat.
+// The reactive credit copy above is dead in production: opencode swallows
+// the LiteLLM 429/402, so `prompt()` never throws the credit text — it hangs
+// until the 10-min watchdog. The bridge instead checks credits proactively
+// (before spawning/prompting) via the injected `creditCheck` dep; on
+// exhaustion it replies the no-credits copy and never starts a turn.
+// Fail-open: a missing dep or a failing check must never block chat.
 describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
   function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
     return { prompt } as unknown as SessionManager;

@@ -1,4 +1,4 @@
-// CHANNEL-2 (2026-05-31): Telegram chat adapter.
+// Telegram chat adapter.
 //
 // Minimal DM-only adapter implementing the ChatAdapter contract.
 // Uses telegraf (Node Telegram Bot API client, MIT) — chosen over
@@ -107,7 +107,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           }
           const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, files, "telegram");
           const text = prependUploadMarker(caption, stored);
-          // M-FILE-LIMITS-1 (fail-loud): notify BEFORE the empty-message
+          // Notify before the empty-message
           // early-return, so an all-oversize/no-caption upload isn't silent.
           const notice = buildOversizeNotice(rejected, "telegram");
           if (notice) {
@@ -148,7 +148,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
     },
     makeSendTarget(userId: string) {
       return async (chunk: string): Promise<DeliveryResult> => {
-        // M-ACP-FAILLOUD-1: a sendMessage failure (or a "not started" state)
+        // A sendMessage failure (or a "not started" state)
         // is returned as `{ ok: false }` rather than thrown, so the failure
         // travels up the SendQueue → Dispatcher → inject status truthfully.
         try {

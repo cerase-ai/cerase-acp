@@ -21,12 +21,12 @@
 # and leaves no debt. So `_load_env_file` DIES naming the new spelling rather
 # than quietly accepting both.
 #
-# ⚠️ **The one thing that makes this safe is that the appliances move first.**
+# The one thing that makes this safe is that the appliances move first.
 # `/opt/cerase/.env` on every live box carries these names, and
-# `deploy/backup.sh` reads an unset passphrase as *"no encryption requested"* and
-# writes an **UNENCRYPTED archive with a warning**. A cutover in the code alone
-# would not fail loudly there — it would quietly stop encrypting. That is why
-# step 2b exists and why it ships in the same release.
+# `deploy/backup.sh` reads an unset passphrase as "no encryption requested"
+# and writes an unencrypted archive with a warning. A cutover in the code
+# alone would not fail loudly there — it would quietly stop encrypting.
+# That is why step 2b exists and why it ships in the same release.
 #
 # ── What is NOT renamed, and the list is as load-bearing as the renames ──
 #
@@ -36,7 +36,7 @@
 
 # old<TAB>new, one per line. `CERASE_` prefixes what is OURS.
 #
-# ⚠️ The FLEET_-prefixed duplicates are on the left too. They are the same value
+# The FLEET_-prefixed duplicates are on the left too. They are the same value
 # under a second spelling in the same file — the exact drift this milestone
 # removes, and leaving them out would let a reader keep finding the value under
 # a name nothing else writes.
@@ -90,17 +90,17 @@ _cerase_rename_for() {   # <old-name>
 # before anything reads the file — otherwise every verb on an un-migrated box
 # dies telling the operator to run a verb that also dies.
 #
-# ⚠️ **Why an appliance cannot be left to a human edit.** `/opt/cerase/.env` on
-# every live box carries the RETIRED spelling of the backup passphrase — named
-# by the table above rather than written here, because this sentence was
-# mechanically rewritten by the very rename it describes and came out claiming
-# the opposite. `deploy/backup.sh`
-# reads an unset passphrase as *"no encryption requested"* — it writes an
-# **UNENCRYPTED archive with a warning** and exits 0. A rename shipped in the
-# code alone would not fail on those boxes; it would quietly stop encrypting
-# them, and the first anyone would know is an unencrypted archive in a bucket.
+# Why an appliance cannot be left to a human edit. `/opt/cerase/.env` on
+# every live box carries the RETIRED spelling of the backup passphrase —
+# named by the table above rather than written here, because this sentence
+# would be mechanically rewritten by the very rename it describes and come
+# out claiming the opposite. `deploy/backup.sh` reads an unset passphrase
+# as "no encryption requested" — it writes an unencrypted archive with a
+# warning and exits 0. A rename shipped in the code alone would not fail
+# on those boxes; it would quietly stop encrypting them, and the first
+# anyone would know is an unencrypted archive in a bucket.
 #
-# ⚠️ **Silent when there is nothing to do**, so it is not a side effect on
+# Silent when there is nothing to do, so it is not a side effect on
 # `./cli.sh logs`. It rewrites only when an old name is actually present, says
 # so once, and keeps a timestamped copy — a script that edits a file holding
 # every credential on the machine leaves the previous version behind.
@@ -123,21 +123,20 @@ _converge_secret_names() {   # <env-file>
 
   [ "$hits" -gt 0 ] || return 0
 
-  # ⚠️ The SAME naming convention `_secrets.sh` uses for every other copy of an
+  # The SAME naming convention `_secrets.sh` uses for every other copy of an
   # env file, and for the same reason: `.bak-secret-<stamp>` is the pattern its
   # prune recognises, so this copy ages out with the rest instead of becoming
   # the thing the G2 guard was written to catch — an UNMANAGED duplicate of a
   # credential file that nobody removes. Inventing a second suffix here would
-  # have made the converge produce, on every run, exactly the defect this
-  # milestone opened on.
+  # make the converge produce, on every run, exactly the defect the guard
+  # exists to catch.
   local bak
   bak="${f}.bak-secret-$(date -u +%Y%m%d%H%M%S)"
   cp -p "$f" "$bak" && chmod 600 "$bak"
   sed -i "${sedargs[@]}" "$f"
-  # ⚠️ `if`, not `A && B || C`. This repo has been bitten by that shape before:
-  # under `set -e` a function whose last statement is a failing test returns 1
-  # in the NORMAL case. Here it would also run the fallback when the prune
-  # merely found nothing to remove.
+  # `if`, not `A && B || C`: under `set -e` a function whose last statement is
+  # a failing test returns 1 in the NORMAL case. Here it would also run the
+  # fallback when the prune merely found nothing to remove.
   if command -v _secret_backup_prune >/dev/null 2>&1; then
     _secret_backup_prune "$f" || true
   fi

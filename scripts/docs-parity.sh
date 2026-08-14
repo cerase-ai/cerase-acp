@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 #
-# M-DOCS-PARITY-ALL-REPOS-1 — no document names a command, file or path that
-# does not exist.
+# No document names a command, file or path that does not exist.
 #
-# ⚠️ **This is not hygiene, it is the gate.** The PoC is not done while a doc
-# tells the next person to run something that no longer exists, and this repo has
-# already paid for that twice: four documents taught the removed deploy verb for
-# months after M-DEPLOY-UX-1 removed it, and the repo split moved
-# `docs/deploy/restore-runbook.md` into cerase-ops leaving pointers behind.
+# This is not hygiene, it is the gate: the PoC is not done while a doc
+# tells the next person to run something that no longer exists. A
+# document can teach a removed verb for months, or point at a path that
+# moved to a sibling repo, and nothing else notices.
 # `tests/unit/docs_parity.bats` guarded the CLI's own verbs; this generalises the
 # same idea to every tracked markdown file, and — being a plain script with no
 # bats and no PHP — runs unchanged in each of the eight repos' CI.
 #
 # It checks two things and deliberately no more:
 #
-#   1. **Verbs.** Every `./cli.sh <verb>`, `./cerase-tenant.sh <verb>` and
+#   1. Verbs. Every `./cli.sh <verb>`, `./cerase-tenant.sh <verb>` and
 #      `./mgmt.sh <verb>` named in prose must be dispatched by that script —
 #      but only when that script lives in THIS repo. A doc in cerase-core that
 #      mentions `./cerase-tenant.sh provision` is describing a sibling tool, and
 #      a guard that fails on it would be a guard that punishes cross-referencing.
-#   2. **Paths.** Every repo-relative path in a markdown link `](…)` or in
+#   2. Paths. Every repo-relative path in a markdown link `](…)` or in
 #      backticks must resolve. Backticked paths are checked only when they carry
 #      a file extension or start with a directory this repo actually has, because
 #      backticks also hold shell fragments, env vars and JSON keys.
@@ -59,11 +57,10 @@ mapfile -t TOP_DIRS < <(git ls-files | awk -F/ 'NF>1{print $1}' | sort -u)
 
 _looks_like_path() {
     local candidate="$1" dir
-    # ⚠️ A path has a SLASH. Without this the guard flags `agents.yaml`,
+    # A path has a SLASH. Without this the guard flags `agents.yaml`,
     # `AGENTS.md`, `SKILL.md` and `opencode.json` — generic filenames prose
-    # legitimately uses as nouns, not as locations. Sixty of the first sweep's
-    # ninety hits were exactly that, and a guard with sixty false positives is
-    # a guard somebody turns off.
+    # legitimately uses as nouns, not as locations. A guard with that many
+    # false positives is a guard somebody turns off.
     [[ "$candidate" == */* ]] || return 1
     # Placeholders and globs are not paths: `slot-N/`, `<customer>/values.yaml`,
     # `docs/operator/{telegram,slack}-setup.md`.
@@ -102,19 +99,18 @@ _looks_like_path() {
 
 # Every tracked path, once, plus every directory prefix implied by one.
 #
-# ⚠️ **Resolution is against the TRACKED SET, never against the working
-# filesystem, and that is not a nicety.** The first version used `[ -e ]`, which
-# on a developer's machine finds untracked runtime state (`agent-runtime/bridge/
-# agents.yaml` is generated at boot) and sibling repos. CI has neither. The guard
-# was green here and red on the runner — the guard written to stop documents
-# lying was itself lying about being green. Reading only what git tracks makes
-# the two identical, which is the whole point of a guard.
+# Resolution is against the TRACKED SET, never against the working
+# filesystem. `[ -e ]` finds untracked runtime state on a developer's
+# machine (`agent-runtime/bridge/agents.yaml` is generated at boot) and
+# sibling repos that CI does not have — a guard green on a laptop and red
+# on the runner. Reading only what git tracks makes the two identical,
+# which is the whole point of a guard.
 #
-# ⚠️ An associative array, not a string with `grep` per candidate. The string
-# version was O(files × candidates) and took **52 seconds locally** — it pushed
-# the CI unit job past its 10-minute cap and the whole publish came back as
-# "cancelled", which reads like somebody hit a button. A guard that costs a
-# publish is a guard people remove.
+# An associative array, not a string with `grep` per candidate. The string
+# version was O(files × candidates) and took 52 seconds locally — enough
+# to push the CI unit job past its 10-minute cap, so the whole publish
+# came back as "cancelled", which reads like somebody hit a button. A
+# guard that costs a publish is a guard people remove.
 declare -A TRACKED_SET=()
 while IFS= read -r path; do
     # Every directory prefix, so `docs/privacy` resolves as well as the files in it.
@@ -124,12 +120,11 @@ while IFS= read -r path; do
         [[ "$d" == */* ]] || break
         d="${d%/*}"
     done
-    # ⚠️ And every trailing SUFFIX, which is what makes app-relative names work:
+    # And every trailing SUFFIX, which is what makes app-relative names work:
     # `architecture.md` says `routes/console.php` and
     # `docs/conventions/filament-render-tests.md`, both correct inside the Laravel
-    # app and wrong from the repo root. Dropping this silently produced 44 new
-    # "missing" hits the moment the lookup was rewritten — the suffix match was
-    # carrying them.
+    # app and wrong from the repo root. Dropping this silently produces 44
+    # false "missing" hits — the suffix match is what resolves them.
     d="$path"
     while [[ "$d" == */* ]]; do
         d="${d#*/}"
@@ -170,11 +165,10 @@ _resolves() {   # <target> <document's dir>
         [ -n "${TRACKED_SET[$candidate]:-}" ] && return 0
     done
 
-    # ⚠️ A SIBLING REPO's path is always accepted, and NOT conditionally on the
-    # sibling being checked out next door. That condition was the first version
-    # and it passed on a developer's machine — where all eight repos sit side by
-    # side — then failed in CI, which clones ONE repo. Four repos went red on the
-    # first push for exactly this.
+    # A SIBLING REPO's path is always accepted, and NOT conditionally on the
+    # sibling being checked out next door. Checking for the sibling's presence
+    # passes on a developer's machine — where all eight repos sit side by
+    # side — then fails in CI, which clones ONE repo.
     #
     # The rule the guard can honestly enforce is "does THIS repo name something
     # that does not exist HERE". A `cerase-<repo>/…` path is by construction not
@@ -237,7 +231,7 @@ _check_paths() {
         [[ "$doc" == docs/internal/* ]] && continue
         [[ "$doc" == devplan/* ]] && continue
 
-        # ⚠️ An explicit, VISIBLE opt-out for a document that describes ANOTHER
+        # An explicit, VISIBLE opt-out for a document that describes ANOTHER
         # project's tree — an evaluation of a third-party gateway, a note about
         # a skill's own layout. Those paths are correct and this repo cannot
         # resolve them. The marker lives in the document rather than in a list

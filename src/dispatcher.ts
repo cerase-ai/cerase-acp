@@ -15,8 +15,8 @@ import { detectLanguage, type TurnMetaTracker } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
 
-// M-ACP-FAILLOUD-1: the send target now reports delivery success/failure
-// instead of `Promise<void>`, so a swallowed channel error can surface.
+// The send target reports delivery success/failure instead of
+// `Promise<void>`, so a swallowed channel error can surface.
 type SendTarget = (chunk: string) => Promise<DeliveryResult>;
 
 export interface DispatcherDeps {
@@ -26,7 +26,7 @@ export interface DispatcherDeps {
   /** Returns the function the bridge will call to deliver each chunk. */
   resolveSendTarget: (agentId: string, userId: string) => SendTarget;
   /**
-   * M-MUTE-SURFACE-2 — proactive out-of-credits gate. Called BEFORE the
+   * Proactive out-of-credits gate. Called BEFORE the
    * ACP child is spawned / `prompt()` is invoked. Resolves `{exhausted:
    * true}` when the tenant is below the credit safety buffer (the
    * control-plane's 402), `{exhausted: false}` otherwise. Optional so the
@@ -46,7 +46,7 @@ const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   unknown: "I'm not authorised to talk to you yet — ask your admin.",
 };
 
-// M-ACP-1: a turn that throws (opencode crash, ACP rejection, gateway
+// A turn that throws (opencode crash, ACP rejection, gateway
 // abort) must not leave the user staring at 👀 + a stopped typing
 // indicator. Localized so non-Italian users aren't replied to in mixed
 // language (same detectLanguage source as the refusal copy).
@@ -58,7 +58,7 @@ const TURN_ERROR: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   unknown: "⚠️ Something went wrong, please try again shortly.",
 };
 
-// M-ACP-1: a turn that completes but emits zero text chunks would
+// A turn that completes but emits zero text chunks would
 // otherwise send nothing at all — indistinguishable from a dead bridge.
 const TURN_EMPTY: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   it: "🤔 Non ho prodotto una risposta. Riprova o riformula la richiesta.",
@@ -87,7 +87,7 @@ export function pickEmptyMessage(text: string): string {
   return TURN_EMPTY[detectLanguage(text)];
 }
 
-// M-ACP-2 — dedicated copy for the 402/overquota chain: the credit
+// Dedicated copy for the 402/overquota chain: the credit
 // gate raises BudgetExceededError → the LLM call fails → opencode
 // errors the turn. Without classification the employee got the generic
 // "something went wrong" and retried forever.
@@ -105,7 +105,7 @@ export function pickNoCreditsMessage(text: string): string {
 }
 
 /**
- * M-ACP-2 — recognise the credit-gate abort in a failed turn's error
+ * Recognise the credit-gate abort in a failed turn's error
  * chain. The signatures come from litellm/hooks/cerase_credit_gate.py
  * ("cerase credit gate: …") and LiteLLM's BudgetExceededError; the raw
  * text survives into the ACP error message opencode reports.
@@ -124,7 +124,7 @@ export class Dispatcher {
    * heads-up "🕐 È scattato un messaggio programmato…"). Uses the same
    * send target the reply pipeline uses.
    *
-   * M-ACP-FAILLOUD-1: returns the delivery outcome so the caller (the inject
+   * Returns the delivery outcome so the caller (the inject
    * endpoint) can report a truthful status instead of a blind 202.
    */
   async sendSystemMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
@@ -133,7 +133,7 @@ export class Dispatcher {
   }
 
   /**
-   * M-ACP-FAILLOUD-1 — `ok` iff the turn did NOT fail AND every delivery
+   * `ok` iff the turn did NOT fail AND every delivery
    * succeeded. A turn failure = `prompt()` threw (the existing `failed` flag);
    * a delivery failure = the SendQueue lost a chunk after its retry, or a
    * direct send (refusal / error-copy / empty-copy) ultimately failed. Every
@@ -152,12 +152,12 @@ export class Dispatcher {
 
     const send = this.deps.resolveSendTarget(agentId, userId);
 
-    // M-MUTE-SURFACE-2 — proactive out-of-credits gate, BEFORE spawning the
-    // ACP child / calling prompt(). opencode swallows the LiteLLM 429/402, so
-    // the reactive catch (below) never fires on exhaustion — the turn HANGS
-    // until the watchdog. Check first: if the tenant is out, reply the
-    // no-credits copy and return WITHOUT starting a turn. The reply IS the
-    // whole response, so its delivery outcome IS the result.
+    // Proactive out-of-credits gate, before spawning the ACP child / calling
+    // prompt(). opencode swallows the LiteLLM 429/402, so the reactive catch
+    // (below) never fires on exhaustion — the turn hangs until the watchdog.
+    // Check first: if the tenant is out, reply the no-credits copy and
+    // return without starting a turn. The reply is the whole response, so
+    // its delivery outcome is the result.
     //
     // Fail-open: no dep (back-compat) → proceed; a check that THROWS
     // (control-plane unreachable) → log + proceed. A bridge that can't reach
@@ -185,13 +185,13 @@ export class Dispatcher {
 
     logger.info({ agentId, userId, textLen: text.length }, "dispatching to session manager");
 
-    // M-ACP-1: track whether the turn emitted anything and whether it
+    // Track whether the turn emitted anything and whether it
     // failed, so we can surface a user-facing message instead of silence.
     let produced = false;
     let failed = false;
     let creditExhausted = false;
     let turnError: Error | undefined;
-    // M-ACP-FAILLOUD-1: the streamed-reply delivery outcome (from the queue).
+    // The streamed-reply delivery outcome (from the queue).
     let drainResult: DrainResult = { ok: true };
     try {
       await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
@@ -223,7 +223,7 @@ export class Dispatcher {
       if (!r.ok) deliveryOk = false;
     }
 
-    // M-ACP-FAILLOUD-1: fail loud. A failed turn always yields `{ ok: false }`
+    // Fail loud. A failed turn always yields `{ ok: false }`
     // (with the turn's own error); otherwise a swallowed delivery failure does.
     if (failed) {
       return { ok: false, error: turnError ?? new Error("agent turn failed") };
@@ -235,7 +235,7 @@ export class Dispatcher {
   }
 
   /**
-   * M-ACP-FAILLOUD-1 — deliver a single best-effort message and report the
+   * Deliver a single best-effort message and report the
    * outcome. A `!ok` result is logged; a send that still throws is caught and
    * converted to a `!ok` result so it never escapes handleMessage.
    */

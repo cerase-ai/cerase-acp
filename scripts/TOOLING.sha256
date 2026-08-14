@@ -1,6 +1,7 @@
 # Tooling vendored from cerase-core — DO NOT EDIT these files here.
 # Re-sync from cerase-core:  ./scripts/sync-tooling.sh
 # M-REPO-TOOLING-PIN-1 — the first divergence is otherwise silent.
-6b9e5f13ca84461517a84b0f4ccfb125c52e0bfaef1d6a6df902b261e15ba1ef  scripts/docs-parity.sh
-50acf414ed9c75c6370860a2150c250228a96e8c517f1e1e3aecd6a790e0e9af  scripts/secrets-guard.sh
-9ebb834715775e4326d2f1c9bdae27e4079700e78a6318215055c9b214a0e73c  scripts/_secret_renames.sh
+078ced3cdb793c9563d64343f1d501bc43c0ba15e031bb8e8bf3770ba085cc0b  scripts/docs-parity.sh
+7ef5cd7492f6f03f8f39eea1cc7512ecdced68efbc13906d13c76b0673a264a1  scripts/secrets-guard.sh
+98e9a37dbbda7ec69a8a8344566ffe34987ee412f7c5b363152fbd9e7e6b905a  scripts/_secret_renames.sh
+4e03104e1f3f21f1eb92379bcaaac269db6f2da2b78ffecf987542a9ea407926  scripts/comment-check.sh

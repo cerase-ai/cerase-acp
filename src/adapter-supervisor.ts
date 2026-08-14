@@ -1,8 +1,8 @@
-// M-ACP-ADAPTER-SELFHEAL-1 — per-adapter retry supervisor.
+// Per-adapter retry supervisor.
 //
-// M-ACP-WEB-RESILIENT-1 (M22) made a single adapter's start() failure
-// non-fatal: the channel just stays not-ready while the rest of the bridge
-// keeps serving. This module adds the recovery half: when a channel adapter
+// A single adapter's start() failure is non-fatal: the channel just stays
+// not-ready while the rest of the bridge keeps serving. This module adds the
+// recovery half: when a channel adapter
 // fails to start (a bad-then-fixed Discord token, a transient Cloudflare
 // ConnectTimeoutError), retry it on a capped, jittered exponential backoff
 // until it connects — no container restart, no operator action.

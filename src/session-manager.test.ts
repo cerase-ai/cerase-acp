@@ -154,10 +154,6 @@ describe("SessionManager", () => {
     await expect(mgr.prompt("ghost", "user-A", "x")).rejects.toThrow(/ghost/);
   });
 
-  // M-ACP-CRASH-1: a spawn/handshake failure must reject the turn for THAT
-  // user without emitting an unhandled rejection — the discarded
-  // inFlightSpawns.finally() chain used to reject unhandled and crash the
-  // whole bridge (every user disconnected) on one recoverable failure.
   it("M-ACP-CRASH-1: a failed spawn rejects the turn with NO unhandled rejection", async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (r: unknown) => unhandled.push(r);
@@ -183,7 +179,7 @@ describe("SessionManager", () => {
     }
   });
 
-  // M-ACP-HARDEN-1: session.max_concurrent is a real ceiling — a new session
+  // session.max_concurrent is a real ceiling — a new session
   // past the cap evicts the least-recently-used one instead of spawning an
   // unbounded number of docker-exec children.
   it("M-ACP-HARDEN-1: enforces max_concurrent by evicting the LRU session", async () => {

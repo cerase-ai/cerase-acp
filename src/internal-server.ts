@@ -7,13 +7,13 @@
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first.
-// M-ACP-INJECT-ACK-1: the 202 means ACCEPTED (validation + allowlist passed),
-// not "turn completed" — the caller (AcpInjector) uses a 15s fire-and-forget
-// timeout, and awaiting the full model turn made every >15s turn throw
+// The 202 means accepted (validation + allowlist passed), not "turn
+// completed" — the caller (AcpInjector) uses a 15s fire-and-forget timeout,
+// and awaiting the full model turn made every >15s turn throw
 // ChatInjectFailed client-side while the turn actually ran, so the scheduled
 // dispatcher re-fired it (duplicate DMs). The heads-up + turn run as a logged
-// background task; failures stay observable (M-ACP-FAILLOUD) via loud logs +
-// the `inject` block of GET /internal/status.
+// background task; failures stay observable via loud logs + the `inject`
+// block of GET /internal/status.
 // E3: when `system_message_only` is true it instead delivers `text` straight
 // to the DM as a system message and runs NO model turn (the E2 bind-time
 // connect nudge — a notification, not a prompt the agent should answer);
@@ -35,7 +35,7 @@ export interface InternalServer {
 }
 
 /**
- * M-BRIDGE-LIVENESS-1 — one agent's REAL runtime state on the bridge.
+ * One agent's REAL runtime state on the bridge.
  * `attached` = an adapter is held for it; `ready` = its channel client
  * reports a live connection right now (discord.js `client.isReady()`).
  * The field is channel-agnostic (`ready`, not `discordReady`): the bridge
@@ -48,10 +48,10 @@ export interface AgentLiveness {
   attached: boolean;
   /**
    * `true`/`false` = the channel client reports a live/dropped connection;
-   * `null` = unknown (the adapter exposes no readiness signal yet). M-ACP-HARDEN-1
-   * fixed a false-green: non-Discord adapters used to report `true` unconditionally,
-   * so a Slack/Telegram gateway drop showed as healthy — they now report `null`
-   * (the control-plane renders "stato sconosciuto", not a green badge).
+   * `null` = unknown (the adapter exposes no readiness signal yet). A
+   * non-Discord adapter that reported `true` unconditionally would show a
+   * dropped Slack/Telegram gateway as healthy — reporting `null` instead lets
+   * the control-plane render "stato sconosciuto" rather than a green badge.
    */
   ready: boolean | null;
 }
@@ -63,12 +63,12 @@ export interface InternalServerOptions {
   port?: number;
   host?: string;
   /**
-   * M-BRIDGE-LIVENESS-1 — supplies the per-agent liveness snapshot served
+   * Supplies the per-agent liveness snapshot served
    * by `GET /internal/status`. Absent → the endpoint reports an empty set.
    */
   getAgentStatus?: () => AgentLiveness[];
   /**
-   * M-ACP-HARDEN-1 — gate the inject endpoint on the agent's allowlist.
+   * Gate the inject endpoint on the agent's allowlist.
    * Without it, an internal-secret holder could deliver arbitrary text to
    * ANY user_id on ANY agent's channel (the model-turn path checks the
    * allowlist, but the heads-up + system-message-only sends bypassed it).
@@ -87,7 +87,7 @@ export function headsUpText(body: string): string {
 }
 
 /**
- * M-ACP-INJECT-ACK-1 — the observable outcome of the detached inject turns,
+ * The observable outcome of the detached inject turns,
  * served as the additive `inject` block of GET /internal/status. Because the
  * endpoint now acks 202 at acceptance, this (plus loud logs) is where a
  * failed background turn surfaces — the M-ACP-FAILLOUD guarantee that a 202
@@ -133,7 +133,7 @@ class InjectTracker {
 }
 
 export async function startInternalServer(opts: InternalServerOptions): Promise<InternalServer> {
-  // M-ACP-INJECT-ACK-1 — one tracker per server instance, shared by every
+  // One tracker per server instance, shared by every
   // request so /internal/status reports the aggregate detached-turn outcome.
   const injects = new InjectTracker();
   const server = createServer((req, res) => {
@@ -169,23 +169,23 @@ async function handleRequest(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
-  // M-ACP-HEALTHCHECK-1 — UNAUTHENTICATED liveness probe for the compose
-  // healthcheck, served BEFORE the shared-secret gate. Returns 200 iff the
-  // internal server is listening, so the container goes unhealthy the moment
-  // the bridge's inject transport is down — unlike the old `node --version`
-  // check, which stayed green all through the crash-loop. It leaks only counts
-  // (never agent identities or secrets), so it needs no bearer.
+  // An unauthenticated liveness probe for the compose healthcheck, served
+  // before the shared-secret gate. Returns 200 iff the internal server is
+  // listening, so the container goes unhealthy the moment the bridge's
+  // inject transport is down — unlike the old `node --version` check, which
+  // stayed green all through the crash-loop. It leaks only counts (never
+  // agent identities or secrets), so it needs no bearer.
   if (req.method === "GET" && url.pathname === "/healthz") {
     const payload: Record<string, unknown> = { status: "ok" };
     if (opts.getAgentStatus) {
       const agents = opts.getAgentStatus();
       payload.adapters = agents.length;
-      // `ready` is only meaningful for adapters that HAVE a readiness — a web
-      // agent reports `ready: null` because there is no connection to be ready.
-      // Counting `=== true` over all of them made a completely healthy bridge
-      // answer `{"adapters":3,"ready":2}` on guidance (2026-08-10): one web
-      // agent, two Discord, nothing wrong. A number that reads as "one is down"
-      // when nothing is down is what an alert gets wired to, and then muted.
+      // `ready` is only meaningful for adapters that have a readiness — a web
+      // agent reports `ready: null` because there is no connection to be
+      // ready. Counting `=== true` over all of them makes a completely
+      // healthy bridge report fewer ready than adapters, which reads as "one
+      // is down" when nothing is down — a number that gets an alert wired to
+      // it, and then muted.
       //
       // So the denominator is published too, over the adapters the question
       // applies to. `readyOf` is 0 on a bridge of only web agents, and
@@ -203,11 +203,11 @@ async function handleRequest(
   // to every route below.
   const auth = req.headers.authorization ?? "";
   const expected = `Bearer ${opts.internalSecret}`;
-  // M-ACP-HARDEN-1: constant-time compare so the gate doesn't leak the
+  // Constant-time compare so the gate doesn't leak the
   // secret's length/prefix through response timing.
   const authorized = Boolean(opts.internalSecret) && safeEqual(auth, expected);
 
-  // M-BRIDGE-LIVENESS-1 — GET /internal/status: the per-agent runtime
+  // GET /internal/status: the per-agent runtime
   // liveness the control-plane reads to render the "Connessione" badge and
   // flag "Attivo ma disconnesso". Read-only; same shared-secret gate.
   if (req.method === "GET" && url.pathname === "/internal/status") {
@@ -216,7 +216,7 @@ async function handleRequest(
       return;
     }
     const agents = opts.getAgentStatus ? opts.getAgentStatus() : [];
-    // M-ACP-INJECT-ACK-1: additive `inject` block — the control-plane's
+    // Additive `inject` block — the control-plane's
     // BridgeStatusClient reads only `agents`, so this is back-compatible.
     sendJson(res, 200, { agents, inject: injects.snapshot() });
     return;
@@ -241,9 +241,9 @@ async function handleRequest(
     sendJson(res, 400, { error: "agent_id, user_id, text are required strings" });
     return;
   }
-  // M-ACP-HARDEN-1: the inject endpoint must not deliver text to an arbitrary
+  // The inject endpoint must not deliver text to an arbitrary
   // user on an arbitrary agent's channel even with the internal secret.
-  // Enforce the agent's allowlist here — covering BOTH the system-message-only
+  // Enforce the agent's allowlist here — covering both the system-message-only
   // path and the heads-up + model-turn path — before any send happens.
   if (opts.isAllowed && !opts.isAllowed(agentId, userId)) {
     logger.info({ agentId, userId }, "inject rejected: user not in agent allowlist");
@@ -264,7 +264,7 @@ async function handleRequest(
 
   if (systemMessageOnly) {
     try {
-      // M-ACP-FAILLOUD-1: the delivery IS the whole operation here — a `!ok`
+      // The delivery is the whole operation here — a `!ok`
       // result (channel down) must surface as a truthful 500, not a blind 202.
       const result = await opts.dispatcher.sendSystemMessage(agentId, userId, text);
       if (!result.ok) {
@@ -281,12 +281,12 @@ async function handleRequest(
     return;
   }
 
-  // M-ACP-INJECT-ACK-1 — ack ACCEPTANCE now, before the heads-up + model
+  // Ack acceptance now, before the heads-up + model
   // turn: the caller (AcpInjector, 15s timeout, fire-and-forget) must never
   // time out on a long turn that is in fact running — that made the
   // scheduled-message dispatcher re-fire it (duplicate DMs) and the panel
   // keep the draft. The turn runs as a logged background task below; its
-  // failures stay observable (M-ACP-FAILLOUD) via logger.error + the
+  // failures stay observable via logger.error + the
   // `inject` block of GET /internal/status — never a silent 202-then-nothing.
   sendJson(res, 202, { status: "accepted" });
 
@@ -301,7 +301,7 @@ async function handleRequest(
 }
 
 /**
- * M-ACP-INJECT-ACK-1 — the detached heads-up + model turn behind an already
+ * The detached heads-up + model turn behind an already
  * ack'd inject. Everything is caught here: a failed heads-up stays
  * best-effort (log + continue, as before), a failed/throwing turn is logged
  * loudly and recorded on the tracker so /internal/status surfaces it.
@@ -315,8 +315,8 @@ async function runInjectTurn(
   try {
     if (surfaceInChat) {
       // Deterministic heads-up before the model turn (best-effort — a
-      // heads-up failure must not block the actual injection). M-ACP-FAILLOUD-1:
-      // a `!ok` result stays best-effort (log + continue), as before.
+      // heads-up failure must not block the actual injection). A `!ok`
+      // result stays best-effort (log + continue).
       try {
         const headsUpResult = await opts.dispatcher.sendSystemMessage(agentId, userId, headsUp);
         if (!headsUpResult.ok) {
@@ -326,7 +326,7 @@ async function runInjectTurn(
         logger.warn({ err, agentId }, "heads-up send failed; continuing with injection");
       }
     }
-    // M-ACP-FAILLOUD-1: fail loud — a failed turn OR a swallowed delivery
+    // Fail loud — a failed turn or a swallowed delivery
     // failure returns `{ ok: false }`. The HTTP ack is already gone, so the
     // truth surfaces through the log + the /internal/status inject block
     // (and the dispatcher has already sent the user-facing error copy).
@@ -344,7 +344,7 @@ async function runInjectTurn(
 }
 
 /**
- * M-ACP-HARDEN-1 — constant-time string compare for the shared-secret gate.
+ * Constant-time string compare for the shared-secret gate.
  * `timingSafeEqual` throws on length mismatch, so guard the length first
  * (a length difference is not itself secret).
  */

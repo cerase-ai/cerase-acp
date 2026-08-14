@@ -1,4 +1,4 @@
-// M-SESSION-CONTEXT-HYGIENE-1 — capture the engine's compaction summary.
+// Capture the engine's compaction summary.
 //
 // When OpenCode auto-compacts a chat-only session it emits an "Anchored Summary"
 // block. The bridge already DETECTS + withholds it from chat (egress-redaction).

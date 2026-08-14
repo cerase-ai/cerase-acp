@@ -1,4 +1,4 @@
-// CHANNEL-1 (2026-05-31): the cross-channel adapter contract.
+// The cross-channel adapter contract.
 //
 // Each chat-channel implementation (discord, telegram, slack,
 // workspace_chat) returns a ChatAdapter — same interface the original

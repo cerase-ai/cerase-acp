@@ -1,5 +1,4 @@
-// M-ACP-WSCHAT-GUARD-1 — fail-closed caller-identity gate on the Workspace
-// Chat webhook listener.
+// Fail-closed caller-identity gate on the Workspace Chat webhook listener.
 //
 // The adapter's HTTP listener derives the message sender from the request
 // BODY (`event.user.email`): anyone who can reach the port could impersonate

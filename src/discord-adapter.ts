@@ -15,10 +15,10 @@ import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
-// CHANNEL-1 (2026-05-31): the standalone `DiscordAdapter` interface
-// was generalised into `ChatAdapter` (see ./chat-adapter.ts). Kept
-// here as a deprecated alias for any caller that imports it by name
-// (mostly the test suite). New code should import ChatAdapter.
+// The standalone `DiscordAdapter` interface was generalised into
+// `ChatAdapter` (see ./chat-adapter.ts). Kept here as a deprecated alias for
+// any caller that imports it by name (mostly the test suite). New code
+// should import ChatAdapter.
 export type DiscordAdapter = ChatAdapter;
 
 export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
@@ -74,8 +74,8 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         if (inbound.length > 0) {
           const { stored, rejected } = await ingestInboundAttachments(`cerase-${agent.id}`, inbound, "discord");
           text = prependUploadMarker(text, stored);
-          // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
-          // instead of dropping them silently; the stored files still flow.
+          // Tell the user about over-cap files instead of dropping them
+          // silently; the stored files still flow.
           const notice = buildOversizeNotice(rejected, "discord");
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
@@ -96,10 +96,10 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
 
   return {
     agentId: agent.id,
-    // M-BRIDGE-LIVENESS-1 — the REAL gateway connection state: true once
-    // the client has logged in and the WebSocket is up, false after a drop
-    // or before login. This is what tells "Attivo ma disconnesso" apart
-    // from a healthy Luigi in the admin.
+    // The real gateway connection state: true once the client has logged in
+    // and the WebSocket is up, false after a drop or before login. This is
+    // what tells "Attivo ma disconnesso" apart from a healthy Luigi in the
+    // admin.
     ready() {
       return client.isReady();
     },
@@ -123,8 +123,8 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       }
     },
     async sendFile(userId: string, file: { name: string; bytes: Buffer; caption?: string }): Promise<DeliveryResult> {
-      // M-ACP-FAILLOUD-1: return the outcome instead of throwing, so the
-      // bridge can log + degrade gracefully on an attachment-upload failure.
+      // Return the outcome instead of throwing, so the bridge can log +
+      // degrade gracefully on an attachment-upload failure.
       try {
         let channel = dmChannels.get(userId);
         if (!channel) {
@@ -145,10 +145,10 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
     },
     makeSendTarget(userId: string) {
       return async (chunk: string): Promise<DeliveryResult> => {
-        // M-ACP-FAILLOUD-1: a failed channel.send (slot down, gateway drop,
-        // user blocked the bot) is returned as `{ ok: false }` rather than
-        // thrown — the SendQueue retries once, then the failure surfaces all
-        // the way to the inject HTTP status instead of being swallowed.
+        // A failed channel.send (slot down, gateway drop, user blocked the
+        // bot) is returned as `{ ok: false }` rather than thrown — the
+        // SendQueue retries once, then the failure surfaces all the way to
+        // the inject HTTP status instead of being swallowed.
         try {
           let channel = dmChannels.get(userId);
           if (!channel) {
@@ -157,13 +157,12 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
             dmChannels.set(userId, channel);
           }
           await channel.send(chunk);
-          // OPT-67 (2026-06-02): post-send sendTyping removed. Was added
-          // in M18 to close the visual gap until the next 7s keepalive
-          // tick — but it leaves a ghost typing indicator visible for
-          // ~10s after the FINAL chunk of a turn (Discord auto-stop
-          // window), which reads as "still thinking" when the agent
-          // is actually done. The keepalive setInterval running in
-          // parallel from `startTypingKeepalive` covers intermediate
+          // Post-send sendTyping removed. It was added to close the visual
+          // gap until the next 7s keepalive tick — but it leaves a ghost
+          // typing indicator visible for ~10s after the final chunk of a
+          // turn (Discord auto-stop window), which reads as "still thinking"
+          // when the agent is actually done. The keepalive setInterval
+          // running in parallel from `startTypingKeepalive` covers intermediate
           // chunks just fine (worst-case 7s gap between Discord auto-
           // clear on send and the next keepalive sendTyping). The
           // bridge's MessageCreate `finally` block calls stopTyping()

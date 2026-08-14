@@ -88,7 +88,7 @@ export interface SessionManagerOptions {
    */
   endpointResolver?: (containerName: string) => RestEndpoint | null;
   /**
-   * M-ACP-2 — per-turn watchdog: a hung opencode child used to block
+   * Per-turn watchdog: a hung opencode child used to block
    * that user's PromptQueue forever (until the idle kill). When
    * `connection.prompt()` hasn't resolved within this budget the child
    * is killed, the turn rejects (the dispatcher sends the localized
@@ -131,12 +131,12 @@ const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
  */
 export class SessionManager {
   private entries = new Map<string, SessionEntry>();
-  // M-ACP-2: in-flight spawn promises, keyed by session key, so
+  // In-flight spawn promises, keyed by session key, so
   // concurrent first prompts share one spawn instead of double-spawning.
   private inFlightSpawns = new Map<string, Promise<SessionEntry>>();
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
-  // M-ACP-HARDEN-1: session.max_concurrent enforced as a real ceiling (LRU eviction).
+  // session.max_concurrent enforced as a real ceiling (LRU eviction).
   private maxConcurrent: number;
   private onTelemetry?: (t: TurnTelemetry) => void;
   private canonicalFetcher: CanonicalFetcher;
@@ -243,7 +243,7 @@ export class SessionManager {
     const key = sessionKey(agentId, userId);
     let entry = this.entries.get(key);
     if (!entry) {
-      // M-ACP-2: dedup concurrent first prompts. Without memoizing the
+      // Dedup concurrent first prompts. Without memoizing the
       // in-flight spawn, two near-simultaneous DMs both pass the
       // `!entry` check, both spawn a child, and the second `set`
       // overwrites the first — leaking one orphan process and splitting
@@ -252,7 +252,7 @@ export class SessionManager {
       if (!pending) {
         pending = this.spawnAndInit(agent, userId);
         this.inFlightSpawns.set(key, pending);
-        // M-ACP-CRASH-1: this finally-chain is a SECOND consumer of `pending`.
+        // This finally-chain is a SECOND consumer of `pending`.
         // If spawnAndInit rejects (a child dies mid-handshake, an EPIPE on a
         // closed stdin, etc.), `await pending` below surfaces the rejection to
         // the caller — but this discarded chain ALSO rejects, and with no
@@ -317,7 +317,7 @@ export class SessionManager {
       let reconciledTextBytes = 0;
       let reconciledReasoningBytes = 0;
       try {
-        // M-ACP-2: race the prompt RPC against the watchdog. On
+        // Race the prompt RPC against the watchdog. On
         // timeout, SIGTERM the child — its exit handler drops the
         // session from the map, so the next prompt respawns cleanly.
         let watchdogId: NodeJS.Timeout | undefined;
@@ -495,7 +495,7 @@ export class SessionManager {
       throw new Error(`spawned ACP child for "${agent.id}" has no stdin/stdout — check spawn.command + stdio config`);
     }
 
-    // M-ACP-2: a child that dies mid-handshake (or mid-turn) leaves the
+    // A child that dies mid-handshake (or mid-turn) leaves the
     // ACP stream writing to a closed pipe → EPIPE. Swallow those at the
     // child/stdin level so they surface as a rejected handshake/turn
     // (handled below) instead of an unhandled process-level rejection
@@ -529,12 +529,11 @@ export class SessionManager {
           entryRef?.onUpdate?.(params.update);
         },
         async requestPermission(params: acp.RequestPermissionRequest) {
-          // M19 supersedes M14's auto-cancel: DM-only agents trust
-          // the container sandbox + non-root uid as the real security
-          // boundary, not the per-tool permission UI. Auto-cancelling
-          // was causing the LLM to read "user rejected" as "stop" and
-          // go silent — the bug we hunted on 2026-05-24. See
-          // src/permission-policy.ts for the rationale.
+          // DM-only agents trust the container sandbox + non-root uid as the
+          // real security boundary, not the per-tool permission UI.
+          // Auto-cancelling was causing the LLM to read "user rejected" as
+          // "stop" and go silent. See src/permission-policy.ts for the
+          // rationale.
           const outcome = decidePermissionOutcome(params);
           logger.info(
             {
@@ -551,7 +550,7 @@ export class SessionManager {
       stream,
     );
 
-    // ACP handshake. M-ACP-2: if initialize()/newSession() throws, the
+    // ACP handshake. If initialize()/newSession() throws, the
     // spawned child is still alive and unreferenced — kill it before
     // rethrowing so repeated failed spawns don't accumulate orphans.
     let sessionId: string;
@@ -573,7 +572,7 @@ export class SessionManager {
         mcpServers: [],
       }));
 
-      // M-CUSTOM-PRIMARY-AGENT-1 — select the de-identified "cerase" primary agent
+      // Select the de-identified "cerase" primary agent
       // (opencode.json `agent.cerase`, rendered by control-plane's SlotWriter) so
       // opencode uses the Cerase base prompt instead of its built-in "You are
       // opencode…" one. `opencode acp` exposes no `--agent` flag; the ACP way is to
@@ -626,7 +625,7 @@ export class SessionManager {
   }
 
   /**
-   * M-ACP-HARDEN-1: enforce session.max_concurrent as a REAL ceiling. Before
+   * Enforce session.max_concurrent as a REAL ceiling. Before
    * inserting a new (agent,user) session, while we're at/over the cap, evict
    * the least-recently-used session (kill its child) to make room. Without
    * this, `prompt()` spawned one `docker exec` child per (agent,user) with no

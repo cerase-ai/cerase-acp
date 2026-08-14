@@ -25,12 +25,13 @@ describe("Dockerfile", () => {
     expect(last).toMatch(/node:22[.\d]*-slim/);
   });
 
-  // M-ACP-NPM-STRIP-1 — the three findings that milestone opened, locked here.
+  // Locks in three findings: an immutable digest pin, npm stripped from the
+  // runtime image, and a scan gate that would catch a regression.
   it("pins every base image to an immutable digest", () => {
-    // `node:22-slim` is a MUTABLE tag: it can be re-pushed, so the same
+    // `node:22-slim` is a mutable tag: it can be re-pushed, so the same
     // Dockerfile silently builds a different image tomorrow. cerase-agent
-    // pinned by digest under M-SUPPLY-PIN-1; this image was left unpinned and
-    // nobody noticed, because it has no scan gate either (see below).
+    // pins by digest; this image was left unpinned and nobody noticed,
+    // because it has no scan gate either (see below).
     const fromLines = dockerfile.split("\n").filter((l) => /^FROM\s/i.test(l));
     for (const line of fromLines) {
       expect(line, `unpinned base image: ${line.trim()}`).toMatch(/@sha256:[0-9a-f]{64}/);
@@ -59,9 +60,9 @@ describe("CI", () => {
   const ci = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
 
   it("scans the built image with Trivy and blocks on HIGH/CRITICAL", () => {
-    // M-ACP-NPM-STRIP-1: the npm exposure was invisible here not because it was
-    // absent but because the ALARM was — two node images in the fleet, one
-    // gated by Trivy and one not. A vulnerability nobody scans for is not a
+    // The npm exposure was invisible here not because it was absent but
+    // because the alarm was — two node images in the fleet, one gated by
+    // Trivy and one not. A vulnerability nobody scans for is not a
     // vulnerability anyone finds.
     expect(ci).toMatch(/trivy-action/);
     expect(ci).toMatch(/severity:\s*HIGH,CRITICAL/);

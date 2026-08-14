@@ -1,4 +1,4 @@
-// CHANNEL-3 (2026-05-31): Slack chat adapter.
+// Slack chat adapter.
 //
 // Minimal DM-only adapter implementing the ChatAdapter contract.
 // Uses @slack/bolt in Socket Mode so the appliance does NOT need
@@ -75,7 +75,7 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
               headers: { Authorization: `Bearer ${agent.bot_token}` },
             });
             outText = prependUploadMarker(text, stored);
-            // M-FILE-LIMITS-1 (fail-loud): tell the user about over-cap files
+            // Tell the user about over-cap files
             // instead of dropping them silently; the stored files still flow.
             const notice = buildOversizeNotice(rejected, "slack");
             if (notice) {
@@ -104,7 +104,7 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
     },
     makeSendTarget(userId: string) {
       return async (chunk: string): Promise<DeliveryResult> => {
-        // M-ACP-FAILLOUD-1: a postMessage failure (or a "not started" state)
+        // A postMessage failure (or a "not started" state)
         // is returned as `{ ok: false }` rather than thrown, so the failure
         // travels up the SendQueue → Dispatcher → inject status truthfully.
         try {

@@ -67,7 +67,7 @@ export type DrainResult = { ok: true } | { ok: false; failures: Array<{ chunk: s
 
 export class SendQueue {
   private failureMarkerQueued = false;
-  // M-ACP-FAILLOUD-1: chunks ultimately lost (after the one retry), so
+  // Chunks ultimately lost (after the one retry), so
   // drain() can report a truthful aggregate outcome to the dispatcher.
   private failures: Array<{ chunk: string; error: Error }> = [];
 
@@ -118,8 +118,8 @@ export class SendQueue {
         const chunk = this.items.shift()!;
         const result = await this.sendWithRetry(chunk);
         if (!result.ok) {
-          // M-ACP-2 / M-ACP-FAILLOUD-1: the chunk is lost after its one retry.
-          // Record it (so drain() reports the failure) and emit a VISIBLE
+          // The chunk is lost after its one retry.
+          // Record it (so drain() reports the failure) and emit a visible
           // delivery-failure marker once per queue instead of a silent hole.
           logger.error({ err: result.error }, "send-queue: retry failed — dropping chunk, emitting marker");
           this.failures.push({ chunk, error: result.error });

@@ -247,11 +247,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     config,
     sessionManager,
     turnMeta,
-    // M-MUTE-SURFACE-2 — proactive out-of-credits gate. Wired only when the
+    // Proactive out-of-credits gate. Wired only when the
     // control-plane internal bearer is configured (same secret as
     // session-summary; without it there's nothing to authenticate with).
     // Unset → the dispatcher's back-compat path proceeds as before.
-    // checkTenantCredit THROWS on any non-402/200 or network error, and the
+    // checkTenantCredit throws on any non-402/200 or network error, and the
     // dispatcher fails open on a throw — a control-plane glitch must not block
     // chat.
     creditCheck: controlPlaneSecret
@@ -267,10 +267,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // signed link (fetched over the internal channel — never given to
       // the agent). Only acts on chunks carrying the placeholder, so the
       // common path pays no extra HTTP.
-      // M-ACP-FAILLOUD-1: the wrapper forwards the inner adapter's
-      // DeliveryResult so a swallowed send failure can surface; a fully
-      // suppressed chunk (attachment-only, internal summary, DSML) reports
-      // `{ ok: true }` because there was nothing left to deliver.
+      // The wrapper forwards the inner adapter's DeliveryResult so a
+      // swallowed send failure can surface; a fully suppressed chunk
+      // (attachment-only, internal summary, DSML) reports `{ ok: true }`
+      // because there was nothing left to deliver.
       return async (chunk: string): Promise<DeliveryResult> => {
         let text = chunk;
         // HITL-3: approval link substitution (unchanged).
@@ -282,7 +282,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             });
             text = applyApprovalLink(text, link);
           } catch (err) {
-            // M-ACP-2: fetch failed (≠ no pending approval) — explain
+            // Fetch failed (≠ no pending approval) — explain
             // instead of silently stripping the placeholder.
             logger.warn({ err, agentId }, "approval-link fetch failed — substituting fallback note");
             text = applyApprovalLinkFallback(text);
@@ -300,7 +300,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             try {
               const file = await readAgentWorkspaceFile(containerName, relPath);
               if (adapter.sendFile) {
-                // M-ACP-FAILLOUD-1: sendFile now returns a result — log on
+                // sendFile returns a result — log on
                 // failure and continue (attachments stay best-effort, exactly
                 // as the surrounding catch already degrades them).
                 const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
@@ -320,15 +320,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // the attachment(s) were the whole reply, handled best-effort above.
           if (!text) return { ok: true };
         }
-        // M-AGENT-SUMMARY-LEAK-1: the engine's internal context-compaction
-        // summary block (session state / next actions / workspace paths, and
-        // any masked PII token inside it) must never be user-facing. If this
-        // reply IS that block, withhold it entirely — it is not an answer.
+        // The engine's internal context-compaction summary block (session
+        // state / next actions / workspace paths, and any masked PII token
+        // inside it) must never be user-facing. If this reply is that block,
+        // withhold it entirely — it is not an answer.
         if (isInternalSummaryBlock(text)) {
           logger.warn({ agentId }, "egress: suppressed an internal engine summary/compaction block");
-          // M-SESSION-CONTEXT-HYGIENE-1: capture it instead of discarding — persist
-          // as the assistant's rolling summary over the internal channel.
-          // Fire-and-forget; a capture failure must not affect the turn.
+          // Capture it instead of discarding — persist as the assistant's
+          // rolling summary over the internal channel. Fire-and-forget; a
+          // capture failure must not affect the turn.
           if (controlPlaneSecret) {
             void postSessionSummary(agentId, text, {
               controlPlaneUrl,
@@ -339,13 +339,13 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           }
           return { ok: true };
         }
-        // M-AGENT-VOICE-1 (A): deterministic engine-identity redaction, the
-        // last step before the reply leaves for any channel — never reveal we
-        // run on OpenCode, even if the model ignored the prompt-level rule.
+        // Deterministic engine-identity redaction, the last step before the
+        // reply leaves for any channel — never reveal we run on OpenCode,
+        // even if the model ignored the prompt-level rule.
         text = redactEngineIdentifiers(text);
-        // M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: a tool call the model spelled
-        // out as text (DSML) must never reach the chat. Strip it; if that was the
-        // whole reply, withhold it (it is scaffolding, not an answer).
+        // A tool call the model spelled out as text (DSML) must never reach
+        // the chat. Strip it; if that was the whole reply, withhold it (it is
+        // scaffolding, not an answer).
         text = stripToolCallArtifacts(text);
         if (!text.trim()) {
           logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
@@ -360,18 +360,18 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
   }
 
-  // M-ACP-WEB-RESILIENT-1 — agentIds whose most recent start() rejected.
+  // agentIds whose most recent start() rejected.
   // Tracked so getAgentStatus reports them ready:false (not null) even for
-  // adapters that expose no ready() signal of their own, and so the M23
+  // adapters that expose no ready() signal of their own, and so the
   // self-heal supervisor knows which adapters to retry. Cleared on a
   // successful (re)start.
   const startFailures = new Set<string>();
 
-  // M-ACP-ADAPTER-SELFHEAL-1 — retry a failed channel adapter on a capped,
-  // jittered backoff until it connects (no container restart). Production only:
-  // in BRIDGE_E2E_TEST mode background retries would interfere with the
-  // deterministic test path. Recovery clears the not-ready mark so
-  // /internal/status reflects the comeback.
+  // Retry a failed channel adapter on a capped, jittered backoff until it
+  // connects (no container restart). Production only: in BRIDGE_E2E_TEST mode
+  // background retries would interfere with the deterministic test path.
+  // Recovery clears the not-ready mark so /internal/status reflects the
+  // comeback.
   const supervisor = bridgeE2eTest
     ? undefined
     : new AdapterSupervisor({
@@ -381,31 +381,31 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         onStillFailing: (agentId) => startFailures.add(agentId),
       });
 
-  // M-BRIDGE-LIVENESS-1 — the live per-agent liveness snapshot served by
-  // GET /internal/status. Source of truth = the `adapters` map (an agent
-  // dropped from agents.yaml is gone from here → the control-plane reads
-  // it as "Disconnesso"); the channel is joined from the live config and
-  // `ready` delegates to the adapter's own connection check.
+  // The live per-agent liveness snapshot served by GET /internal/status.
+  // Source of truth = the `adapters` map (an agent dropped from agents.yaml
+  // is gone from here → the control-plane reads it as "Disconnesso"); the
+  // channel is joined from the live config and `ready` delegates to the
+  // adapter's own connection check.
   const getAgentStatus = (): AgentLiveness[] =>
     Array.from(adapters.entries()).map(([id, adapter]) => ({
       id,
       channel: config.agents.find((a) => a.id === id)?.channel ?? "unknown",
       attached: true,
-      // M-ACP-WEB-RESILIENT-1: an adapter whose start() failed is concretely
-      // not-ready — report `false`, never `null`, so the control-plane shows
-      // it Disconnesso rather than "stato sconosciuto".
-      // M-ACP-HARDEN-1: otherwise was `: true` — a hard-coded green for every
-      // adapter that doesn't implement ready() (telegram/slack/workspace), so a
-      // gateway drop on those channels showed as healthy. Report `null`
-      // (unknown) instead; only adapters with a real readiness signal
-      // (discord.js client.isReady()) report a concrete boolean.
+      // An adapter whose start() failed is concretely not-ready — report
+      // `false`, never `null`, so the control-plane shows it Disconnesso
+      // rather than "stato sconosciuto". Otherwise this was `: true` — a
+      // hard-coded green for every adapter that doesn't implement ready()
+      // (telegram/slack/workspace), so a gateway drop on those channels
+      // showed as healthy. Report `null` (unknown) instead; only adapters
+      // with a real readiness signal (discord.js client.isReady()) report a
+      // concrete boolean.
       ready: startFailures.has(id) ? false : adapter.ready ? adapter.ready() : null,
     }));
 
-  // SCHED-2 — productionised injection endpoint the control-plane
-  // scheduled-message dispatcher POSTs to (shared-secret). Started when
-  // the internal secret is configured. M-BRIDGE-LIVENESS-1 adds the
-  // read-only GET /internal/status liveness probe on the same server.
+  // Productionised injection endpoint the control-plane scheduled-message
+  // dispatcher POSTs to (shared-secret). Started when the internal secret is
+  // configured; the read-only GET /internal/status liveness probe runs on
+  // the same server.
   let internalServer: InternalServer | undefined;
   if (acpInjectSecret) {
     internalServer = await startInternalServer({
@@ -413,7 +413,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       internalSecret: acpInjectSecret,
       port: Number(process.env.CERASE_ACP_INTERNAL_PORT ?? "7476"),
       getAgentStatus,
-      // M-ACP-HARDEN-1: gate inject on the agent's allowlist (unknown agent → reject).
+      // Gate inject on the agent's allowlist (unknown agent → reject).
       isAllowed: (agentId, userId) => {
         try {
           return isAllowed(config, agentId, userId);
@@ -453,14 +453,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     );
   }
 
-  // M-ACP-WEB-RESILIENT-1 — start each adapter independently. A single
-  // adapter's start() failure (e.g. a bad Discord token → TokenInvalid) is
-  // logged + recorded in `startFailures` but does NOT tear the bridge down:
-  // the internal-server, the panel-only `web` maintainer transport, and the
-  // other healthy adapters all stay up. This holds in BOTH modes — the only
-  // historical difference (test-mode swallowed, production fanned-out-and-
-  // rethrew) was exactly the crash-loop bug that took the web/maintainer chat
-  // down whenever the Discord token was invalid.
+  // Start each adapter independently. A single adapter's start() failure
+  // (e.g. a bad Discord token → TokenInvalid) is logged + recorded in
+  // `startFailures` but does not tear the bridge down: the internal-server,
+  // the panel-only `web` maintainer transport, and the other healthy
+  // adapters all stay up. This holds in both modes — the only historical
+  // difference (test-mode swallowed, production fanned-out-and-rethrew) was
+  // exactly the crash-loop bug that took the web/maintainer chat down
+  // whenever the Discord token was invalid.
   //
   // Total-failure threshold: in production, throw only when EVERY adapter
   // failed (started === 0 with adapters present) — that means no working chat
@@ -479,8 +479,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         { err, agentId: adapter.agentId },
         "adapter.start() failed — this channel is DOWN; other channels stay up",
       );
-      // M-ACP-ADAPTER-SELFHEAL-1: schedule a backoff retry so a transient
-      // failure (fixed token, Cloudflare ConnectTimeoutError) recovers itself.
+      // Schedule a backoff retry so a transient failure (fixed token,
+      // Cloudflare ConnectTimeoutError) recovers itself.
       supervisor?.scheduleRetry(adapter);
     }
   }
