@@ -16,10 +16,14 @@ function makeConfig(overrides?: {
   lateBurstText?: string;
   lateBurstIntervalMs?: number;
   messageId?: string;
+  loadSession?: boolean;
+  loadFails?: boolean;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
   if (overrides?.crashAfterPrompt) env.push("FAKE_CRASH_AFTER_PROMPT=1");
+  if (overrides?.loadSession) env.push("FAKE_LOAD_SESSION=1");
+  if (overrides?.loadFails) env.push("FAKE_LOAD_FAILS=1");
   if (overrides?.lateBurstText !== undefined) env.push(`FAKE_LATE_BURST_TEXT=${overrides.lateBurstText}`);
   if (overrides?.lateBurstIntervalMs !== undefined)
     env.push(`FAKE_LATE_BURST_INTERVAL_MS=${overrides.lateBurstIntervalMs}`);
@@ -119,6 +123,68 @@ describe("SessionManager", () => {
     expect(mgr.activeSessionCount()).toBe(0);
   });
 
+  // A slot restart is ORDINARY, not exceptional: installing a skill rewrites
+  // AGENTS.md and the entrypoint watcher SIGTERMs opencode, the idle killer
+  // fires, the image is updated. Until these tests existed the bridge answered
+  // the next message from a brand-new session and told nobody, which is the
+  // mechanism behind "the assistant forgets". The session id is the only thing
+  // that distinguishes the two outcomes — both reply, both look healthy.
+
+  it("resumes the same opencode session after the slot restarts", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "x", loadSession: true }));
+    await mgr.prompt("doc-qa", "user-A", "first");
+    const before = mgr.currentSessionId("doc-qa", "user-A");
+    expect(before).toBeDefined();
+
+    // What the AGENTS.md watcher does to the slot, in one call.
+    mgr.killAgentSessions("doc-qa");
+    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+
+    const r = await mgr.prompt("doc-qa", "user-A", "second");
+    expect(r.stopReason).toBe("end_turn");
+    expect(mgr.currentSessionId("doc-qa", "user-A")).toBe(before);
+  });
+
+  it("starts a new session when the slot does not offer loadSession", async () => {
+    // An older slot image. The conversation is still lost — but by the agent's
+    // own declared capability, not by the bridge discarding a usable id.
+    mgr = new SessionManager(makeConfig({ reply: "x" }));
+    await mgr.prompt("doc-qa", "user-A", "first");
+    const before = mgr.currentSessionId("doc-qa", "user-A");
+
+    mgr.killAgentSessions("doc-qa");
+    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+
+    await mgr.prompt("doc-qa", "user-A", "second");
+    expect(mgr.currentSessionId("doc-qa", "user-A")).not.toBe(before);
+  });
+
+  it("falls back to a new session when the load is refused, and forgets the dead id", async () => {
+    // The expected case after an image upgrade: the slot entrypoint wipes
+    // opencode.db whenever the version stamp changes, so every id on the box
+    // stops resolving. A refused load must cost a cold start, never a turn.
+    mgr = new SessionManager(makeConfig({ reply: "x", loadSession: true, loadFails: true }));
+    await mgr.prompt("doc-qa", "user-A", "first");
+    const before = mgr.currentSessionId("doc-qa", "user-A");
+
+    mgr.killAgentSessions("doc-qa");
+    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+
+    const r = await mgr.prompt("doc-qa", "user-A", "second");
+    expect(r.stopReason).toBe("end_turn");
+    expect(mgr.currentSessionId("doc-qa", "user-A")).not.toBe(before);
+  });
+
+  it("remembers one resumable id per pair, not one per restart", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "x", loadSession: true }));
+    for (let i = 0; i < 3; i += 1) {
+      await mgr.prompt("doc-qa", "user-A", `turn ${i}`);
+      mgr.killAgentSessions("doc-qa");
+      await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+    }
+    expect(mgr.resumableSessionCount()).toBe(1);
+  });
+
   it("serialises concurrent prompts to the same session (FIFO, no overlap)", async () => {
     mgr = new SessionManager(makeConfig({ reply: "x" }));
     // Two prompts fired in parallel for the same (agent, user).
@@ -133,17 +199,12 @@ describe("SessionManager", () => {
 
   it("passes agent.cwd to the ACP child via session/new (not process.cwd())", async () => {
     // fake-acp-child.mjs echoes back the cwd it received in its sessionId
-    // (`fake-session-cwd=<cwd>`). We can't observe the sessionId directly
-    // from the public SessionManager API, but we CAN exfiltrate it
-    // through the FAKE_REPLY: rig the child so the reply contains the
-    // cwd. Simpler approach: spy via the internal map.
+    // (`fake-session-cwd=<cwd>#<pid>`), and the pid is what lets the resume
+    // tests above tell a reloaded session from a re-created one — so match
+    // the prefix rather than the whole string.
     mgr = new SessionManager(makeConfig({ reply: "ok", cwd: "/expected/path" }));
     await mgr.prompt("doc-qa", "user-A", "ping");
-    // Reach into the private entries map for the assertion. Test-only,
-    // accepted: it's the only path to the live sessionId without
-    // changing the production API.
-    const entry = (mgr as unknown as { entries: Map<string, { sessionId: string }> }).entries.get("doc-qa:user-A");
-    expect(entry?.sessionId).toBe("fake-session-cwd=/expected/path");
+    expect(mgr.currentSessionId("doc-qa", "user-A")).toMatch(/^fake-session-cwd=\/expected\/path#\d+$/);
   });
 
   it("throws when prompting an unknown agent id", async () => {

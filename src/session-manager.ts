@@ -123,6 +123,12 @@ interface SessionEntry {
 
 const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
 
+// How many dead sessions stay resumable. One short string per (agent,user)
+// that has ever talked, so the map would otherwise grow for the life of the
+// process; the oldest are dropped first and the only cost of dropping one is
+// that a very old conversation restarts cold.
+const RESUMABLE_SESSIONS_MAX = 500;
+
 /**
  * Owns the lifecycle of one ACP child per (agent, user) pair. Lazy-spawns
  * on first prompt; reuses on subsequent prompts; respawns transparently
@@ -134,6 +140,15 @@ export class SessionManager {
   // In-flight spawn promises, keyed by session key, so
   // concurrent first prompts share one spawn instead of double-spawning.
   private inFlightSpawns = new Map<string, Promise<SessionEntry>>();
+  // The opencode session id of the last child for each (agent,user), kept
+  // AFTER that child dies. It is what makes a restart survivable: the slot
+  // restarts for many ordinary reasons — a skill install rewrites AGENTS.md
+  // and the entrypoint watcher SIGTERMs opencode, the idle killer fires, the
+  // image is updated — and every one of them used to start the next message
+  // from zero while the user saw no explanation. opencode keeps the session
+  // in its own SQLite on a named volume, so the id stays valid across the
+  // container's death; the state lives there, not here.
+  private resumableSessions = new Map<string, string>();
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
   // session.max_concurrent enforced as a real ceiling (LRU eviction).
@@ -160,6 +175,17 @@ export class SessionManager {
 
   activeSessionCount(): number {
     return this.entries.size;
+  }
+
+  /**
+   * The opencode session id this pair is currently talking through.
+   *
+   * A test seam, and the only way to tell a resumed conversation from a
+   * re-created one from the outside: both answer, both look healthy, and only
+   * the id says which happened.
+   */
+  currentSessionId(agentId: string, userId: string): string | undefined {
+    return this.entries.get(sessionKey(agentId, userId))?.sessionId;
   }
 
   // ────────────────────────────────────────────────────────────────
@@ -555,7 +581,7 @@ export class SessionManager {
     // rethrowing so repeated failed spawns don't accumulate orphans.
     let sessionId: string;
     try {
-      await connection.initialize({
+      const init = await connection.initialize({
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
@@ -563,14 +589,55 @@ export class SessionManager {
         },
       });
 
+      // Resume the conversation this pair was already having, when there is
+      // one. `session/load` replays the stored history into the fresh process;
+      // the replayed notifications land while `entryRef` is still undefined,
+      // so nothing forwards them to the DM as new messages.
+      //
+      // Measured against the running slot rather than assumed: the binary
+      // answers `loadSession: true`, and a phrase written before a
+      // `docker restart` is recalled after it. The capability is still read
+      // from the handshake — an older slot image that does not offer it must
+      // fall through to a new session, not fail.
+      const resumeKey = sessionKey(agent.id, userId);
+      const previousSessionId = this.resumableSessions.get(resumeKey);
+      let resumed: string | undefined;
+      if (previousSessionId && init.agentCapabilities?.loadSession) {
+        try {
+          await connection.loadSession({
+            sessionId: previousSessionId,
+            cwd: agent.cwd,
+            mcpServers: [],
+          });
+          resumed = previousSessionId;
+          logger.info(
+            { agentId: agent.id, userId, sessionId: previousSessionId },
+            "resumed the previous ACP session — the restart is invisible to the user",
+          );
+        } catch (loadErr) {
+          // Expected, not a fault: the slot entrypoint wipes `opencode.db`
+          // whenever the opencode version changes, so an image upgrade takes
+          // every session id on the box with it. Forget it and start clean.
+          this.resumableSessions.delete(resumeKey);
+          logger.info(
+            { err: loadErr, agentId: agent.id, userId, sessionId: previousSessionId },
+            "previous ACP session could not be loaded — starting a new one",
+          );
+        }
+      }
+
       // `agent.cwd` is the path inside the agent container — DON'T use
       // process.cwd() here, that would leak the host/bridge cwd into the
       // ACP child's session state. Default `/root/cerase/workspace`
       // comes from the config schema.
-      ({ sessionId } = await connection.newSession({
-        cwd: agent.cwd,
-        mcpServers: [],
-      }));
+      if (resumed) {
+        sessionId = resumed;
+      } else {
+        ({ sessionId } = await connection.newSession({
+          cwd: agent.cwd,
+          mcpServers: [],
+        }));
+      }
 
       // Select the de-identified "cerase" primary agent
       // (opencode.json `agent.cerase`, rendered by control-plane's SlotWriter) so
@@ -618,10 +685,35 @@ export class SessionManager {
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
       const key = sessionKey(agent.id, userId);
       if (this.entries.get(key) === entry) this.entries.delete(key);
+      this.rememberResumableSession(key, entry.sessionId);
     });
 
     this.resetIdleTimer(entry);
     return entry;
+  }
+
+  /**
+   * Record the session a dead child was holding, so the next spawn for the
+   * same pair can load it instead of starting cold.
+   *
+   * Re-inserting moves the key to the end, which makes the eviction below
+   * least-recently-used rather than first-ever-seen: the pair that talked
+   * most recently is the one most likely to talk again.
+   */
+  private rememberResumableSession(key: string, sessionId: string): void {
+    if (!sessionId) return;
+    this.resumableSessions.delete(key);
+    this.resumableSessions.set(key, sessionId);
+    while (this.resumableSessions.size > RESUMABLE_SESSIONS_MAX) {
+      const oldest = this.resumableSessions.keys().next();
+      if (oldest.done) break;
+      this.resumableSessions.delete(oldest.value);
+    }
+  }
+
+  /** Test seam: how many dead sessions are currently resumable. */
+  resumableSessionCount(): number {
+    return this.resumableSessions.size;
   }
 
   /**

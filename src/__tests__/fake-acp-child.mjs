@@ -42,6 +42,11 @@ const UPDATE_KIND = KIND === "thought" ? "agent_thought_chunk" : "agent_message_
 const LATE_BURST_TEXT = process.env.FAKE_LATE_BURST_TEXT;
 const LATE_BURST_INTERVAL_MS = parseInt(process.env.FAKE_LATE_BURST_INTERVAL_MS ?? "100", 10);
 const MESSAGE_ID = process.env.FAKE_MESSAGE_ID;
+// Session resume. Off by default so every existing test keeps exercising the
+// cold-start path; the real slot answers true (measured against the running
+// binary, which also offers close/fork/list/resume).
+const LOAD_SESSION = process.env.FAKE_LOAD_SESSION === "1";
+const LOAD_FAILS = process.env.FAKE_LOAD_FAILS === "1";
 
 const send = (msg) => {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -78,7 +83,7 @@ rl.on("line", async (line) => {
       result: {
         protocolVersion: 1,
         agentCapabilities: {
-          loadSession: false,
+          loadSession: LOAD_SESSION,
           promptCapabilities: { audio: false, embeddedContext: false, image: false },
         },
         authMethods: [],
@@ -89,13 +94,30 @@ rl.on("line", async (line) => {
 
   if (msg.method === "session/new") {
     // Echo the cwd we received back in the sessionId so the session-
-    // manager test can assert on what the bridge actually passed.
+    // manager test can assert on what the bridge actually passed. The pid
+    // makes each fresh session distinguishable from every other, which is
+    // what lets a test tell a resumed session from a re-created one.
     const cwd = msg.params?.cwd ?? "<none>";
     send({
       jsonrpc: "2.0",
       id: msg.id,
-      result: { sessionId: `fake-session-cwd=${cwd}` },
+      result: { sessionId: `fake-session-cwd=${cwd}#${process.pid}` },
     });
+    return;
+  }
+
+  if (msg.method === "session/load") {
+    if (LOAD_FAILS) {
+      // What a real slot answers after its opencode.db was reset by a
+      // version bump: the id is well-formed and the session is gone.
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32602, message: "session not found" },
+      });
+      return;
+    }
+    send({ jsonrpc: "2.0", id: msg.id, result: {} });
     return;
   }
 
