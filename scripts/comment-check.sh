@@ -2,12 +2,12 @@
 #
 # No comment carries what git already holds.
 #
-# Three kinds of content belong in the commit body rather than in a comment: a
-# past date or an incident narrative, a milestone or ticket ID, and markdown or
-# emoji inside an inline comment. The rule and its reasoning live in the
-# forge-flow executor convention; this script is the enforceable half of it,
-# and it exists because the rule holds only until the first long session
-# without one.
+# Four kinds of content belong in the commit body rather than in a comment: a
+# past date or an incident narrative, a milestone or ticket ID, markdown or
+# emoji inside an inline comment, and the filename of an assistant's private
+# note. The rule and its reasoning live in the forge-flow executor convention;
+# this script is the enforceable half of it, and it exists because the rule
+# holds only until the first long session without one.
 #
 # SCOPE IS THE WHOLE DESIGN. The check runs over the files changed since the
 # merge-base with the default branch, never over the repository. A repo-wide
@@ -31,6 +31,25 @@
 # ticket IDs from external identifiers that share their shape. EN-301-549 is
 # the accessibility standard and CVE-2026-69246 names a real advisory; neither
 # is a unit of our work, and a reader has no commit to look them up in.
+#
+# The note branch is the same defect with a private path instead of a plan
+# entry. An assistant keeps its working notes as underscore-joined filenames
+# under a per-machine directory, and citing one in a comment resolves for
+# exactly one laptop. It resolves for nobody else, and this repo's tracked
+# files are copied onto every customer's appliance, so the citation ships to
+# readers who cannot even see that a file is what is being named. Unlike
+# markdown, the shape is not the format of anything, so it is banned inside a
+# doc comment as well: a reader of a PHPDoc block can resolve a private path no
+# better than a reader of a line comment can, and in practice that is where
+# almost every one of them was written.
+#
+# It matches two spellings: the double-bracket wiki link, and the bare slug
+# under one of the three note prefixes. The slug half needs three
+# underscore-joined segments, which is what keeps an ordinary database column
+# such as a project foreign key out of it. The wiki-link half needs the
+# brackets to close on a single unbroken word, so a shell test expression and a
+# POSIX character class, both of which open with the same two brackets, are not
+# reachable by it.
 #
 # Usage:  scripts/comment-check.sh [--quiet] [--base <ref>]
 # Exit:   0 clean or skipped with a reason - 1 a comment carries what git holds
@@ -104,17 +123,20 @@ ID_BRANCH='[A-Z][A-Z0-9]*-[A-Z0-9-]*[A-Z][A-Z0-9-]*-[0-9]+'
 # non-ASCII, which would fire on every accented word. Deliberately absent:
 # the check and cross marks, which this codebase emits as literal UI strings.
 MARKUP_BRANCH='(\*\*|⚠️|✅|❌|🔄|🔴|🟡|🟢|📋)'
+# A name that resolves to a file on one machine and to nothing anywhere else.
+NOTE_BRANCH='(\[\[[A-Za-z0-9_-]+\]\]|\b(feedback|reference|project)_[a-z0-9]+_[a-z0-9_]+)'
 
-# An inline comment is read as plain text in an editor, so all three bans
+# An inline comment is read as plain text in an editor, so all four bans
 # apply to it.
-LINE_RE="^[[:space:]]*(#|//).*($DATE_BRANCH|$ID_BRANCH|$MARKUP_BRANCH)"
+LINE_RE="^[[:space:]]*(#|//).*($DATE_BRANCH|$ID_BRANCH|$MARKUP_BRANCH|$NOTE_BRANCH)"
 
 # A doc comment is rendered by a generator, so its markup is the format and
-# stays. The other two bans do not depend on how the comment is displayed: a
-# reader of a PHPDoc block can no more resolve a ticket ID than a reader of a
-# line comment can. Matching the continuation line rather than the opening
-# delimiter is what reaches the body, and in these languages a line whose
-# first character is an asterisk is inside a block comment.
+# stays. The other three bans do not depend on how the comment is displayed: a
+# reader of a PHPDoc block can no more resolve a ticket ID or a private note
+# path than a reader of a line comment can. Matching the continuation line
+# rather than the opening delimiter is what reaches the body, and in these
+# languages a line whose first character is an asterisk is inside a block
+# comment.
 #
 # The pipe covers Laravel's banner style, whose continuation lines are drawn
 # with `|` instead: those blocks carry section titles with a ticket ID in them
@@ -125,7 +147,7 @@ LINE_RE="^[[:space:]]*(#|//).*($DATE_BRANCH|$ID_BRANCH|$MARKUP_BRANCH)"
 # slipped through. It cannot collide with a line comment, which has no
 # asterisk. Described rather than quoted, because quoting the delimiters here
 # would red this check on the sentence explaining it.
-DOC_RE="^[[:space:]]*(/?\*|\|).*($DATE_BRANCH|$ID_BRANCH)"
+DOC_RE="^[[:space:]]*(/?\*|\|).*($DATE_BRANCH|$ID_BRANCH|$NOTE_BRANCH)"
 
 HITS=0
 for f in "${CHANGED[@]}"; do
@@ -151,15 +173,15 @@ for f in "${CHANGED[@]}"; do
       # A Python docstring is a string expression, so no line prefix marks it
       # and the grep above cannot see inside one. It carries the same ticket
       # IDs as any other doc comment, and a reader can resolve them no better.
-      [ -z "$PY" ] || _collect < <("$PY" - "$f" "$DATE_BRANCH" "$ID_BRANCH" <<'PYEOF' 2>/dev/null || true
+      [ -z "$PY" ] || _collect < <("$PY" - "$f" "$DATE_BRANCH" "$ID_BRANCH" "$NOTE_BRANCH" <<'PYEOF' 2>/dev/null || true
 import ast, re, sys
-path, date_re, id_re = sys.argv[1], sys.argv[2], sys.argv[3]
+path, date_re, id_re, note_re = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 try:
     src = open(path, encoding="utf-8", errors="replace").read()
     tree = ast.parse(src)
 except Exception:
     sys.exit(0)
-bad = re.compile(f"({date_re}|{id_re})")
+bad = re.compile(f"({date_re}|{id_re}|{note_re})")
 seen = set()
 for node in ast.walk(tree):
     if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -195,7 +217,8 @@ done
 
 if [ "$HITS" -gt 0 ]; then
   say ""
-  say "comment-check: FAIL - $HITS comment line(s) carry a date, an ID or markup."
+  say "comment-check: FAIL - $HITS comment line(s) carry a date, an ID, markup"
+  say "or the filename of a note that exists on one machine only."
   say "Move it to the commit body, or mark a carve-out with 'comment-check: ok'."
   exit 1
 fi
