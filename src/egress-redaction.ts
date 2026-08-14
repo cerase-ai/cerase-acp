@@ -80,8 +80,8 @@ const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replace
 ];
 
 /**
- * M-ASSISTANT-MULTITASK-1 — when the opt-in parallel-work behaviour is on, the
- * assistant fans independent sub-tasks out to the engine's built-in `task` /
+ * When the opt-in parallel-work behaviour is on, the assistant fans
+ * independent sub-tasks out to the engine's built-in `task` /
  * subagent primitive. It must narrate that like a colleague ("intanto porto
  * avanti X e Y") and NEVER expose the internal nouns. The SlotWriter voice rule
  * keeps the common path clean; this is the deterministic backstop for a degraded
@@ -129,8 +129,8 @@ export function redactEngineIdentifiers(text: string): string {
 }
 
 /**
- * M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4 — strip a tool call the model spelled
- * out as TEXT (a "DSML" artifact) before it reaches the chat.
+ * Strip a tool call the model spelled out as TEXT (a "DSML" artifact) before
+ * it reaches the chat.
  *
  * When the model is given a poor affordance it sometimes emits the structured
  * tool-call syntax as plain text instead of an actual tool call — e.g.
@@ -162,7 +162,7 @@ export function stripToolCallArtifacts(text: string): string {
 }
 
 /**
- * M-AGENT-SUMMARY-LEAK-1 — the engine's internal context-compaction summary.
+ * The engine's internal context-compaction summary.
  *
  * During mid-session compaction OpenCode produces a structured session-state
  * block (Anchored Summary / Constraints & Preferences / Active Tools & State /

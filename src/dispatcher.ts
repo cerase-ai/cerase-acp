@@ -77,12 +77,12 @@ export function pickRefusalMessage(text: string): string {
   return REFUSAL[detectLanguage(text)];
 }
 
-/** M-ACP-1: localized "the turn failed" copy (see TURN_ERROR). */
+/** Localized "the turn failed" copy (see TURN_ERROR). */
 export function pickErrorMessage(text: string): string {
   return TURN_ERROR[detectLanguage(text)];
 }
 
-/** M-ACP-1: localized "the turn produced nothing" copy (see TURN_EMPTY). */
+/** Localized "the turn produced nothing" copy (see TURN_EMPTY). */
 export function pickEmptyMessage(text: string): string {
   return TURN_EMPTY[detectLanguage(text)];
 }
@@ -99,7 +99,7 @@ const TURN_NO_CREDITS: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   unknown: "🪫 Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
 };
 
-/** M-ACP-2: localized "no credits left" copy (see TURN_NO_CREDITS). */
+/** Localized "no credits left" copy (see TURN_NO_CREDITS). */
 export function pickNoCreditsMessage(text: string): string {
   return TURN_NO_CREDITS[detectLanguage(text)];
 }

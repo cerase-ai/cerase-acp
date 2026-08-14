@@ -86,11 +86,11 @@ export interface ApplyConfigDiffDeps {
 }
 
 /**
- * M-ACP-2 — bounded-retry adapter creation: one agent's bad token /
- * transient platform error must not abort the whole reload (the
- * remaining agents were never processed). One retry, then give up on
- * THAT agent and continue; the failure is logged loudly (a missing
- * adapter surfaces via the reload-status path).
+ * Bounded-retry adapter creation: one agent's bad token / transient
+ * platform error must not abort the whole reload — the remaining agents
+ * must still be processed. One retry, then give up on THAT agent and
+ * continue; the failure is logged loudly (a missing adapter surfaces via
+ * the reload-status path).
  */
 async function createAdapterWithRetry(deps: ApplyConfigDiffDeps, agent: AgentConfig): Promise<ChatAdapter | null> {
   for (let attempt = 1; attempt <= 2; attempt++) {

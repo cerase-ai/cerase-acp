@@ -77,6 +77,12 @@ MERGE_BASE="$(git merge-base HEAD "$BASE_REF" 2>/dev/null)"
 
 SRC_RE='\.(sh|bash|py|ts|tsx|js|jsx|php|go|rb|rs|java)$'
 
+# Code this project did not write has no comments this project can revise. A
+# published asset bundle carries its upstream licence banner, dates included,
+# and editing one is both wrong and pointless: the next asset build overwrites
+# it. The same goes for anything installed rather than authored.
+VENDOR_RE='(^|/)(vendor|node_modules|dist|build|public/(js|css|vendor)|third_party)/'
+
 # Reading inside a Python docstring needs a parser. Where there is no
 # interpreter the other two surfaces still run: a partial check that says so
 # beats a run that fails for a reason unrelated to any comment.
@@ -87,7 +93,7 @@ PY="$(command -v python3 || true)"
 # grep would fail the run on the one change that always satisfies the rule.
 mapfile -t CHANGED < <(
   git diff --name-only --diff-filter=d "$MERGE_BASE"...HEAD \
-    | grep -E "$SRC_RE" || true
+    | grep -E "$SRC_RE" | grep -vE "$VENDOR_RE" || true
 )
 
 [ "${#CHANGED[@]}" -gt 0 ] || skip "no source file changed since $BASE_REF"
@@ -113,7 +119,13 @@ LINE_RE="^[[:space:]]*(#|//).*($DATE_BRANCH|$ID_BRANCH|$MARKUP_BRANCH)"
 # The pipe covers Laravel's banner style, whose continuation lines are drawn
 # with `|` instead: those blocks carry section titles with a ticket ID in them
 # and no other pattern here reaches inside one.
-DOC_RE="^[[:space:]]*(\*|\|).*($DATE_BRANCH|$ID_BRANCH)"
+#
+# The optional slash covers a doc block opened and closed on one line, which
+# has no continuation line to match and was therefore the one shape that
+# slipped through. It cannot collide with a line comment, which has no
+# asterisk. Described rather than quoted, because quoting the delimiters here
+# would red this check on the sentence explaining it.
+DOC_RE="^[[:space:]]*(/?\*|\|).*($DATE_BRANCH|$ID_BRANCH)"
 
 HITS=0
 for f in "${CHANGED[@]}"; do

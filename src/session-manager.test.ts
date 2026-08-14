@@ -79,9 +79,6 @@ describe("SessionManager", () => {
     expect(mgr.activeSessionCount()).toBe(2);
   });
 
-  // M-ACP-2: two concurrent FIRST prompts for the same (agent,user) must
-  // not double-spawn the ACP child — the second would overwrite the first
-  // in the map and leak one orphan process + split the conversation.
   it("M-ACP-2: concurrent first prompts spawn the child exactly once", async () => {
     let spawnCount = 0;
     const countingSpawn: SpawnFn = (command, args) => {
@@ -94,8 +91,8 @@ describe("SessionManager", () => {
     expect(mgr.activeSessionCount()).toBe(1);
   });
 
-  // M-ACP-2 (kill-on-failed-handshake) is covered by the production catch
-  // in spawnAndInit: a thrown initialize()/newSession() kills the child
+  // Kill-on-failed-handshake is covered by the production catch in
+  // spawnAndInit: a thrown initialize()/newSession() kills the child
   // before rethrowing. A focused test is omitted because the only ways to
   // force a handshake failure in this harness (instant-exit / missing
   // binary) write to a closed pipe and surface a library-level EPIPE
@@ -373,10 +370,6 @@ describe("SessionManager", () => {
   });
 });
 
-// M-ACP-2 — per-turn watchdog: a hung opencode child used to block that
-// user's PromptQueue FOREVER (until the idle kill). The watchdog kills
-// the child, rejects the turn (dispatcher sends the localized error)
-// and the session map is cleaned so the next prompt respawns.
 describe("per-turn watchdog (M-ACP-2)", () => {
   it("kills a hung child and rejects the turn within the timeout", async () => {
     const cfg: BridgeConfig = {

@@ -17,8 +17,8 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 
 /**
- * M-ACP-FAILLOUD-1 — the outcome of a single delivery attempt to a chat
- * channel. The adapter delivery methods return this instead of
+ * The outcome of a single delivery attempt to a chat channel. The adapter
+ * delivery methods return this instead of
  * `Promise<void>` so a swallowed failure (e.g. `channel.send` rejecting
  * because the slot is down / the gateway dropped) can be propagated up the
  * stack — through the SendQueue, the Dispatcher, and finally surfaced as a
@@ -33,8 +33,8 @@ export interface ChatAdapter {
   start(): Promise<void>;
   stop(): Promise<void>;
   /**
-   * M-BRIDGE-LIVENESS-1 — does the underlying channel client report a live
-   * connection right now? The Discord adapter delegates to discord.js
+   * Does the underlying channel client report a live connection right
+   * now? The Discord adapter delegates to discord.js
    * `client.isReady()` (true after login, false on a gateway drop), so the
    * control-plane can tell "Attivo ma disconnesso" apart from a healthy
    * agent. An adapter that doesn't implement it is treated as ready while

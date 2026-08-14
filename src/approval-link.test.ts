@@ -69,9 +69,6 @@ describe("fetchPendingApprovalLink", () => {
   });
 
   it("M-ACP-2: THROWS on an HTTP error or exception (fetch failure ≠ no pending approval)", async () => {
-    // Pre-M-ACP-2 both cases returned null and the caller silently
-    // stripped the placeholder — a dead-end HITL flow when the
-    // control-plane was merely unreachable.
     const errFetch = (async () => ({ ok: false, json: async () => ({}) }) as Response) as unknown as typeof fetch;
     await expect(fetchPendingApprovalLink("a", opts(errFetch))).rejects.toThrow();
 
@@ -82,9 +79,6 @@ describe("fetchPendingApprovalLink", () => {
   });
 });
 
-// M-ACP-2 — when the link fetch FAILS, the placeholder becomes an
-// explanatory fallback (point the user at the admin approval queue)
-// instead of disappearing.
 describe("applyApprovalLinkFallback", () => {
   it("replaces the placeholder with the explanatory note", () => {
     const out = applyApprovalLinkFallback("Approvi qui: {{APPROVAL_LINK}}");

@@ -81,6 +81,14 @@ jobs:
       - name: Docs parity
         run: bash scripts/docs-parity.sh
 
+      # No comment carries what git already holds — a past date, a ticket ID,
+      # or markup in an inline comment. Scoped to this push's own commits, so
+      # it never reds on a legacy file nobody touched.
+      - name: Comment convention
+        run: bash scripts/comment-check.sh --base "${COMMENT_CHECK_BASE}"
+        env:
+          COMMENT_CHECK_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+
       # A0 step 4 · G2 + G3 — no credential file in this checkout, no retired
       # credential name in use. Same script in every repo, synced from core by
       # `scripts/sync-tooling.sh` and pinned by `scripts/TOOLING.sha256`: a

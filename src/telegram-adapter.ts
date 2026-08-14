@@ -57,7 +57,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           const userId = String(ctx.from.id);
           const text = ctx.message?.text ?? "";
           if (!text) return;
-          // M-ACP-2: Telegram shows "typing…" ~5s per sendChatAction —
+          // Telegram shows "typing…" ~5s per sendChatAction —
           // keep it alive for the duration of the turn, stopping on
           // every exit path. Slack/Workspace Chat have NO bot-typing
           // API for non-Socket-Mode... (Slack: typing events are

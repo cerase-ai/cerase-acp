@@ -43,25 +43,25 @@ export function chunkForDiscord(text: string): string[] {
 
 export interface SendQueueOptions {
   /**
-   * Where each chunk is dispatched. M-ACP-FAILLOUD-1: the target now RETURNS
-   * a `DeliveryResult` instead of throwing on a channel error — a `!ok`
-   * result drives the one-retry + visible-marker path below and is recorded
-   * so `drain()` can report whether any chunk ultimately failed. A target
-   * that still throws is treated defensively as a `!ok` result.
+   * Where each chunk is dispatched. The target returns a `DeliveryResult`
+   * instead of throwing on a channel error — a `!ok` result drives the
+   * one-retry + visible-marker path below and is recorded so `drain()` can
+   * report whether any chunk ultimately failed. A target that still throws
+   * is treated defensively as a `!ok` result.
    */
   send: (chunk: string) => Promise<DeliveryResult>;
   /** Minimum ms between two `send()` invocations. Default 100. */
   minIntervalMs?: number;
 }
 
-/** M-ACP-2: sent once when a chunk is lost after its retry. */
+/** Sent once when a chunk is lost after its retry. */
 export const DELIVERY_FAILURE_MARKER =
   "⚠️ Parte della risposta non è stata consegnata (errore del canale). / Part of the reply could not be delivered.";
 
 /**
- * M-ACP-FAILLOUD-1 — the aggregate outcome of draining the queue. `ok` iff
- * every chunk was delivered (after at most one retry each); otherwise the
- * `failures` carry the chunk + the last error for each chunk that was lost.
+ * The aggregate outcome of draining the queue. `ok` iff every chunk was
+ * delivered (after at most one retry each); otherwise `failures` carries
+ * the chunk + the last error for each chunk that was lost.
  */
 export type DrainResult = { ok: true } | { ok: false; failures: Array<{ chunk: string; error: Error }> };
 
@@ -97,9 +97,9 @@ export class SendQueue {
   }
 
   /**
-   * Resolves when the queue is empty AND no send is in flight. M-ACP-FAILLOUD-1:
-   * the resolved value reports whether every chunk was ultimately delivered, so
-   * the dispatcher can fail loud on a swallowed delivery failure.
+   * Resolves when the queue is empty AND no send is in flight. The resolved
+   * value reports whether every chunk was ultimately delivered, so the
+   * dispatcher can fail loud on a swallowed delivery failure.
    */
   drain(): Promise<DrainResult> {
     const summarize = (): DrainResult =>
@@ -138,9 +138,9 @@ export class SendQueue {
   }
 
   /**
-   * M-ACP-2: one send attempt, and on failure exactly one retry (M-ACP-FAILLOUD-1
-   * preserves this). The send target now returns a DeliveryResult; a target that
-   * still throws is caught defensively and treated as a `!ok` result.
+   * One send attempt, and on failure exactly one retry. The send target
+   * returns a DeliveryResult; a target that still throws is caught
+   * defensively and treated as a `!ok` result.
    */
   private async sendWithRetry(chunk: string): Promise<DeliveryResult> {
     const first = await this.invokeSend(chunk);

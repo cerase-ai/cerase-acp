@@ -120,9 +120,9 @@ describe("Dispatcher", () => {
     await expect(d.handleMessage("ghost", "111", "hi")).rejects.toThrow(/ghost/);
   });
 
-  // M-ACP-1: an authorised turn that fails must surface a user-facing
-  // message instead of silent 👀 + typing then nothing. Centralised in
-  // the dispatcher so every ingress (Discord/Slack/Telegram/web/CLI/
+  // An authorised turn that fails must surface a user-facing message
+  // instead of silent 👀 + typing then nothing. Centralised in the
+  // dispatcher so every ingress (Discord/Slack/Telegram/web/CLI/
   // scheduled) gets it for free.
   function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
     return { prompt } as unknown as SessionManager;
@@ -224,10 +224,6 @@ describe("no AI disclaimer on first contact (M-ACP-DISCLOSURE-OFF)", () => {
   });
 });
 
-// M-ACP-2 — the 402/overquota chain (credit-gate BudgetExceededError →
-// LLM call fails → opencode errors the turn) used to surface as the
-// generic "something went wrong". The dispatcher now recognises the
-// credit-gate signature and sends dedicated low-credit copy.
 describe("402 overquota copy (M-ACP-2)", () => {
   function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
     return { prompt } as unknown as SessionManager;

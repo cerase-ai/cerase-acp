@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// M-ACP-2 — typing feedback beyond Discord. Telegram bots signal
+// Typing feedback beyond Discord. Telegram bots signal
 // activity via sendChatAction("typing"), which Telegram displays for
 // ~5s — the adapter must keep it alive for the duration of the turn
 // (the shared startTypingKeepalive ticks faster than that window).

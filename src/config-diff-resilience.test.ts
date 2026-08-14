@@ -4,10 +4,9 @@ import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 
-// M-ACP-2 — applyConfigDiff resilience: one agent's createAdapter()
-// failure used to abort the WHOLE reload (remaining agents never
-// processed). Now: bounded retry per agent, then continue with the
-// rest — a single mistyped bot token must not freeze fleet reloads.
+// applyConfigDiff resilience: a bounded retry per agent, then continue
+// with the rest — a single mistyped bot token must not freeze fleet
+// reloads.
 
 function agent(id: string): AgentConfig {
   return {
