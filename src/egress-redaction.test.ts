@@ -147,6 +147,104 @@ describe("M-EGRESS-HARDEN-1: provider self-identification + internal artifacts",
     expect(redactEngineIdentifiers("Chiamo `airtable-power.list_records`")).toContain("uno strumento");
   });
 
+  // ── a delivered file is not a tool ─────────────────────────────────────
+  //
+  // The recipe rule matched any backticked hyphenated token with a dot, and the
+  // shipped skills mandate exactly that shape for the files they produce. A
+  // user who asked for a presentation was told, verbatim, "Ecco uno strumento".
+  //
+  // These nine are not invented: they are the names the shipped skills instruct
+  // the assistant to use, taken from `docx`, `deck` and `skill-creator`. They
+  // are regression cases, and the property test after them is what survives the
+  // skills changing.
+  const MANDATED_FILENAMES = [
+    "report-q3.docx",
+    "summary-q3.md",
+    "q3-sales.xlsx",
+    "presentation-brief.md",
+    "q3-results-presentation.pdf",
+    "q3-results-presentation.pptx",
+    "web-design-brief.md",
+    "web-design-wireframe.md",
+    "pending-skill-abc.md",
+  ];
+
+  it("keeps every filename the shipped skills tell the assistant to produce", () => {
+    for (const name of MANDATED_FILENAMES) {
+      const reply = `Ecco \`${name}\` come richiesto.`;
+      expect(redactEngineIdentifiers(reply)).toContain(name);
+      expect(redactEngineIdentifiers(reply)).not.toContain("uno strumento");
+    }
+  });
+
+  it("keeps a hyphenated filename for ANY document extension, not only the nine", () => {
+    // The property rather than the samples: the skills can add a filename
+    // tomorrow and it survives by construction. Extensions are the closed set,
+    // which is why the exclusion is written on them and not on the hyphen.
+    for (const ext of ["pdf", "docx", "xlsx", "pptx", "md", "csv", "png", "zip", "html"]) {
+      const reply = `Trovi \`analisi-primo-trimestre.${ext}\` in allegato.`;
+      expect(redactEngineIdentifiers(reply)).toContain(`analisi-primo-trimestre.${ext}`);
+    }
+  });
+
+  it("still redacts a recipe reference, which is the whole point of the rule", () => {
+    // The other half. Without it, "keep everything" would pass the tests above.
+    for (const ref of ["cerase-search.search", "airtable-power.list_records", "cerase-media.transcribe"]) {
+      const reply = `Chiamo \`${ref}\` adesso.`;
+      expect(redactEngineIdentifiers(reply)).toContain("uno strumento");
+      expect(redactEngineIdentifiers(reply)).not.toContain(ref);
+    }
+  });
+
+  it("groups the extension alternation, or a recipe whose method STARTS with one escapes", () => {
+    // `(?!pdf|docx|md`)` means "not pdf, not docx, not md-backtick" -- the
+    // backtick binds to the last branch only, so the earlier branches match a
+    // bare PREFIX. The exclusion then fires on any suffix beginning with an
+    // extension, and a real recipe reference survives unredacted.
+    //
+    // Measured both ways rather than reasoned: the first version of this test
+    // asserted the opposite consequence and passed against both spellings,
+    // which is how a guard that cannot fail gets written.
+    for (const ref of ["cerase-search.mdlist", "cerase-search.csvexport"]) {
+      const reply = `Chiamo \`${ref}\` adesso.`;
+      expect(redactEngineIdentifiers(reply)).toContain("uno strumento");
+      expect(redactEngineIdentifiers(reply)).not.toContain(ref);
+    }
+  });
+
+  // ── the sweep: every rule against ordinary business language ───────────
+  //
+  // The filename defect was one rule over-matching, so the other eight were
+  // swept the same way -- by running legitimate sentences through them rather
+  // than by reading them. These are the ones that come closest to a rule:
+  // board language ("le tue task"), an Italian word that contains an English
+  // one ("subagente" is a real job), English prose next to a pattern that
+  // allows a space, and the phrasing the provider rules react to.
+  //
+  // A rule added later is swept by adding a sentence here, which is cheaper
+  // than reasoning about a regex.
+  it("leaves ordinary business language completely alone", () => {
+    const corpus = [
+      "Ho creato il task per il cliente e l'ho assegnato a Marco.",
+      "Le tue task di oggi sono tre, tutte sulla board.",
+      "Il subagente assicurativo ci ha mandato la polizza.",
+      "Abbiamo aperto il codice sorgente del progetto.",
+      "We can open source code from that repository.",
+      "Ti allego `report-q3.docx` e `q3-sales.xlsx`.",
+      "Il file si chiama `analisi-2026.pdf`, lo trovi in allegato.",
+      "La ricetta della nonna prevede due uova.",
+      "Ho parlato con Claude, il nostro fornitore, ieri mattina.",
+      "Il documento `contratto-quadro.pdf` è pronto per la firma.",
+      "Serve un tool per gestire le task del team.",
+      "Il modello di contratto è quello standard.",
+      "Il progetto è basato su un'idea di Anna.",
+      "Trovi tutto in `presentation-brief.md` come da procedura.",
+    ];
+    for (const line of corpus) {
+      expect(redactEngineIdentifiers(line)).toBe(line);
+    }
+  });
+
   it("does NOT redact a person named Claude (no self-id context)", () => {
     const reply = "Ho scritto a Claude ieri e mi ha risposto.";
     expect(redactEngineIdentifiers(reply)).toBe(reply);

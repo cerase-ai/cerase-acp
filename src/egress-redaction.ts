@@ -49,6 +49,33 @@ const ENGINE_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }>
  */
 const PROVIDER_BRANDS = "Claude|ChatGPT|GPT(?:[\\s-]?\\d[\\w.]*)?|OpenAI|Anthropic|DeepSeek|Gemini|Llama|Mistral";
 
+/**
+ * File extensions a delivered document can carry.
+ *
+ * Used as a NEGATIVE condition: a backticked `word-word.suffix` is a recipe
+ * reference unless its suffix is one of these, in which case it is a filename
+ * the assistant is naming to the person it is talking to.
+ *
+ * A closed set is exactly what makes this the right side to enumerate. Recipe
+ * method names are open-ended (`search`, `list_records`, whatever a connector
+ * adds next week); the extensions a document arrives with are not, and a new
+ * one is a deliberate act with an obvious place to record it.
+ */
+const FILE_EXTENSIONS = [
+  // documents
+  "pdf", "docx", "doc", "odt", "rtf", "txt", "md", "markdown",
+  // spreadsheets and data
+  "xlsx", "xls", "ods", "csv", "tsv", "json", "yaml", "yml", "xml",
+  // presentations
+  "pptx", "ppt", "odp", "key",
+  // images and media
+  "png", "jpg", "jpeg", "gif", "svg", "webp", "heic", "mp3", "mp4", "wav", "mov",
+  // archives
+  "zip", "tar", "gz", "tgz", "7z",
+  // web
+  "html", "htm", "css",
+].join("|");
+
 const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
   // Self-identification, Italian: "sono Claude" / "sei GPT-4".
   { pattern: new RegExp(`\\b(sono|sei)\\s+(?:${PROVIDER_BRANDS})\\b`, "gi"), replacement: "$1 un assistente Cerase" },
@@ -74,9 +101,29 @@ const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replace
   { pattern: /\bLiteLLM\b/gi, replacement: "Cerase" },
   { pattern: /\.mcp\.json\b/gi, replacement: "la configurazione" },
   // Backticked internal recipe identifiers, e.g. `cerase-search.search`,
-  // `airtable-power.list_records`. The hyphen/underscore in the namespace keeps
-  // it from matching a plain filename like `report.md` / `index.html`.
-  { pattern: /`[a-z0-9]+(?:[-_][a-z0-9]+)+\.[a-z0-9_]+`/gi, replacement: "uno strumento" },
+  // `airtable-power.list_records`.
+  //
+  // The comment that stood here said the hyphen in the namespace kept this off
+  // "a plain filename like `report.md`". That holds only for filenames WITHOUT
+  // a hyphen, and the shipped skills mandate hyphenated ones by name --
+  // `report-q3.docx`, `q3-results-presentation.pdf`, `presentation-brief.md`,
+  // `pending-skill-<slug>.md` among them. So a user who asked for a
+  // presentation was told, verbatim, "Ecco uno strumento".
+  //
+  // The real difference is the SUFFIX, not the hyphen: a recipe reference ends
+  // in a method name, a filename ends in a file extension. Extensions are a
+  // closed set and method names are not, so the exclusion is written on the
+  // closed one.
+  {
+    // The alternation is GROUPED inside the lookahead, and the group is what
+    // ties the extension to the closing backtick. Written `(?!pdf|docx|md`)`
+    // the backtick binds to the last branch only, so the earlier branches
+    // match a bare PREFIX: the exclusion then fires on any suffix beginning
+    // with an extension, and `cerase-search.mdlist` -- a real recipe -- would
+    // reach the user unredacted.
+    pattern: new RegExp("`[a-z0-9]+(?:[-_][a-z0-9]+)+\\.(?:(?!(?:" + FILE_EXTENSIONS + ")`)[a-z0-9_])+`", "gi"),
+    replacement: "uno strumento",
+  },
 ];
 
 /**
