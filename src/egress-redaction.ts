@@ -63,17 +63,51 @@ const PROVIDER_BRANDS = "Claude|ChatGPT|GPT(?:[\\s-]?\\d[\\w.]*)?|OpenAI|Anthrop
  */
 const FILE_EXTENSIONS = [
   // documents
-  "pdf", "docx", "doc", "odt", "rtf", "txt", "md", "markdown",
+  "pdf",
+  "docx",
+  "doc",
+  "odt",
+  "rtf",
+  "txt",
+  "md",
+  "markdown",
   // spreadsheets and data
-  "xlsx", "xls", "ods", "csv", "tsv", "json", "yaml", "yml", "xml",
+  "xlsx",
+  "xls",
+  "ods",
+  "csv",
+  "tsv",
+  "json",
+  "yaml",
+  "yml",
+  "xml",
   // presentations
-  "pptx", "ppt", "odp", "key",
+  "pptx",
+  "ppt",
+  "odp",
+  "key",
   // images and media
-  "png", "jpg", "jpeg", "gif", "svg", "webp", "heic", "mp3", "mp4", "wav", "mov",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "svg",
+  "webp",
+  "heic",
+  "mp3",
+  "mp4",
+  "wav",
+  "mov",
   // archives
-  "zip", "tar", "gz", "tgz", "7z",
+  "zip",
+  "tar",
+  "gz",
+  "tgz",
+  "7z",
   // web
-  "html", "htm", "css",
+  "html",
+  "htm",
+  "css",
 ].join("|");
 
 const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
