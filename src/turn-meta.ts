@@ -44,8 +44,13 @@ export function detectLanguage(text: string): SupportedLang {
   return bestHits > 0 ? best : "unknown";
 }
 
-export function makeTurnMetaBlock(parts: { gap: string; lang: SupportedLang }): string {
-  return `[turn_meta: gap=${parts.gap}, lang=${parts.lang}]\n\n`;
+export function makeTurnMetaBlock(parts: { gap: string; lang: SupportedLang; now?: string }): string {
+  // The clock is OPTIONAL and appended last, both on purpose. Optional because
+  // a control-plane that cannot be reached must not cost the turn a clock it
+  // never had; last because the block is a suffix and everything before it is
+  // what the assistant has been reading since the first version.
+  const clock = parts.now ? `, now=${parts.now}` : "";
+  return `[turn_meta: gap=${parts.gap}, lang=${parts.lang}${clock}]\n\n`;
 }
 
 interface TurnState {
@@ -53,6 +58,16 @@ interface TurnState {
 }
 
 const key = (agentId: string, userId: string) => `${agentId}:${userId}`;
+
+/**
+ * Asked for the pair's last turn when this process has never seen them.
+ *
+ * Returns the epoch ms of their previous turn, or undefined for "no extra
+ * information" -- which covers both a pair that has genuinely never spoken and
+ * a lookup that failed. The caller cannot tell those apart and must not: the
+ * only safe reading of both is the one the tracker already had.
+ */
+export type LastTurnResolver = (agentId: string, userId: string) => Promise<number | undefined>;
 
 export class TurnMetaTracker {
   private state = new Map<string, TurnState>();
@@ -70,5 +85,46 @@ export class TurnMetaTracker {
     const lang = detectLanguage(text);
     this.state.set(k, { lastAt: now });
     return makeTurnMetaBlock({ gap, lang });
+  }
+
+  /**
+   * The same block, with the two things this process cannot know on its own.
+   *
+   * The resolver is consulted ONLY when there is no in-process state for the
+   * pair. That is the restart case and nothing else: a running bridge answers
+   * from its Map as before, so a busy hour costs no lookups at all.
+   *
+   * A resolver that throws is treated as having answered nothing, and the gap
+   * falls back to what the Map knew. It must never be allowed to fail a turn --
+   * the clock is a courtesy and the gap is a hint, and neither is worth a
+   * conversation.
+   */
+  async prefixWithContext(
+    agentId: string,
+    userId: string,
+    text: string,
+    opts: { resolveLastTurn?: LastTurnResolver; clock?: string; now?: number } = {},
+  ): Promise<string> {
+    const now = opts.now ?? Date.now();
+    const k = key(agentId, userId);
+    let prevAt = this.state.get(k)?.lastAt;
+
+    if (prevAt === undefined && opts.resolveLastTurn) {
+      try {
+        const seeded = await opts.resolveLastTurn(agentId, userId);
+        // Ignore a timestamp in the future: a clock skew between two machines
+        // would otherwise render a negative gap as `0s`, which reads as "you
+        // just wrote" to someone who has been away for a week.
+        if (seeded !== undefined && seeded <= now) prevAt = seeded;
+      } catch {
+        // Nothing. See the contract above.
+      }
+    }
+
+    const gap = formatGap(prevAt, now);
+    const lang = detectLanguage(text);
+    this.state.set(k, { lastAt: now });
+
+    return makeTurnMetaBlock({ gap, lang, now: opts.clock });
   }
 }

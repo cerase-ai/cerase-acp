@@ -36,6 +36,17 @@ export interface DispatcherDeps {
    * overspend the reactive catch below still covers.
    */
   creditCheck?: (agentId: string) => Promise<{ exhausted: boolean }>;
+  /**
+   * The organization's wall clock and the pair's last turn, from the side that
+   * persists both. Optional for the same reason `creditCheck` is: the CLI and
+   * test ingresses have no control-plane, and a turn is worth more than a
+   * clock. When it is absent or throws, the turn goes out with the block this
+   * process has always produced.
+   */
+  turnContext?: (
+    agentId: string,
+    userId: string,
+  ) => Promise<{ clock?: string; lastTurnAt?: number }>;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -180,7 +191,25 @@ export class Dispatcher {
       onFlush: (chunk) => queue.enqueue(chunk),
     });
 
-    const prefix = this.deps.turnMeta.prefix(agentId, userId, text);
+    // One call, two facts, and neither is worth failing a turn over. The
+    // resolver inside is consulted only when this process has no memory of the
+    // pair, so a running bridge pays nothing per turn -- it is the restart that
+    // used to tell somebody they had never spoken.
+    let clock: string | undefined;
+    let contextLastTurnAt: number | undefined;
+    if (this.deps.turnContext) {
+      try {
+        const ctx = await this.deps.turnContext(agentId, userId);
+        clock = ctx.clock;
+        contextLastTurnAt = ctx.lastTurnAt;
+      } catch (err) {
+        logger.warn({ err, agentId, userId }, "turn context unavailable — proceeding without a clock");
+      }
+    }
+    const prefix = await this.deps.turnMeta.prefixWithContext(agentId, userId, text, {
+      clock,
+      resolveLastTurn: contextLastTurnAt === undefined ? undefined : async () => contextLastTurnAt,
+    });
     const promptText = prefix + text;
 
     logger.info({ agentId, userId, textLen: text.length }, "dispatching to session manager");

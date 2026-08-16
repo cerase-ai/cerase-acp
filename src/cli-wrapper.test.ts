@@ -63,12 +63,29 @@ describe("cerase-acp-cli (bash wrapper)", () => {
   let dir: string;
 
   beforeAll(async () => {
-    // The wrapper invokes `node dist/cli.js`; ensure dist is current.
+    // The wrapper invokes `node dist/cli.js`, so dist has to be current, and
+    // building it here is what makes this file self-contained.
+    //
+    // The budget is the whole point of this comment. A full `tsc` over this
+    // project measures 113 seconds on a developer machine and more on one
+    // running something else, and this hook used to allow 30 -- so the suite
+    // reported FAIL with NO failing test, naming a file and blaming nothing.
+    // A red shaped like that reads as a defect in whatever was edited last,
+    // which is how an hour goes.
+    //
+    // Four minutes, and the timeout message says what timed out. If it ever
+    // fires, the build is genuinely broken or the machine is in trouble --
+    // neither of which is a thing this file asserts.
     await new Promise<void>((resolve, reject) => {
       const child = spawn("npm", ["run", "build"], { cwd: REPO_ROOT });
-      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`build exit ${code}`))));
+      child.on("close", (code) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`the project did not build (tsc exit ${code}) — this suite runs the built cli`)),
+      );
+      child.on("error", (err) => reject(new Error(`could not start the build: ${err.message}`)));
     });
-  }, 30_000);
+  }, 240_000);
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "cerase-acp-wrapper-test-"));

@@ -34,6 +34,7 @@ import { SessionManager } from "./session-manager.js";
 import { postSessionSummary } from "./session-summary.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { TurnMetaTracker } from "./turn-meta.js";
+import { fetchTurnContext, formatWallClock } from "./turn-context.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.bridge");
@@ -256,6 +257,26 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // chat.
     creditCheck: controlPlaneSecret
       ? (agentId) => checkTenantCredit(agentId, { controlPlaneUrl, internalSecret: controlPlaneSecret })
+      : undefined,
+    // The organization's wall clock, and the pair's last turn when this
+    // process has just started and remembers nobody. Wired on the same
+    // condition as the gate above and for the same reason: without the
+    // internal bearer there is nothing to authenticate with.
+    //
+    // The platform comes from the agent's own configuration rather than from
+    // the message, because the control-plane stores a channel identity per
+    // platform and matching on the id alone would collide the day two
+    // platforms hand out the same string.
+    turnContext: controlPlaneSecret
+      ? async (agentId, userId) => {
+          const platform = config.agents.find((a) => a.id === agentId)?.channel;
+          const ctx = await fetchTurnContext(
+            agentId,
+            { platform, platformUserId: userId },
+            { controlPlaneUrl, internalSecret: controlPlaneSecret },
+          );
+          return { clock: formatWallClock(Date.now(), ctx.timezone), lastTurnAt: ctx.lastTurnAt };
+        }
       : undefined,
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
