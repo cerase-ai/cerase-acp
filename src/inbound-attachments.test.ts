@@ -138,7 +138,11 @@ describe("buildOversizeNotice (M-FILE-LIMITS-1 fail-loud)", () => {
       [{ name: "huge.zip", sizeBytes: 99_000_000, reason: "oversize" }],
       "workspace-chat",
     );
-    expect(msg).toBe("Il file «huge.zip» supera il limite di 64 MB e non è stato caricato.");
+    // Asserted as properties: the file is named and the effective cap is
+    // stated. Pinning the sentence made a reworded notice look like a
+    // regression, and the wording now lives in the platform notice table.
+    expect(msg).toContain("«huge.zip»");
+    expect(msg).toContain("64 MB");
   });
   it("lists every oversize file when several were rejected", () => {
     const msg = buildOversizeNotice(
@@ -148,7 +152,9 @@ describe("buildOversizeNotice (M-FILE-LIMITS-1 fail-loud)", () => {
       ],
       "workspace-chat",
     );
-    expect(msg).toBe("I file «a.zip», «b.mov» superano il limite di 64 MB e non sono stati caricati.");
+    expect(msg).toContain("«a.zip»");
+    expect(msg).toContain("«b.mov»");
+    expect(msg).toContain("64 MB");
   });
 });
 
@@ -189,8 +195,8 @@ describe("per-channel cap — effectiveMaxMb (M-FILE-LIMITS-1)", () => {
   });
 
   it("the oversize notice reports the EFFECTIVE cap (discord → 25, not the global 64)", () => {
-    expect(buildOversizeNotice([{ name: "x.mov", sizeBytes: 99, reason: "oversize" }], "discord")).toBe(
-      "Il file «x.mov» supera il limite di 25 MB e non è stato caricato.",
-    );
+    const notice = buildOversizeNotice([{ name: "x.mov", sizeBytes: 99, reason: "oversize" }], "discord");
+    expect(notice).toContain("25 MB");
+    expect(notice).not.toContain("64");
   });
 });

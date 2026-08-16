@@ -8,6 +8,7 @@ import { isAllowed } from "./allowlist.js";
 import type { DeliveryResult } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
+import { deliveryFailureNotice } from "./platform-notices.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
 import type { SessionManager } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
@@ -59,21 +60,21 @@ const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
 // indicator. Localized so non-Italian users aren't replied to in mixed
 // language (same detectLanguage source as the refusal copy).
 const TURN_ERROR: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
-  it: "⚠️ Si è verificato un errore, riprova tra poco.",
-  en: "⚠️ Something went wrong, please try again shortly.",
-  es: "⚠️ Se ha producido un error, inténtalo de nuevo en un momento.",
-  fr: "⚠️ Une erreur s'est produite, réessaie dans un instant.",
-  unknown: "⚠️ Something went wrong, please try again shortly.",
+  it: "Si è verificato un errore, riprova tra poco.",
+  en: "Something went wrong, please try again shortly.",
+  es: "Se ha producido un error, inténtalo de nuevo en un momento.",
+  fr: "Une erreur s'est produite, réessaie dans un instant.",
+  unknown: "Something went wrong, please try again shortly.",
 };
 
 // A turn that completes but emits zero text chunks would
 // otherwise send nothing at all — indistinguishable from a dead bridge.
 const TURN_EMPTY: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
-  it: "🤔 Non ho prodotto una risposta. Riprova o riformula la richiesta.",
-  en: "🤔 I didn't produce a reply. Try again or rephrase.",
-  es: "🤔 No he generado una respuesta. Inténtalo de nuevo o reformula.",
-  fr: "🤔 Je n'ai pas produit de réponse. Réessaie ou reformule.",
-  unknown: "🤔 I didn't produce a reply. Try again or rephrase.",
+  it: "Non ho prodotto una risposta. Riprova o riformula la richiesta.",
+  en: "I didn't produce a reply. Try again or rephrase.",
+  es: "No he generado una respuesta. Inténtalo de nuevo o reformula.",
+  fr: "Je n'ai pas produit de réponse. Réessaie ou reformule.",
+  unknown: "I didn't produce a reply. Try again or rephrase.",
 };
 
 /**
@@ -100,11 +101,11 @@ export function pickEmptyMessage(text: string): string {
 // errors the turn. Without classification the employee got the generic
 // "something went wrong" and retried forever.
 const TURN_NO_CREDITS: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
-  it: "🪫 I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore (può ricaricarli dal pannello).",
-  en: "🪫 Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
-  es: "🪫 Los créditos de la organización se han agotado — avisa a tu administrador (puede recargarlos desde el panel).",
-  fr: "🪫 Les crédits de l'organisation sont épuisés — préviens ton administrateur (il peut recharger depuis le panneau).",
-  unknown: "🪫 Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
+  it: "I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore (può ricaricarli dal pannello).",
+  en: "Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
+  es: "Los créditos de la organización se han agotado — avisa a tu administrador (puede recargarlos desde el panel).",
+  fr: "Les crédits de l'organisation sont épuisés — préviens ton administrateur (il peut recharger depuis le panneau).",
+  unknown: "Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
 };
 
 /** Localized "no credits left" copy (see TURN_NO_CREDITS). */
@@ -183,7 +184,7 @@ export class Dispatcher {
       }
     }
 
-    const queue = new SendQueue({ send });
+    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(detectLanguage(text)) });
     const buffer = new StreamBuffer({
       onFlush: (chunk) => queue.enqueue(chunk),
     });

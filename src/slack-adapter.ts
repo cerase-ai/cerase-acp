@@ -25,6 +25,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { detectLanguage } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.slack");
 
@@ -77,7 +78,7 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
             outText = prependUploadMarker(text, stored);
             // Tell the user about over-cap files
             // instead of dropping them silently; the stored files still flow.
-            const notice = buildOversizeNotice(rejected, "slack");
+            const notice = buildOversizeNotice(rejected, "slack", detectLanguage(text));
             if (notice) {
               await dispatcher.sendSystemMessage(agent.id, userId, notice);
             }

@@ -11,6 +11,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
@@ -76,7 +77,7 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
           text = prependUploadMarker(text, stored);
           // Tell the user about over-cap files instead of dropping them
           // silently; the stored files still flow.
-          const notice = buildOversizeNotice(rejected, "discord");
+          const notice = buildOversizeNotice(rejected, "discord", detectLanguage(text));
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
           }

@@ -22,6 +22,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.telegram");
@@ -109,7 +110,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           const text = prependUploadMarker(caption, stored);
           // Notify before the empty-message
           // early-return, so an all-oversize/no-caption upload isn't silent.
-          const notice = buildOversizeNotice(rejected, "telegram");
+          const notice = buildOversizeNotice(rejected, "telegram", detectLanguage(caption));
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
           }

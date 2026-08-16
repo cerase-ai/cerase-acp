@@ -9,6 +9,8 @@
 // injectable) so it is unit-tested without channel SDKs / real docker / network.
 
 import { makeLogger } from "./logger.js";
+import { oversizeUploadNotice } from "./platform-notices.js";
+import type { SupportedLang } from "./turn-meta.js";
 import { type FileWriter, writeAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.attachments");
@@ -202,13 +204,18 @@ export function prependUploadMarker(text: string, relPaths: string[]): string {
 }
 
 /**
- * Build the Italian, user-facing notice telling
- * the user which uploads were dropped for exceeding the size cap (fail-loud).
+ * Build the user-facing notice telling the user which uploads were dropped
+ * for exceeding the size cap (fail-loud). The wording lives in the platform's
+ * one notice table; this decides WHICH files it is about and what the cap was.
  * Returns `undefined` when nothing was rejected (so the caller sends
  * nothing). Every real adapter calls this after ingest and, if a string
  * comes back, delivers it via `dispatcher.sendSystemMessage`.
  */
-export function buildOversizeNotice(rejected: RejectedFile[], channel: Channel): string | undefined {
+export function buildOversizeNotice(
+  rejected: RejectedFile[],
+  channel: Channel,
+  lang: SupportedLang = "unknown",
+): string | undefined {
   const oversize = rejected.filter((r) => r.reason === "oversize");
   if (oversize.length === 0) {
     return undefined;
@@ -216,9 +223,9 @@ export function buildOversizeNotice(rejected: RejectedFile[], channel: Channel):
   // Report the EFFECTIVE per-channel cap, so the user sees the real ceiling
   // that bound (e.g. 25 MB on Discord), not just the global setting.
   const cap = effectiveMaxMb(channel);
-  if (oversize.length === 1) {
-    return `Il file «${oversize[0]!.name}» supera il limite di ${cap} MB e non è stato caricato.`;
-  }
-  const names = oversize.map((r) => `«${r.name}»`).join(", ");
-  return `I file ${names} superano il limite di ${cap} MB e non sono stati caricati.`;
+  return oversizeUploadNotice(
+    oversize.map((r) => r.name),
+    cap,
+    lang,
+  );
 }

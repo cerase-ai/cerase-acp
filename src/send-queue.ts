@@ -4,6 +4,7 @@
 
 import type { DeliveryResult } from "./chat-adapter.js";
 import { makeLogger } from "./logger.js";
+import { deliveryFailureNotice } from "./platform-notices.js";
 
 const logger = makeLogger("cerase-acp.send-queue");
 
@@ -52,11 +53,19 @@ export interface SendQueueOptions {
   send: (chunk: string) => Promise<DeliveryResult>;
   /** Minimum ms between two `send()` invocations. Default 100. */
   minIntervalMs?: number;
+  /** The notice sent once when a chunk is lost. Defaults to the Italian one. */
+  failureMarker?: string;
 }
 
-/** Sent once when a chunk is lost after its retry. */
-export const DELIVERY_FAILURE_MARKER =
-  "⚠️ Parte della risposta non è stata consegnata (errore del canale). / Part of the reply could not be delivered.";
+/**
+ * Sent once when a chunk is lost after its retry.
+ *
+ * Kept as the default for a queue built without a language -- the CLI and the
+ * test ingresses have none. A real turn passes the localised one, because this
+ * default used to be the only version anybody saw and it carried two languages
+ * in one line.
+ */
+export const DELIVERY_FAILURE_MARKER = deliveryFailureNotice("unknown");
 
 /**
  * The aggregate outcome of draining the queue. `ok` iff every chunk was
@@ -76,12 +85,14 @@ export class SendQueue {
   private lastSentAt = 0;
   private readonly send: (chunk: string) => Promise<DeliveryResult>;
   private readonly minIntervalMs: number;
+  private readonly failureMarker: string;
   private donePromise: Promise<void> = Promise.resolve();
   private resolveDone: (() => void) | undefined;
 
   constructor(opts: SendQueueOptions) {
     this.send = opts.send;
     this.minIntervalMs = opts.minIntervalMs ?? 100;
+    this.failureMarker = opts.failureMarker ?? DELIVERY_FAILURE_MARKER;
   }
 
   enqueue(text: string): void {
@@ -125,7 +136,7 @@ export class SendQueue {
           this.failures.push({ chunk, error: result.error });
           if (!this.failureMarkerQueued) {
             this.failureMarkerQueued = true;
-            this.items.unshift(DELIVERY_FAILURE_MARKER);
+            this.items.unshift(this.failureMarker);
           }
         }
         this.lastSentAt = Date.now();

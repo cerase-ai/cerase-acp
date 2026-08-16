@@ -30,6 +30,12 @@ import { Dispatcher } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
 import { type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
 import { makeLogger } from "./logger.js";
+import {
+  attachmentFailedNotice,
+  attachmentsUnsupportedNotice,
+  attachmentUnreadableNotice,
+  displayFileName,
+} from "./platform-notices.js";
 import { SessionManager } from "./session-manager.js";
 import { postSessionSummary } from "./session-summary.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
@@ -317,23 +323,28 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         if (hasAttachments(text)) {
           const parsed = parseAttachments(text);
           const containerName = `cerase-${agentId}`;
+          // The upload happens after the model has finished writing, so it
+          // cannot report the outcome itself -- the assistant's baseline is
+          // explicit that it must not claim delivery. That makes THIS the only
+          // place the reader can learn an attachment did not arrive, and a
+          // silent log left them with a reply promising a file and no file.
+          const lang = turnMeta.languageFor(agentId, userId);
           for (const relPath of parsed.attachments) {
+            const fileName = displayFileName(relPath);
             try {
               const file = await readAgentWorkspaceFile(containerName, relPath);
               if (adapter.sendFile) {
-                // sendFile returns a result — log on
-                // failure and continue (attachments stay best-effort, exactly
-                // as the surrounding catch already degrades them).
                 const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
                 if (!fileResult.ok) {
                   logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
+                  await inner(attachmentFailedNotice(file.name, lang));
                 }
               } else {
-                await inner(`📎 (allegati non supportati su questo canale: ${file.name})`);
+                await inner(attachmentsUnsupportedNotice(file.name, lang));
               }
             } catch (err) {
               logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
-              await inner(`⚠️ Non sono riuscito ad allegare \`${relPath}\`.`);
+              await inner(attachmentUnreadableNotice(fileName, lang));
             }
           }
           text = parsed.text;

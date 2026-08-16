@@ -55,6 +55,12 @@ export function makeTurnMetaBlock(parts: { gap: string; lang: SupportedLang; now
 
 interface TurnState {
   lastAt: number;
+  // The language hint already computed for the meta block, kept so the
+  // PLATFORM's own messages can be written in it too. Until this was
+  // recorded the detector's answer was handed to the model and thrown away,
+  // and every notice the bridge posts by itself was Italian regardless of who
+  // was reading it.
+  lastLang: SupportedLang;
 }
 
 const key = (agentId: string, userId: string) => `${agentId}:${userId}`;
@@ -83,7 +89,7 @@ export class TurnMetaTracker {
     const prev = this.state.get(k);
     const gap = formatGap(prev?.lastAt, now);
     const lang = detectLanguage(text);
-    this.state.set(k, { lastAt: now });
+    this.record(k, now, lang);
     return makeTurnMetaBlock({ gap, lang });
   }
 
@@ -123,8 +129,29 @@ export class TurnMetaTracker {
 
     const gap = formatGap(prevAt, now);
     const lang = detectLanguage(text);
-    this.state.set(k, { lastAt: now });
+    this.record(k, now, lang);
 
     return makeTurnMetaBlock({ gap, lang, now: opts.clock });
+  }
+
+  /**
+   * The language the PLATFORM should write to this pair in.
+   *
+   * The block handed to the model carries this turn's detection, which is
+   * "unknown" for anything short ("ok", "grazie", a bare link). A notice the
+   * bridge posts by itself cannot fall back to Italian on those turns without
+   * switching language mid-conversation, so the LAST KNOWN answer is kept and
+   * a per-turn "unknown" never overwrites it.
+   */
+  languageFor(agentId: string, userId: string): SupportedLang {
+    return this.state.get(key(agentId, userId))?.lastLang ?? "unknown";
+  }
+
+  private record(k: string, now: number, lang: SupportedLang): void {
+    const previous = this.state.get(k)?.lastLang;
+    this.state.set(k, {
+      lastAt: now,
+      lastLang: lang === "unknown" ? (previous ?? "unknown") : lang,
+    });
   }
 }

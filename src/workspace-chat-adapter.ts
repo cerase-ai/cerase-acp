@@ -34,6 +34,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { detectLanguage } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
 
@@ -185,7 +186,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           outText = prependUploadMarker(text, stored);
           // Tell the user about over-cap files
           // instead of dropping them silently; the stored files still flow.
-          const notice = buildOversizeNotice(rejected, "workspace-chat");
+          const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
           if (notice) {
             await dispatcher.sendSystemMessage(agent.id, userId, notice);
           }
