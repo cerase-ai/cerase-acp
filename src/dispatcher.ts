@@ -43,10 +43,7 @@ export interface DispatcherDeps {
    * clock. When it is absent or throws, the turn goes out with the block this
    * process has always produced.
    */
-  turnContext?: (
-    agentId: string,
-    userId: string,
-  ) => Promise<{ clock?: string; lastTurnAt?: number }>;
+  turnContext?: (agentId: string, userId: string) => Promise<{ clock?: string; lastTurnAt?: number }>;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
