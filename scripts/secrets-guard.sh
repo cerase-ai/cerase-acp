@@ -165,10 +165,43 @@ else
         # cerase-ops, and for the same reason: a rule nobody can predict is a
         # rule that gets worked around. The marker asserts nothing about the
         # LIVE path, which `_load_env_file` still kills on sight.
-        hits="$(git grep -n "$old" -- . ':!devplan' ':!tests' ':!scripts/_secret_renames.sh' 2>/dev/null \
-                | grep -E "(^|[^A-Za-z0-9_])${old}=|[$]\{?${old}([^A-Za-z0-9_]|$)|['\"]${old}['\"]" \
+        # Three shapes were not enough. An assignment, a dollar-sign read and a
+        # quoted string are how bash, PHP and Python name a variable; TypeScript
+        # reads one through a dotted env object, which matches none of them.
+        # Proven by putting a real dotted read into cerase-acp's source and
+        # watching the guard stay green -- in the repo whose publish this same
+        # guard had just stopped, over a test fixture. The dotted shape below
+        # covers both the node and the bundler spellings in one, and cannot
+        # match a bare word in prose.
+        #
+        # The tests exclusion is a PATH, and it encodes a layout two languages
+        # here do not use. PHP and bats put their tests in a tests directory;
+        # TypeScript and Python put them beside the source -- 36 files in
+        # cerase-acp, 37 in cerase-gateway, 8 more in this repo -- so for
+        # those the exclusion has never applied to anything. It went red on
+        # `src/egress-redaction.test.ts`, a test asserting the engine identifier
+        # is scrubbed from egress, which has to keep naming the retired spelling
+        # precisely because it is retired. That is the case this file already
+        # says is excluded on purpose; only the pattern was reading a
+        # convention. It stopped every image `cerase-acp` publishes.
+        hits="$(git grep -n "$old" -- . ':!devplan' ':!tests' \
+                    ':!*.test.ts' ':!*.test.js' ':!*.spec.ts' ':!*.spec.js' \
+                    ':!test_*.py' ':!*_test.py' \
+                    ':!scripts/_secret_renames.sh' 2>/dev/null \
+                | grep -E "(^|[^A-Za-z0-9_])${old}=|[$]\{?${old}([^A-Za-z0-9_]|$)|['\"]${old}['\"]|env\.${old}([^A-Za-z0-9_]|$)" \
                 | while IFS= read -r hit; do
                     hf="${hit%%:*}"; rest="${hit#*:}"; hl="${rest%%:*}"
+                    # A COMMENT-ONLY line is a mention, never a use. This file's
+                    # own explanation of the shapes below contains one of them,
+                    # so the first version of that comment made the guard fail on
+                    # itself -- the fifteenth time a guard here has reddened on
+                    # the prose describing it. A document explaining what changed
+                    # has to be able to say what changed.
+                    #
+                    # Only the whole line: a trailing comment after code sits
+                    # beside a real use, and both should be found together.
+                    printf '%s' "${rest#*:}" \
+                      | grep -qE '^[[:space:]]*(#|//|\*|/\*|--)' && continue
                     awk -v n="$hl" 'NR>=n-8 && NR<=n' "$ROOT/$hf" 2>/dev/null \
                       | grep -q 'secrets-guard-allow-retired-read' && continue
                     printf '%s\n' "$hit"

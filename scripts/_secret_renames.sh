@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 #
-# A0 step 3 — the credential renames, as DATA.
+# A0 step 3 — the environment-variable renames, as DATA.
 #
 # ── Why a file and not a sed somebody ran once ──
 #
@@ -34,7 +34,20 @@
 # `CERASE_GHCR_*`, `CERASE_MAIL_RELAY_*`. A third-party tool reads its own
 # variable under a name it chose; renaming those would mean setting two.
 
-# old<TAB>new, one per line. `CERASE_` prefixes what is OURS.
+# old<TAB>new[<TAB>kind], one per line. `CERASE_` prefixes what is OURS.
+#
+# `kind` is optional and defaults to `credential`, so every row written before
+# it existed keeps the meaning it had. The only other value is `setting`: a
+# variable the operator sets which is not a secret -- a version pin, a region, a
+# feature flag. It exists because `cerase-ops/secrets.tsv` is an inventory of
+# CREDENTIALS, and its guard asserts every renamed name appears there. A
+# `setting` renamed through this file would red that guard on correct work.
+#
+# The accessors below match two-or-more fields, not exactly two. They were
+# written when
+# every row had exactly two fields, and a third column would have made all three
+# skip the row entirely -- the rename would vanish from the loader, the converge
+# and the guard at once, leaving the retired spelling quietly accepted again.
 #
 # The FLEET_-prefixed duplicates are on the left too. They are the same value
 # under a second spelling in the same file — the exact drift this milestone
@@ -65,7 +78,7 @@ DASH_ADMIN_PASSWORD	CERASE_DASH_ADMIN_PASSWORD
 SCALEWAY_ACCESS_KEY	CERASE_SCALEWAY_ACCESS_KEY
 SCALEWAY_SECRET_KEY	CERASE_SCALEWAY_SECRET_KEY
 SCALEWAY_PROJECT_ID	CERASE_SCALEWAY_PROJECT_ID
-OPENCODE_VERSION	CERASE_AGENT_VERSION
+OPENCODE_VERSION	CERASE_AGENT_VERSION	setting
 '
 
 # ── The one row here that is not a credential, and why it belongs anyway ──
@@ -96,18 +109,35 @@ OPENCODE_VERSION	CERASE_AGENT_VERSION
 
 # Every OLD spelling, one per line.
 _cerase_rename_old_names() {
-    printf '%s' "$_CERASE_SECRET_RENAMES" | awk -F'\t' 'NF==2 {print $1}'
+    printf '%s' "$_CERASE_SECRET_RENAMES" | awk -F'\t' 'NF>=2 {print $1}'
 }
 
 # Every NEW spelling, deduplicated — two old names can map to one new one.
 _cerase_rename_new_names() {
-    printf '%s' "$_CERASE_SECRET_RENAMES" | awk -F'\t' 'NF==2 {print $2}' | sort -u
+    printf '%s' "$_CERASE_SECRET_RENAMES" | awk -F'\t' 'NF>=2 {print $2}' | sort -u
+}
+
+# Every NEW spelling that names a CREDENTIAL, deduplicated.
+#
+# The inventory in `cerase-ops/secrets.tsv` holds one row per credential an
+# operator supplies, and its guard asserts that every renamed name is in it.
+# That premise held while this file renamed only credentials, and broke the day
+# a version pin came through: `CERASE_AGENT_VERSION` is set by the operator and
+# is not a secret, so the guard reddened on correct work.
+#
+# The alternative was a second hand-written exception in the guard, beside the
+# one for derived names. That list is what goes stale -- the next non-credential
+# rename reds again, and the repair is to append rather than to ask. So the
+# distinction lives here, in the data, where the row that knows the answer is.
+_cerase_rename_new_credentials() {
+    printf '%s' "$_CERASE_SECRET_RENAMES" \
+        | awk -F'\t' 'NF>=2 && (NF<3 || $3=="credential") {print $2}' | sort -u
 }
 
 # The new spelling for one old name, or empty.
 _cerase_rename_for() {   # <old-name>
     printf '%s' "$_CERASE_SECRET_RENAMES" \
-        | awk -F'\t' -v k="$1" 'NF==2 && $1==k {print $2; exit}'
+        | awk -F'\t' -v k="$1" 'NF>=2 && $1==k {print $2; exit}'
 }
 
 # ─── A0 step 2b — converge a .env to the new spellings ───────────
