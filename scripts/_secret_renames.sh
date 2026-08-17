@@ -65,7 +65,34 @@ DASH_ADMIN_PASSWORD	CERASE_DASH_ADMIN_PASSWORD
 SCALEWAY_ACCESS_KEY	CERASE_SCALEWAY_ACCESS_KEY
 SCALEWAY_SECRET_KEY	CERASE_SCALEWAY_SECRET_KEY
 SCALEWAY_PROJECT_ID	CERASE_SCALEWAY_PROJECT_ID
+OPENCODE_VERSION	CERASE_AGENT_VERSION
 '
+
+# ── The one row here that is not a credential, and why it belongs anyway ──
+#
+# `OPENCODE_VERSION` named two unrelated things in two files. In
+# `agent-runtime/slot/opencode.pin` it is the opencode RELEASE the slot image
+# bakes, carried with the sha256 of that exact artifact and refused by the build
+# without it. In `.env` it was the GHCR TAG of the slot image, normally
+# `latest`, and nothing connected the two.
+#
+# A reader meets `.env` first. It said `latest`, so the honest conclusion from
+# it -- reached and reported by a careful reader -- was that the opencode
+# version is pinned nowhere. It is pinned, with a digest, in the file they had
+# no reason to open. The conclusion the collision produces is the reassuring
+# direction of wrong, which is the direction that does not get checked.
+#
+# So the `.env` copy takes the name every other image tag in this file already
+# uses, `CERASE_AGENT_VERSION`, beside `CERASE_ACP_VERSION` and
+# `CERASE_CONTROL_PLANE_VERSION`. `OPENCODE_VERSION` keeps its one real meaning
+# in the pin file, where the digest beside it says what it is.
+#
+# It rides this table rather than a one-off sed for the reason the header gives:
+# the four consumers must not be able to disagree, and an operator's live `.env`
+# has to be migrated by the tool rather than by hand. The two properties that
+# matter here are the same two the credentials get -- `_load_env_file` dies on
+# the old spelling, and `_converge_secret_names` rewrites an existing file in
+# place before anything reads it.
 
 # Every OLD spelling, one per line.
 _cerase_rename_old_names() {
