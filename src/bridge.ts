@@ -326,6 +326,16 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         // container's workspace and send it as a channel attachment, never
         // showing the raw marker. Container name follows the cerase-<id>
         // convention (agents.yaml id `agent-1` → container `cerase-agent-1`).
+        // The files this reply carries, held until the sentence introducing
+        // them has been sent. Uploading first put the file ABOVE the words
+        // "here it is", so a reader met a bare attachment and then the
+        // explanation for it. The text cannot simply be sent here instead:
+        // every filter below it -- the internal-summary suppression, the
+        // engine-identity redaction, the tool-call stripping -- runs after this
+        // point, and sending ahead of them would put unredacted text in the
+        // chat. So the upload moves down rather than the text moving up.
+        let deliverAttachments = async (): Promise<void> => {};
+
         if (hasAttachments(text)) {
           const parsed = parseAttachments(text);
           const containerName = `cerase-${agentId}`;
@@ -340,40 +350,47 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // the chat is read by the person, and until it was recorded nothing
           // else in the process knew the file had not gone.
           const lang = turnMeta.languageFor(agentId, userId);
-          for (const relPath of parsed.attachments) {
-            const fileName = displayFileName(relPath);
-            try {
-              const file = await readAgentWorkspaceFile(containerName, relPath);
-              if (adapter.sendFile) {
-                const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
-                if (!fileResult.ok) {
-                  logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
-                  await inner(attachmentFailedNotice(file.name, lang));
+          const relPaths = parsed.attachments;
+          deliverAttachments = async () => {
+            for (const relPath of relPaths) {
+              const fileName = displayFileName(relPath);
+              try {
+                const file = await readAgentWorkspaceFile(containerName, relPath);
+                if (adapter.sendFile) {
+                  const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
+                  if (!fileResult.ok) {
+                    logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
+                    await inner(attachmentFailedNotice(file.name, lang));
+                    attachOutcomes.record(agentId, userId, {
+                      fileName: file.name,
+                      reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
+                    });
+                  }
+                } else {
+                  await inner(attachmentsUnsupportedNotice(file.name, lang));
                   attachOutcomes.record(agentId, userId, {
                     fileName: file.name,
-                    reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
+                    reason: "this channel cannot carry attachments at all",
                   });
                 }
-              } else {
-                await inner(attachmentsUnsupportedNotice(file.name, lang));
+              } catch (err) {
+                logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
+                await inner(attachmentUnreadableNotice(fileName, lang));
                 attachOutcomes.record(agentId, userId, {
-                  fileName: file.name,
-                  reason: "this channel cannot carry attachments at all",
+                  fileName,
+                  reason: err instanceof Error ? err.message : String(err),
                 });
               }
-            } catch (err) {
-              logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
-              await inner(attachmentUnreadableNotice(fileName, lang));
-              attachOutcomes.record(agentId, userId, {
-                fileName,
-                reason: err instanceof Error ? err.message : String(err),
-              });
             }
-          }
+          };
           text = parsed.text;
           // If the reply was only the marker, don't send an empty message —
-          // the attachment(s) were the whole reply, handled best-effort above.
-          if (!text) return { ok: true };
+          // the attachment(s) are the whole reply, and nothing introduces them.
+          if (!text) {
+            await deliverAttachments();
+
+            return { ok: true };
+          }
         }
         // The engine's internal context-compaction summary block (session
         // state / next actions / workspace paths, and any masked PII token
@@ -392,6 +409,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
               logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
             });
           }
+          await deliverAttachments();
+
           return { ok: true };
         }
         // Deterministic engine-identity redaction, the last step before the
@@ -404,9 +423,17 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         text = stripToolCallArtifacts(text);
         if (!text.trim()) {
           logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
+          await deliverAttachments();
+
           return { ok: true };
         }
-        return inner(text);
+        const textResult = await inner(text);
+        // After the text, always. A failed text send does not withhold the
+        // file: the file is the deliverable, and its own failure has its own
+        // notice.
+        await deliverAttachments();
+
+        return textResult;
       };
     },
   });
