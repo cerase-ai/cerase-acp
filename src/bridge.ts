@@ -20,6 +20,7 @@ import {
   fetchPendingApprovalLink,
   needsApprovalLink,
 } from "./approval-link.js";
+import { AttachOutcomeTracker } from "./attach-outcome.js";
 import { hasAttachments, parseAttachments } from "./attachment.js";
 import { type ChatAdapter, createChatAdapter, type DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
@@ -224,6 +225,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
 
   const sessionManager = new SessionManager(config);
   const turnMeta = new TurnMetaTracker();
+  // Shared by the send path (which records) and the production dispatcher
+  // (which reads at the end of the turn). Only the production dispatcher has
+  // an attach path to record from.
+  const attachOutcomes = new AttachOutcomeTracker();
 
   // Two dispatchers share SessionManager + TurnMetaTracker but differ
   // in send-target: the discord one routes replies back to a DM
@@ -254,6 +259,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     config,
     sessionManager,
     turnMeta,
+    attachOutcomes,
     // Proactive out-of-credits gate. Wired only when the
     // control-plane internal bearer is configured (same secret as
     // session-summary; without it there's nothing to authenticate with).
@@ -328,6 +334,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // explicit that it must not claim delivery. That makes THIS the only
           // place the reader can learn an attachment did not arrive, and a
           // silent log left them with a reply promising a file and no file.
+          //
+          // Every failure below is also recorded against the turn, which is
+          // what stops the same turn from closing as a success: a notice in
+          // the chat is read by the person, and until it was recorded nothing
+          // else in the process knew the file had not gone.
           const lang = turnMeta.languageFor(agentId, userId);
           for (const relPath of parsed.attachments) {
             const fileName = displayFileName(relPath);
@@ -338,13 +349,25 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
                 if (!fileResult.ok) {
                   logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
                   await inner(attachmentFailedNotice(file.name, lang));
+                  attachOutcomes.record(agentId, userId, {
+                    fileName: file.name,
+                    reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
+                  });
                 }
               } else {
                 await inner(attachmentsUnsupportedNotice(file.name, lang));
+                attachOutcomes.record(agentId, userId, {
+                  fileName: file.name,
+                  reason: "this channel cannot carry attachments at all",
+                });
               }
             } catch (err) {
               logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
               await inner(attachmentUnreadableNotice(fileName, lang));
+              attachOutcomes.record(agentId, userId, {
+                fileName,
+                reason: err instanceof Error ? err.message : String(err),
+              });
             }
           }
           text = parsed.text;

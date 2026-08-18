@@ -381,3 +381,101 @@ describe("runBridge", () => {
     expect(adapters.every((a) => a.stopCalls === 1)).toBe(true);
   });
 });
+
+// The reply that shipped carried a real attach marker and a closing sentence
+// claiming the work was delivered, in one message. This drives the whole path
+// the appliance runs -- production dispatcher, real ACP child over stdio, the
+// real workspace read against a real docker daemon, the real internal status
+// surface. Only the chat transport is faked, which is also the one thing a
+// test cannot own.
+describe("an attach that never arrives cannot close as a delivered turn", () => {
+  let handle: RunBridgeHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  const REPLY =
+    "Fatto, Paolo. Tre slide sul progetto Falco, renderizzate in PDF. [[attach: outputs/falco-presentation.PDF]]";
+
+  it("posts the failure notice, never uploads, and records the turn as failed", async () => {
+    const SECRET = "attach-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+
+    // The container the bridge derives from this agent id does not exist, so
+    // the workspace read fails the way it failed on the box: a real docker
+    // exec answered by a real daemon, not a rejection a stub decided on.
+    const cfg: BridgeConfig = {
+      agents: [
+        {
+          id: "attach-probe",
+          bot_token: "irrelevant",
+          allowed_users: ["111"],
+          spawn: { command: "env", args: ["--", `FAKE_REPLY=${REPLY}`, "node", FAKE_CHILD] },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    };
+
+    const chat: string[] = [];
+    let sendFileCalls = 0;
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        a.sendFile = async () => {
+          sendFileCalls += 1;
+          return { ok: true };
+        };
+        return a;
+      },
+    });
+    expect(handle.internalUrl).toBeDefined();
+
+    const res = await fetch(`${handle.internalUrl}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify({ agent_id: "attach-probe", user_id: "111", text: "ciao", surface_in_chat: false }),
+    });
+    expect(res.status).toBe(202);
+
+    // The turn is recorded as a failure, not as one more delivered inject.
+    await vi.waitFor(
+      async () => {
+        const s = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        expect(s.status).toBe(200);
+        const body = (await s.json()) as {
+          inject: { in_flight: number; succeeded: number; failed: number; last_failure: { agent_id: string } | null };
+        };
+        expect(body.inject.in_flight).toBe(0);
+        expect(body.inject.failed).toBe(1);
+        expect(body.inject.succeeded).toBe(0);
+        expect(body.inject.last_failure?.agent_id).toBe("attach-probe");
+      },
+      { timeout: 8000, interval: 100 },
+    );
+
+    const transcript = chat.join("\n");
+    // The person is told the file did not arrive, in the language of the
+    // conversation and by the file's name rather than its workspace path.
+    expect(transcript).toMatch(/Non sono riuscita a recuperare falco-presentation\.PDF/);
+    expect(transcript).not.toContain("outputs/falco-presentation");
+    // Nothing was uploaded: the file could not be read at all.
+    expect(sendFileCalls).toBe(0);
+    // One injected message, two model replies: the assistant was prompted a
+    // second time on the same session, which is where it is told what did not
+    // arrive. What it is told is asserted on the prompt itself in the
+    // dispatcher suite; here the point is that the second turn happens at all.
+    expect(chat.filter((c) => c.includes("Tre slide sul progetto Falco")).length).toBe(2);
+  });
+});

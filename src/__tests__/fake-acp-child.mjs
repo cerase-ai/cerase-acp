@@ -20,6 +20,11 @@
 //                              continue streaming after end_turn.
 //   FAKE_LATE_BURST_INTERVAL_MS — ms between successive late-burst
 //                              chunks (default 100).
+//   FAKE_ECHO_PROMPT        — set to "1" to reply with the prompt text the
+//                              parent sent instead of FAKE_REPLY. The only
+//                              way a test can read what the bridge told the
+//                              assistant, which is what the attach-failure
+//                              correction has to be checked on.
 //   FAKE_MESSAGE_ID         — when set, attach this messageId to every
 //                              agent_message_chunk / agent_thought_chunk
 //                              update. Production opencode-acp always
@@ -42,6 +47,7 @@ const UPDATE_KIND = KIND === "thought" ? "agent_thought_chunk" : "agent_message_
 const LATE_BURST_TEXT = process.env.FAKE_LATE_BURST_TEXT;
 const LATE_BURST_INTERVAL_MS = parseInt(process.env.FAKE_LATE_BURST_INTERVAL_MS ?? "100", 10);
 const MESSAGE_ID = process.env.FAKE_MESSAGE_ID;
+const ECHO_PROMPT = process.env.FAKE_ECHO_PROMPT === "1";
 // Session resume. Off by default so every existing test keeps exercising the
 // cold-start path; the real slot answers true (measured against the running
 // binary, which also offers close/fork/list/resume).
@@ -132,12 +138,13 @@ rl.on("line", async (line) => {
     // forever).
     if (process.env.FAKE_HANG_PROMPT === "1") return;
     const sessionId = msg.params?.sessionId;
-    // Split REPLY into roughly CHUNKS pieces and emit as session/update
+    // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.
+    const reply = ECHO_PROMPT ? (msg.params?.prompt?.[0]?.text ?? "") : REPLY;
     const pieces = [];
-    const chunkLen = Math.max(1, Math.ceil(REPLY.length / CHUNKS));
-    for (let i = 0; i < REPLY.length; i += chunkLen) {
-      pieces.push(REPLY.slice(i, i + chunkLen));
+    const chunkLen = Math.max(1, Math.ceil(reply.length / CHUNKS));
+    for (let i = 0; i < reply.length; i += chunkLen) {
+      pieces.push(reply.slice(i, i + chunkLen));
     }
     for (const text of pieces) {
       const update = {

@@ -5,6 +5,12 @@
 // `resolveSendTarget` is for.
 
 import { isAllowed } from "./allowlist.js";
+import {
+  type AttachFailure,
+  type AttachOutcomeTracker,
+  attachFailureError,
+  attachFailurePrompt,
+} from "./attach-outcome.js";
 import type { DeliveryResult } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
@@ -45,6 +51,13 @@ export interface DispatcherDeps {
    * process has always produced.
    */
   turnContext?: (agentId: string, userId: string) => Promise<{ clock?: string; lastTurnAt?: number }>;
+  /**
+   * Where the send path records a file that did not reach the person. Optional
+   * for the same reason the two above are: the CLI and test ingresses have no
+   * attach path at all. When it is absent a turn closes exactly as it always
+   * did — when it is wired, a failed upload denies the turn its success.
+   */
+  attachOutcomes?: AttachOutcomeTracker;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -220,6 +233,9 @@ export class Dispatcher {
     let turnError: Error | undefined;
     // The streamed-reply delivery outcome (from the queue).
     let drainResult: DrainResult = { ok: true };
+    // A turn owns the attach outcomes recorded while it streams and nothing an
+    // earlier one left behind.
+    this.deps.attachOutcomes?.begin(agentId, userId);
     try {
       await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
@@ -236,6 +252,9 @@ export class Dispatcher {
       buffer.end();
       drainResult = await queue.drain();
     }
+    // Read once, here, whatever the turn did: an outcome left in the tracker
+    // is an outcome the next turn would inherit.
+    const attachFailures = this.deps.attachOutcomes?.take(agentId, userId) ?? [];
 
     // After any partial output has been flushed, tell the user what
     // happened. Best-effort: a failure here is logged + folded into the
@@ -255,10 +274,52 @@ export class Dispatcher {
     if (failed) {
       return { ok: false, error: turnError ?? new Error("agent turn failed") };
     }
+    // A file the person never received cannot close as a delivered turn. The
+    // assistant wrote its closing sentence before the upload was attempted, so
+    // it is told here what actually happened and given the turn's last word —
+    // and the result is a failure whatever it then writes, because the outcome
+    // must not depend on a second model call going well.
+    if (attachFailures.length > 0) {
+      await this.correctAttachClaim(agentId, userId, send, text, attachFailures);
+      return { ok: false, error: attachFailureError(attachFailures) };
+    }
     if (!deliveryOk) {
       return { ok: false, error: this.deliveryError(drainResult) };
     }
     return { ok: true };
+  }
+
+  /**
+   * Tell the assistant what did not arrive, on the same session and before the
+   * person writes again, and put its correction in the chat.
+   *
+   * Best-effort by design: a correction that itself fails is logged and the
+   * turn is already a failure. An attach the correction asks for is drained
+   * rather than acted on — this is the one place the loop could close on
+   * itself.
+   */
+  private async correctAttachClaim(
+    agentId: string,
+    userId: string,
+    send: SendTarget,
+    text: string,
+    failures: AttachFailure[],
+  ): Promise<void> {
+    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(detectLanguage(text)) });
+    const buffer = new StreamBuffer({ onFlush: (chunk) => queue.enqueue(chunk) });
+    try {
+      await this.deps.sessionManager.prompt(agentId, userId, attachFailurePrompt(failures), (update) => {
+        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+          buffer.push(update.content.text);
+        }
+      });
+    } catch (err) {
+      logger.error({ err, agentId, userId, failures }, "attach: the correction turn itself failed");
+    } finally {
+      buffer.end();
+      await queue.drain();
+      this.deps.attachOutcomes?.take(agentId, userId);
+    }
   }
 
   /**

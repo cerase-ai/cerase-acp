@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { AttachOutcomeTracker } from "./attach-outcome.js";
 import type { BridgeConfig } from "./config.js";
 import {
   Dispatcher,
@@ -365,5 +366,117 @@ describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
     await d.handleMessage("doc-qa", "111", "ping");
     expect(promptCalled).toBe(true);
     expect(sent.join("")).toContain("ok");
+  });
+});
+
+// A file the person never received must not close as a delivered turn, and the
+// assistant must hear what happened while the conversation is still about it.
+// Driven against the real SessionManager and a real ACP child over stdio,
+// because the send target and the model are the two halves whose disagreement
+// is the whole defect -- a stubbed prompt() cannot show what the assistant was
+// told.
+describe("a failed attach denies the turn its success", () => {
+  let mgr: SessionManager | undefined;
+
+  afterEach(async () => {
+    if (mgr) await mgr.shutdown();
+    mgr = undefined;
+  });
+
+  // The child answers with the prompt it received, so the chat transcript
+  // contains, verbatim, what the bridge told the assistant.
+  function echoConfig(): BridgeConfig {
+    return {
+      agents: [
+        {
+          id: "doc-qa",
+          bot_token: "irrelevant",
+          allowed_users: ["111"],
+          spawn: { command: "env", args: ["--", "FAKE_ECHO_PROMPT=1", "node", FAKE_CHILD] },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    };
+  }
+
+  it("reports the turn as failed and tells the assistant which file did not arrive", async () => {
+    const cfg = echoConfig();
+    mgr = new SessionManager(cfg);
+    const outcomes = new AttachOutcomeTracker();
+    const sent: string[] = [];
+    let recorded = false;
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: mgr,
+      turnMeta: new TurnMetaTracker(),
+      attachOutcomes: outcomes,
+      // Stands in for the bridge's send path, which is where the upload is
+      // attempted and where the failure is recorded.
+      resolveSendTarget: (agentId, userId) => async (text) => {
+        sent.push(text);
+        if (!recorded) {
+          recorded = true;
+          outcomes.record(agentId, userId, {
+            fileName: "falco-presentation.pdf",
+            reason: "ambiguous workspace path",
+          });
+        }
+        return { ok: true };
+      },
+    });
+
+    const result = await d.handleMessage("doc-qa", "111", "fammi il deck sul progetto Falco");
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error.message).toContain("falco-presentation.pdf");
+
+    const joined = sent.join("");
+    expect(joined).toContain("[attach_result: failed]");
+    expect(joined).toContain("falco-presentation.pdf: ambiguous workspace path");
+    expect(joined).toMatch(/Do not claim delivery/);
+  });
+
+  it("a turn whose attachments all arrived is unaffected", async () => {
+    const cfg = echoConfig();
+    mgr = new SessionManager(cfg);
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: mgr,
+      turnMeta: new TurnMetaTracker(),
+      attachOutcomes: new AttachOutcomeTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+
+    await expect(d.handleMessage("doc-qa", "111", "ciao")).resolves.toEqual({ ok: true });
+    expect(sent.join("")).not.toContain("[attach_result: failed]");
+  });
+
+  it("an attach the correction itself asks for does not trigger a second correction", async () => {
+    const cfg = echoConfig();
+    mgr = new SessionManager(cfg);
+    const outcomes = new AttachOutcomeTracker();
+    const sent: string[] = [];
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: mgr,
+      turnMeta: new TurnMetaTracker(),
+      attachOutcomes: outcomes,
+      // Every send records a failure: the shape of an assistant that keeps
+      // re-attaching a file it cannot deliver.
+      resolveSendTarget: (agentId, userId) => async (text) => {
+        sent.push(text);
+        outcomes.record(agentId, userId, { fileName: "deck.pdf", reason: "workspace file not found" });
+        return { ok: true };
+      },
+    });
+
+    const result = await d.handleMessage("doc-qa", "111", "il deck");
+    expect(result.ok).toBe(false);
+    // Exactly one correction: the turn ends rather than looping on itself.
+    expect(sent.filter((s) => s.includes("[attach_result: failed]")).length).toBe(1);
+    expect(outcomes.take("doc-qa", "111")).toEqual([]);
   });
 });
