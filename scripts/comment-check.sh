@@ -163,11 +163,34 @@ for f in "${CHANGED[@]}"; do
     done
   }
 
-  _collect < <(grep -nE "$LINE_RE" "$f" 2>/dev/null || true)
+  # The CONTENT comes from the commit, not from the working tree, and the two
+  # are different objects on a developer's machine.
+  #
+  # This guard picked its file list from `git diff MERGE_BASE...HEAD` — the
+  # commits — and then read each file with grep, which reads whatever is on
+  # disk. So a correction that had been written and `git add`-ed but not
+  # committed satisfied it, the push was allowed, and CI failed on the same two
+  # lines the local hook had just approved. On a runner the checkout IS HEAD and
+  # the two agree, which is exactly why it survived: the difference is invisible
+  # in the only place the check was ever watched.
+  #
+  # A missing blob is not a pass: a path in the diff that HEAD cannot produce
+  # means the assumption behind this whole function is wrong, and it says so.
+  # Not `local`: this runs in a for-loop at file scope, not in a function, and
+  # `local` there fails with a message while leaving the variable UNSET — which
+  # made the grep below read an empty string and the guard pass on everything.
+  # The first version of this very fix shipped that way and was caught by
+  # falsifying it rather than by reading it.
+  blob="$(git show "HEAD:$f" 2>/dev/null)" || {
+    printf 'comment-check: cannot read %s at HEAD — the file list and the content disagree\n' "$f" >&2
+    exit 1
+  }
+
+  _collect < <(printf '%s\n' "$blob" | grep -nE "$LINE_RE" 2>/dev/null || true)
 
   case "$f" in
     *.php|*.js|*.jsx|*.ts|*.tsx|*.java|*.go|*.rs)
-      _collect < <(grep -nE "$DOC_RE" "$f" 2>/dev/null || true)
+      _collect < <(printf '%s\n' "$blob" | grep -nE "$DOC_RE" 2>/dev/null || true)
       ;;
     *.py)
       # A Python docstring is a string expression, so no line prefix marks it
