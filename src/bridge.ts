@@ -30,7 +30,7 @@ import { type CredentialRejection, classifyCredentialRejection } from "./credent
 import { checkTenantCredit } from "./credit-check.js";
 import { Dispatcher } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
-import { type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
+import { type AgentFailure, type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
 import { makeLogger } from "./logger.js";
 import {
   attachmentFailedNotice,
@@ -520,6 +520,28 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     return rejection;
   };
 
+  /**
+   * The `failure` block for one agent, or nothing when it has none. Split out
+   * so the two sources are ordered in one place instead of nested inside the
+   * snapshot literal.
+   */
+  const failureBlockFor = (id: string): { failure?: AgentFailure } => {
+    const rejected = credentialRejections.get(id);
+    if (rejected) return { failure: { kind: "credential_rejected", ...rejected } };
+    const modeMissing = sessionManager.sessionModeFailure(id);
+    if (modeMissing) {
+      return {
+        failure: {
+          kind: "session_mode_missing",
+          mode: modeMissing.requested,
+          available: modeMissing.available,
+          detail: modeMissing.detail,
+        },
+      };
+    }
+    return {};
+  };
+
   // The live per-agent liveness snapshot served by GET /internal/status.
   // Source of truth = the `adapters` map (an agent dropped from agents.yaml
   // is gone from here → the control-plane reads it as "Disconnesso"); the
@@ -533,14 +555,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // Present only for a failure that will not resolve itself, and it names
       // the credential rather than only the symptom: an operator reading this
       // has to know which value to replace, on which agent.
-      ...(credentialRejections.has(id)
-        ? {
-            failure: {
-              kind: "credential_rejected" as const,
-              ...(credentialRejections.get(id) as CredentialRejection),
-            },
-          }
-        : {}),
+      //
+      // A refused credential is reported ahead of a missing session mode when
+      // both are known. The channel is the outer of the two: with it down no
+      // message reaches the assistant at all, so the mode it would have run
+      // under is not what a person should be sent to fix first.
+      ...failureBlockFor(id),
       // An adapter whose start() failed is concretely not-ready — report
       // `false`, never `null`, so the control-plane shows it Disconnesso
       // rather than "stato sconosciuto". Otherwise this was `: true` — a

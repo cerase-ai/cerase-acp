@@ -47,14 +47,41 @@ export interface InternalServer {
  * it. A retry loop against a refused credential looks like recovery in
  * progress and is not, so the stop has to be reported somewhere a person
  * looks; this block is that place.
+ *
+ * Both kinds share `kind` and `detail`, and a reader that shows only the
+ * sentence needs nothing else. The rest of each kind names the thing to
+ * change, because an operator who knows an assistant is down still has to be
+ * told which value to edit and where.
  */
-export interface AgentFailure {
-  /** The only kind so far: the channel provider refused the credential. */
+export type AgentFailure = CredentialRejectedFailure | SessionModeMissingFailure;
+
+/** The channel provider refused this agent's credential. */
+export interface CredentialRejectedFailure {
   kind: "credential_rejected";
   /** The provider's own error code, verbatim. */
   code: string;
   /** Which credential in agents.yaml was refused. Never its value. */
   credential: string;
+  /** One line naming what a person has to do to bring the assistant back. */
+  detail: string;
+}
+
+/**
+ * This agent's slot does not define the session mode its assistant runs
+ * under, so every session for it is refused.
+ *
+ * It is reported beside the credential kind because it is the same situation
+ * for the reader: the assistant answers nothing and no amount of waiting
+ * changes that. It looks different from every other angle, which is why it
+ * needs saying here at all — the channel is connected and `ready` is `true`,
+ * so nothing else in this snapshot is anything but green.
+ */
+export interface SessionModeMissingFailure {
+  kind: "session_mode_missing";
+  /** The mode the bridge asked the slot for. */
+  mode: string;
+  /** The modes the slot does offer. Empty is a legal and informative answer. */
+  available: string[];
   /** One line naming what a person has to do to bring the assistant back. */
   detail: string;
 }

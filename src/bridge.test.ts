@@ -273,6 +273,62 @@ describe("runBridge", () => {
     );
   });
 
+  // A slot that does not define the Cerase mode answers nothing, and looks
+  // fine from every other angle: its channel is connected, `ready` is true,
+  // and no start() ever failed. The status endpoint is where that has to be
+  // legible, or the only trace of a dead assistant is the refusal in a log.
+  it("production mode: a slot missing the Cerase session mode is named on /internal/status", async () => {
+    const cfg = makeConfig();
+    // doc-qa's slot offers modes and not the one the assistant runs under;
+    // policy-qa's offers it. Same bridge, same code path, one difference.
+    cfg.agents[0].spawn = { command: "env", args: ["--", "FAKE_MODES=build,plan", "node", FAKE_CHILD] };
+    cfg.agents[1].spawn = { command: "env", args: ["--", "FAKE_MODES=build,cerase,plan", "node", FAKE_CHILD] };
+    const SECRET = "session-mode-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "ok"),
+    });
+
+    const inject = (agentId: string, userId: string) =>
+      fetch(`${handle?.internalUrl}/internal/inject`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+        body: JSON.stringify({ agent_id: agentId, user_id: userId, text: "ciao", surface_in_chat: false }),
+      });
+
+    expect((await inject("doc-qa", "111")).status).toBe(202);
+    expect((await inject("policy-qa", "222")).status).toBe(202);
+
+    await vi.waitFor(
+      async () => {
+        const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          agents: Array<{
+            id: string;
+            ready: boolean | null;
+            failure?: { kind: string; mode?: string; available?: string[]; detail?: string };
+          }>;
+        };
+        const down = body.agents.find((a) => a.id === "doc-qa");
+        expect(down?.failure?.kind).toBe("session_mode_missing");
+        expect(down?.failure?.mode).toBe("cerase");
+        expect(down?.failure?.available).toEqual(["build", "plan"]);
+        expect(down?.failure?.detail).toBeTruthy();
+        // The agent whose slot has the mode carries no failure block, so a
+        // reader is not shown a fault on every agent the moment one has one.
+        expect(body.agents.find((a) => a.id === "policy-qa")?.failure).toBeUndefined();
+      },
+      { timeout: 8000, interval: 100 },
+    );
+  });
+
   // A transient start() failure must recover on its own: the supervisor
   // retries on a backoff and the agent flips not-ready → ready without a
   // container restart, while the bridge never throws. Mirrors the real

@@ -7,6 +7,13 @@ import { type CanonicalFetcher, defaultEndpointForAgent, defaultFetcher, type Re
 import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { reconcile, type SeenState } from "./reconciler.js";
+import {
+  CERASE_SESSION_MODE,
+  decideSessionMode,
+  type ModeAdvertisement,
+  type SessionModeUnavailable,
+  sessionModeUnavailableDetail,
+} from "./session-mode.js";
 
 const logger = makeLogger("cerase-acp.session-manager");
 
@@ -149,6 +156,11 @@ export class SessionManager {
   // in its own SQLite on a named volume, so the id stays valid across the
   // container's death; the state lives there, not here.
   private resumableSessions = new Map<string, string>();
+  // Agents whose slot does not offer the Cerase mode, so no session for them
+  // can start. Kept here rather than in the caller because this is where the
+  // absence is seen and where the recovery is seen too, and a report that
+  // only ever gets set is a report that outlives the fault it names.
+  private sessionModeFailures = new Map<string, SessionModeUnavailable>();
   private agentsById = new Map<string, AgentConfig>();
   private idleMs: number;
   // session.max_concurrent enforced as a real ceiling (LRU eviction).
@@ -188,6 +200,35 @@ export class SessionManager {
     return this.entries.get(sessionKey(agentId, userId))?.sessionId;
   }
 
+  /**
+   * Why this agent cannot start a session, when the reason is that its slot
+   * does not define the mode the assistant runs under. `undefined` means the
+   * last session for it selected the mode, or that none has been tried yet.
+   *
+   * Read by the bridge's liveness snapshot: an agent in this state has a
+   * connected channel and answers no message, which is the combination that
+   * shows as healthy everywhere else.
+   */
+  sessionModeFailure(agentId: string): SessionModeUnavailable | undefined {
+    return this.sessionModeFailures.get(agentId);
+  }
+
+  /**
+   * Record the missing mode and build the error that refuses the session.
+   * Both callers need the same record and the same sentence, and writing the
+   * sentence twice is how the log and the status endpoint end up describing
+   * one slot in two ways.
+   */
+  private refuseForMissingMode(agentId: string, userId: string, mode: string, available: string[]): Error {
+    const detail = sessionModeUnavailableDetail(mode, available);
+    this.sessionModeFailures.set(agentId, { agentId, requested: mode, available, detail });
+    logger.error(
+      { agentId, userId, mode, available },
+      "the agent slot does not define the session mode this assistant runs under — refusing the session rather than answering as the engine's own agent",
+    );
+    return new Error(detail);
+  }
+
   // ────────────────────────────────────────────────────────────────
   // Hot ops — invoked by ConfigReloader (M-auto-reload v0.2) when
   // `agents.yaml` changes on disk. All four mutate the shared
@@ -222,6 +263,9 @@ export class SessionManager {
     }
     this.killAgentSessions(agentId);
     this.agentsById.delete(agentId);
+    // An id that comes back later is a different agent with the same name,
+    // and must not inherit a verdict on the slot the old one was bound to.
+    this.sessionModeFailures.delete(agentId);
     this.config.agents = this.config.agents.filter((a) => a.id !== agentId);
   }
 
@@ -602,9 +646,13 @@ export class SessionManager {
       const resumeKey = sessionKey(agent.id, userId);
       const previousSessionId = this.resumableSessions.get(resumeKey);
       let resumed: string | undefined;
+      // Whichever of the two calls produced this session also said which
+      // modes it can run in. Both carry the advertisement and only one of
+      // them runs, so it is captured here rather than re-derived later.
+      let advertisement: ModeAdvertisement | undefined;
       if (previousSessionId && init.agentCapabilities?.loadSession) {
         try {
-          await connection.loadSession({
+          advertisement = await connection.loadSession({
             sessionId: previousSessionId,
             cwd: agent.cwd,
             mcpServers: [],
@@ -633,26 +681,59 @@ export class SessionManager {
       if (resumed) {
         sessionId = resumed;
       } else {
-        ({ sessionId } = await connection.newSession({
+        const created = await connection.newSession({
           cwd: agent.cwd,
           mcpServers: [],
-        }));
+        });
+        sessionId = created.sessionId;
+        advertisement = created;
       }
 
-      // Select the de-identified "cerase" primary agent
-      // (opencode.json `agent.cerase`, rendered by control-plane's SlotWriter) so
-      // opencode uses the Cerase base prompt instead of its built-in "You are
-      // opencode…" one. `opencode acp` exposes no `--agent` flag; the ACP way is to
-      // set the session mode (opencode maps its primary agents to session modes).
-      // Best-effort: if the mode is unavailable (older slot render), the session
-      // keeps opencode's default agent rather than failing — a working assistant
-      // beats a dead session.
+      // Select the de-identified Cerase primary agent (the `agent.cerase` entry
+      // the control-plane's SlotWriter renders into the slot's opencode.json)
+      // so opencode uses the Cerase base prompt instead of its built-in one.
+      // `opencode acp` exposes no flag to pick an agent; the ACP way is to set
+      // the session mode, because opencode maps its primary agents to modes.
+      //
+      // The rule is that the session runs under the mode it asked for or it
+      // does not run. Carrying on without it used to look like the forgiving
+      // choice, and it is not: what answers the customer then is opencode's
+      // own agent, a different assistant under this one's name, and the only
+      // trace was a warning line nobody reads. A refused session is at least
+      // a fault someone can act on.
+      //
+      // The absence is a property of the slot, not of the session, so it is
+      // remembered per agent and served on the status endpoint. It is not
+      // cached as a verdict: every turn re-asks, so a slot re-rendered while
+      // the bridge runs starts working again on the next message rather than
+      // after a restart.
+      const decision = decideSessionMode(advertisement, CERASE_SESSION_MODE);
+      if (decision.outcome === "absent") {
+        // The handshake already listed the modes, so the request that could
+        // only come back "mode not found" is never sent.
+        throw this.refuseForMissingMode(agent.id, userId, decision.mode, decision.available);
+      }
       try {
-        await connection.setSessionMode({ sessionId, modeId: "cerase" });
+        await connection.setSessionMode({ sessionId, modeId: decision.mode });
+        this.sessionModeFailures.delete(agent.id);
       } catch (modeErr) {
+        if (decision.outcome === "select") {
+          // The agent listed this mode and then refused it. Whatever that is,
+          // the session is not running the profile it was told it would.
+          logger.error(
+            { err: modeErr, agentId: agent.id, userId, mode: decision.mode },
+            "the agent advertised this session mode and then rejected it — refusing the session",
+          );
+          throw this.refuseForMissingMode(agent.id, userId, decision.mode, decision.available);
+        }
+        // The agent advertised no mode system at all. Nothing in this
+        // deployment can add one to it, so refusing here would only make the
+        // bridge unusable against an agent the protocol allows. Distinct from
+        // a slot that has modes and is missing this one, which is a
+        // configuration defect and is refused above.
         logger.warn(
-          { err: modeErr, agentId: agent.id, userId },
-          "setSessionMode(cerase) failed — session keeps opencode's default agent",
+          { err: modeErr, agentId: agent.id, userId, mode: decision.mode },
+          "the agent advertised no session modes and rejected the request — the session keeps the agent's own default",
         );
       }
     } catch (err) {

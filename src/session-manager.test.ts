@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "./config.js";
 import type { RestEndpoint } from "./opencode-rest.js";
 import type { CanonicalMessage } from "./reconciler.js";
 import { SessionManager, type SpawnFn, type TurnTelemetry } from "./session-manager.js";
+import { CERASE_SESSION_MODE } from "./session-mode.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -18,6 +20,9 @@ function makeConfig(overrides?: {
   messageId?: string;
   loadSession?: boolean;
   loadFails?: boolean;
+  modes?: string;
+  modesShape?: "config" | "modes";
+  echoMode?: boolean;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -28,6 +33,9 @@ function makeConfig(overrides?: {
   if (overrides?.lateBurstIntervalMs !== undefined)
     env.push(`FAKE_LATE_BURST_INTERVAL_MS=${overrides.lateBurstIntervalMs}`);
   if (overrides?.messageId !== undefined) env.push(`FAKE_MESSAGE_ID=${overrides.messageId}`);
+  if (overrides?.modes !== undefined) env.push(`FAKE_MODES=${overrides.modes}`);
+  if (overrides?.modesShape !== undefined) env.push(`FAKE_MODES_SHAPE=${overrides.modesShape}`);
+  if (overrides?.echoMode) env.push("FAKE_ECHO_MODE=1");
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -428,6 +436,102 @@ describe("SessionManager", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("session mode", () => {
+  let mgr: SessionManager;
+
+  afterEach(async () => {
+    if (mgr) await mgr.shutdown();
+  });
+
+  // The mode carries the Cerase profile. A slot rendered without it answers
+  // as opencode's own agent, which is a different assistant wearing the
+  // customer's name, so the session must not start rather than start wrong.
+  it("refuses the session when the handshake advertises modes and the Cerase one is not among them", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "x", modes: "build,plan" }));
+    await expect(mgr.prompt("doc-qa", "user-A", "ciao")).rejects.toThrow(/cerase/i);
+    expect(mgr.activeSessionCount()).toBe(0);
+    // The absence is a property of the slot, so it is answerable for the
+    // agent and not only for the turn that happened to hit it.
+    const failure = mgr.sessionModeFailure("doc-qa");
+    expect(failure).toBeDefined();
+    expect(failure?.agentId).toBe("doc-qa");
+    expect(failure?.requested).toBe(CERASE_SESSION_MODE);
+    expect(failure?.available).toEqual(["build", "plan"]);
+    expect(failure?.detail).toMatch(/re-render/i);
+  });
+
+  // The absent mode is known from the handshake, so the request that cannot
+  // succeed is never sent. Without this the bridge learns the same fact from
+  // an error it caused.
+  it("does not ask for a mode the handshake did not advertise", async () => {
+    const asked: string[] = [];
+    mgr = new SessionManager(makeConfig({ reply: "x", modes: "build,plan" }));
+    const original = acp.ClientSideConnection.prototype.setSessionMode;
+    const spy = vi.spyOn(acp.ClientSideConnection.prototype, "setSessionMode").mockImplementation(async function (
+      this: acp.ClientSideConnection,
+      params: acp.SetSessionModeRequest,
+    ) {
+      asked.push(params.modeId);
+      return original.call(this, params);
+    });
+    try {
+      await expect(mgr.prompt("doc-qa", "user-A", "ciao")).rejects.toThrow(/cerase/i);
+      expect(asked).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The common case, and it has to stay quiet: the mode is advertised, it is
+  // selected, and the session runs under it.
+  it("selects the Cerase mode when the handshake advertises it", async () => {
+    mgr = new SessionManager(makeConfig({ modes: `build,${CERASE_SESSION_MODE},plan`, echoMode: true }));
+    const chunks: string[] = [];
+    const result = await mgr.prompt("doc-qa", "user-A", "ciao", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(result.stopReason).toBe("end_turn");
+    // The fixture answers with the mode it is actually in, so this asserts
+    // the profile the turn ran under rather than that a call was made.
+    expect(chunks.join("")).toBe(CERASE_SESSION_MODE);
+    expect(mgr.sessionModeFailure("doc-qa")).toBeUndefined();
+  });
+
+  // The protocol has two places to advertise modes and opencode uses the
+  // configOptions one. A client that reads only the other is blind to every
+  // agent that does what opencode does, so both are covered end to end.
+  it("reads the advertisement from the modes object as well as from configOptions", async () => {
+    mgr = new SessionManager(
+      makeConfig({ modes: `build,${CERASE_SESSION_MODE}`, modesShape: "modes", echoMode: true }),
+    );
+    const chunks: string[] = [];
+    await mgr.prompt("doc-qa", "user-A", "ciao", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(chunks.join("")).toBe(CERASE_SESSION_MODE);
+  });
+
+  // An agent that advertises no mode system at all is not a misrendered
+  // slot: nothing in this deployment can add a mode to it, and refusing
+  // would make the bridge unusable against an agent the protocol permits.
+  it("keeps the session when the agent advertises no mode system", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "senza modi" }));
+    const chunks: string[] = [];
+    const result = await mgr.prompt("doc-qa", "user-A", "ciao", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(result.stopReason).toBe("end_turn");
+    expect(chunks.join("")).toBe("senza modi");
+    expect(mgr.sessionModeFailure("doc-qa")).toBeUndefined();
   });
 });
 
