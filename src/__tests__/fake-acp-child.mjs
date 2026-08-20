@@ -30,6 +30,25 @@
 //                              update. Production opencode-acp always
 //                              includes a messageId; M16 reconciliation
 //                              needs it to address the canonical record.
+//   FAKE_MODES              — comma-separated session mode ids this agent
+//                              advertises at session/new, and the only ones
+//                              session/set_mode accepts. Unset means the
+//                              agent advertises no mode system at all and
+//                              answers set_mode with "method not found",
+//                              which is what every test that does not care
+//                              about modes exercises.
+//   FAKE_MODES_SHAPE        — where the advertisement is carried. "config"
+//                              (default) puts it in configOptions under the
+//                              mode category, which is what opencode 1.18.18
+//                              sends; "modes" puts it in the spec's own
+//                              modes object. Both are legal ACP and a client
+//                              that reads only one is blind to half the
+//                              agents it can meet.
+//   FAKE_ECHO_MODE          — set to "1" to reply with the session's current
+//                              mode id instead of FAKE_REPLY. The only way a
+//                              test can see which profile the session ended
+//                              up under, which is the whole question a silent
+//                              downgrade hides.
 
 import readline from "node:readline";
 
@@ -53,6 +72,44 @@ const ECHO_PROMPT = process.env.FAKE_ECHO_PROMPT === "1";
 // binary, which also offers close/fork/list/resume).
 const LOAD_SESSION = process.env.FAKE_LOAD_SESSION === "1";
 const LOAD_FAILS = process.env.FAKE_LOAD_FAILS === "1";
+// The advertised session modes. An empty list means the agent has no mode
+// system, which is a different answer from having one that lacks the mode
+// asked for, and the two must not collapse into the same fixture.
+const MODES = (process.env.FAKE_MODES ?? "")
+  .split(",")
+  .map((m) => m.trim())
+  .filter((m) => m.length > 0);
+const MODES_SHAPE = process.env.FAKE_MODES_SHAPE ?? "config";
+const ECHO_MODE = process.env.FAKE_ECHO_MODE === "1";
+
+// The mode this fixture is in. Starts at the first advertised one, the way a
+// real agent starts at its default rather than at nothing.
+let currentMode = MODES[0];
+
+/** The advertisement carried by session/new and session/load. */
+function modeAdvertisement() {
+  if (MODES.length === 0) return {};
+  if (MODES_SHAPE === "modes") {
+    return {
+      modes: {
+        currentModeId: currentMode,
+        availableModes: MODES.map((id) => ({ id, name: id })),
+      },
+    };
+  }
+  return {
+    configOptions: [
+      {
+        id: "mode",
+        name: "Session Mode",
+        category: "mode",
+        type: "select",
+        currentValue: currentMode,
+        options: MODES.map((id) => ({ value: id, name: id })),
+      },
+    ],
+  };
+}
 
 const send = (msg) => {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -107,7 +164,7 @@ rl.on("line", async (line) => {
     send({
       jsonrpc: "2.0",
       id: msg.id,
-      result: { sessionId: `fake-session-cwd=${cwd}#${process.pid}` },
+      result: { sessionId: `fake-session-cwd=${cwd}#${process.pid}`, ...modeAdvertisement() },
     });
     return;
   }
@@ -123,6 +180,33 @@ rl.on("line", async (line) => {
       });
       return;
     }
+    send({ jsonrpc: "2.0", id: msg.id, result: modeAdvertisement() });
+    return;
+  }
+
+  if (msg.method === "session/set_mode") {
+    const wanted = msg.params?.modeId;
+    if (MODES.length === 0) {
+      // No mode system. Answering "method not found" is what an agent that
+      // never implemented session modes replies, and it is the path every
+      // test that says nothing about modes takes.
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32601, message: `Method not found: ${msg.method}` },
+      });
+      return;
+    }
+    if (!MODES.includes(wanted)) {
+      // Verbatim what opencode answers for a mode its config does not define.
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32602, message: `Invalid params: mode not found: ${wanted}`, data: { mode: wanted } },
+      });
+      return;
+    }
+    currentMode = wanted;
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
     return;
   }
@@ -140,7 +224,11 @@ rl.on("line", async (line) => {
     const sessionId = msg.params?.sessionId;
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.
-    const reply = ECHO_PROMPT ? (msg.params?.prompt?.[0]?.text ?? "") : REPLY;
+    const reply = ECHO_MODE
+      ? (currentMode ?? "<no-mode>")
+      : ECHO_PROMPT
+        ? (msg.params?.prompt?.[0]?.text ?? "")
+        : REPLY;
     const pieces = [];
     const chunkLen = Math.max(1, Math.ceil(reply.length / CHUNKS));
     for (let i = 0; i < reply.length; i += chunkLen) {
