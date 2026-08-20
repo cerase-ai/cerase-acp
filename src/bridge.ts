@@ -9,8 +9,12 @@
 //     failed login (e.g. fake bot token in dev) is logged but does NOT
 //     reject runBridge: the test server stays up so the developer can
 //     still talk to the bridge via /_test/inject.
-//   - `bridgeE2eTest: false` (production) → no test server; adapter
-//     starts run in Promise.all; any rejection bubbles up as fail-fast.
+//   - `bridgeE2eTest: false` (production) → no test server; each
+//     adapter.start() runs in its own try/catch too, and one failure
+//     leaves the other channels serving. runBridge rejects in a single
+//     case: no adapter started AND no internal server is configured, so
+//     nothing would be left to report the reason. See the total-failure
+//     block near the end of runBridge.
 
 import { AdapterSupervisor } from "./adapter-supervisor.js";
 import { isAllowed } from "./allowlist.js";
@@ -632,11 +636,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // exactly the crash-loop bug that took the web/maintainer chat down
   // whenever the Discord token was invalid.
   //
-  // Total-failure threshold: in production, throw only when EVERY adapter
-  // failed (started === 0 with adapters present) — that means no working chat
-  // transport at all, a real config/runtime error worth failing fast on so the
-  // orchestrator surfaces it. In test-mode we never throw (the test-injection
-  // server must stay reachable even with all-fake tokens).
+  // What happens when EVERY adapter failed is decided after the loop; see the
+  // total-failure block below. In test-mode nothing is ever thrown (the
+  // test-injection server must stay reachable even with all-fake tokens).
   let started = 0;
   for (const adapter of adapters.values()) {
     try {
@@ -657,21 +659,49 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       supervisor?.scheduleRetry(adapter, err);
     }
   }
-  if (!bridgeE2eTest && adapters.size > 0 && started === 0) {
-    // Total failure: no working transport at all. Fail fast (the orchestrator
-    // restarts the container) — but cancel the self-heal timers first so we
-    // don't leak them on the way out.
-    logger.error({ agentCount: adapters.size }, "every adapter failed to start — no working transport, tearing down");
+  // Total failure: not one adapter came up, so no message reaches any
+  // assistant. What that should do depends on whether anything is listening
+  // to be asked why.
+  //
+  // With the internal server up, staying alive is the better answer. Exiting
+  // took down the only endpoint that could name the refused credential and
+  // handed the orchestrator a container to restart, which restarts into the
+  // same refusal: a crash-loop with no reason attached, which is the failure
+  // shape this bridge reports everywhere else. It also cancelled the retry
+  // timers, so a transient failure — a gateway 5xx, a connect timeout — became
+  // permanent on any box whose adapters all happened to be failing at once. A
+  // box with one assistant is every box in that condition.
+  //
+  // Staying up must not be mistaken for working. The bridge does nothing in
+  // this state, so it declares itself: GET /healthz answers 503 while no
+  // adapter can carry a message (the compose healthcheck reads the status
+  // code, so the container shows unhealthy), and /internal/status carries the
+  // per-agent failure block naming what to fix.
+  //
+  // Without the internal server there is no endpoint and no probe, and a
+  // silent process the orchestrator reads as running says less than a restart
+  // loop does. So that configuration keeps the exit.
+  const noTransport = !bridgeE2eTest && adapters.size > 0 && started === 0;
+  if (noTransport && !internalServer) {
+    logger.error(
+      { agentCount: adapters.size },
+      "every adapter failed to start and no internal endpoint is configured — nothing could report the reason, tearing down",
+    );
     supervisor?.stop();
-    await Promise.allSettled([
-      ...Array.from(adapters.values()).map((a) => a.stop()),
-      internalServer?.close() ?? Promise.resolve(),
-      sessionManager.shutdown(),
-    ]);
+    await Promise.allSettled([...Array.from(adapters.values()).map((a) => a.stop()), sessionManager.shutdown()]);
     throw new Error("all chat adapters failed to start");
   }
+  if (noTransport) {
+    logger.error(
+      { agentCount: adapters.size },
+      "every adapter failed to start — the bridge stays up to report it and carries no chat traffic; /healthz answers 503 and /internal/status names each agent's failure",
+    );
+  }
 
-  logger.info({ agentCount: adapters.size, bridgeE2eTest }, "cerase-acp bridge ready");
+  logger.info(
+    { agentCount: adapters.size, startedCount: started, bridgeE2eTest },
+    noTransport ? "cerase-acp bridge up with no working chat transport" : "cerase-acp bridge ready",
+  );
 
   // M-auto-reload v0.2: watch agents.yaml for live updates.
   // Snapshot the current config so the next reload can compute a diff

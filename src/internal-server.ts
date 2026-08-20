@@ -109,6 +109,24 @@ export interface AgentLiveness {
   failure?: AgentFailure;
 }
 
+/**
+ * Can this bridge carry a message on any channel right now? False when it
+ * holds adapters and every one of them is known to be down.
+ *
+ * `ready: null` counts as serving, not as down: an adapter with no readiness
+ * signal of its own reports it while working normally, and treating unknown
+ * as failed would call a healthy bridge of web agents dead. The verdict is
+ * therefore reserved for adapters that positively report `false`, which is
+ * what a failed start() and a dropped gateway both produce.
+ *
+ * An empty list is serving too. No adapters is a configuration state — an
+ * agents.yaml with no agents in it — and `every` over nothing is true, which
+ * would otherwise make the emptiest bridge the loudest.
+ */
+export function noChatTransport(agents: AgentLiveness[]): boolean {
+  return agents.length > 0 && agents.every((a) => a.ready === false);
+}
+
 export interface InternalServerOptions {
   dispatcher: Dispatcher;
   /** Shared secret required in the Authorization: Bearer header. */
@@ -223,15 +241,24 @@ async function handleRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
 
   // An unauthenticated liveness probe for the compose healthcheck, served
-  // before the shared-secret gate. Returns 200 iff the internal server is
-  // listening, so the container goes unhealthy the moment the bridge's
-  // inject transport is down — unlike the old `node --version` check, which
-  // stayed green all through the crash-loop. It leaks only counts (never
-  // agent identities or secrets), so it needs no bearer.
+  // before the shared-secret gate. Returns 200 when the internal server is
+  // listening AND at least one adapter can carry a message, so the container
+  // goes unhealthy the moment the bridge's inject transport is down — unlike
+  // the old `node --version` check, which stayed green all through the
+  // crash-loop. It leaks only counts (never agent identities or secrets), so
+  // it needs no bearer; which credential was refused is on /internal/status,
+  // behind the bearer, because that names an agent.
   if (req.method === "GET" && url.pathname === "/healthz") {
-    const payload: Record<string, unknown> = { status: "ok" };
-    if (opts.getAgentStatus) {
-      const agents = opts.getAgentStatus();
+    const agents = opts.getAgentStatus ? opts.getAgentStatus() : undefined;
+    // A bridge that holds adapters and cannot use one of them does no work,
+    // and it answers this probe as readily as a working one. Without a verdict
+    // of its own it would report exactly what a healthy bridge reports, and
+    // the operator would see a container that is up and a chat that is silent
+    // with nothing connecting the two. The compose healthcheck reads the
+    // status code, so a 503 is what turns that into an unhealthy container.
+    const serving = !agents || !noChatTransport(agents);
+    const payload: Record<string, unknown> = { status: serving ? "ok" : "no_chat_transport" };
+    if (agents) {
       payload.adapters = agents.length;
       // `ready` is only meaningful for adapters that have a readiness — a web
       // agent reports `ready: null` because there is no connection to be
@@ -248,7 +275,7 @@ async function handleRequest(
       payload.ready = rateable.filter((a) => a.ready === true).length;
       payload.readyOf = rateable.length;
     }
-    sendJson(res, 200, payload);
+    sendJson(res, serving ? 200 : 503, payload);
     return;
   }
 

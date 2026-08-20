@@ -96,8 +96,14 @@ describe("runBridge", () => {
     expect(handle.testInjectionUrl).toBeDefined();
   });
 
-  it("production mode: an adapter login failure rejects runBridge", async () => {
+  // Exiting stays right when nothing would be left to answer for the bridge.
+  // Without the internal secret no internal server is started, so a bridge
+  // that stayed up carrying nothing would be a process the orchestrator reads
+  // as running and no probe contradicts. The restart loop is the only signal
+  // available in that configuration, so take it.
+  it("production mode: every adapter fails and no internal server is configured → runBridge rejects", async () => {
     const cfg = makeConfig();
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", "");
     await expect(
       runBridge({
         config: cfg,
@@ -105,6 +111,115 @@ describe("runBridge", () => {
         createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "fail"),
       }),
     ).rejects.toThrow();
+  });
+
+  // One assistant is the case the total-failure branch got wrong. With no
+  // second adapter to hold the bridge above the threshold, a refused token
+  // tore the internal server down and threw, so the orchestrator restarted a
+  // container whose failure block nobody could read — the same invisible loop
+  // one layer out. The bridge now stays up to answer for itself, and reports
+  // itself un-servable so the container cannot pass for healthy meanwhile.
+  it("production mode: the only adapter's credential is refused → bridge stays up, unhealthy, and names the credential", async () => {
+    const SECRET = "solo-refused-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+
+    const cfg: BridgeConfig = {
+      agents: [{ id: "solo", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } }],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    };
+
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        a.start = async () => {
+          a.startCalls += 1;
+          const err = new Error("An invalid token was provided.") as Error & { code: string };
+          err.code = "TokenInvalid";
+          throw err;
+        };
+        return a;
+      },
+    });
+
+    // Still listening: without this there is nowhere to read the reason.
+    expect(handle.internalUrl).toBeDefined();
+
+    const health = await fetch(`${handle.internalUrl}/healthz`);
+    expect(health.status).toBe(503);
+    expect(await health.json()).toMatchObject({ status: "no_chat_transport" });
+
+    const statusRes = await fetch(`${handle.internalUrl}/internal/status`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    expect(statusRes.status).toBe(200);
+    const status = (await statusRes.json()) as {
+      agents: Array<{ id: string; ready: boolean | null; failure?: { kind: string; credential: string } }>;
+    };
+    expect(status.agents).toHaveLength(1);
+    expect(status.agents[0].ready).toBe(false);
+    expect(status.agents[0].failure?.kind).toBe("credential_rejected");
+    expect(status.agents[0].failure?.credential).toBe("bot_token");
+  });
+
+  // The second thing the exit cost: a one-agent box whose single adapter hit
+  // a transient failure had its retry timer cancelled by the teardown, so a
+  // condition that resolves itself in seconds became a permanent crash-loop.
+  it("production mode: the only adapter fails transiently → bridge stays up un-servable and self-heals to healthy", async () => {
+    vi.useFakeTimers();
+    try {
+      const SECRET = "solo-transient-secret";
+      vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+      vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_BASE_MS", "1000");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "5000");
+
+      const cfg: BridgeConfig = {
+        agents: [{ id: "solo", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } }],
+        session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+      };
+
+      let live = false;
+      let failsLeft = 1;
+      const adapter: FakeAdapter & { ready(): boolean } = {
+        agentId: "solo",
+        startCalls: 0,
+        stopCalls: 0,
+        async start() {
+          adapter.startCalls += 1;
+          if (failsLeft > 0) {
+            failsLeft -= 1;
+            throw new Error("transient login failure for solo");
+          }
+          live = true;
+        },
+        async stop() {
+          adapter.stopCalls += 1;
+          live = false;
+        },
+        ready: () => live,
+        makeSendTarget: () => async () => ({ ok: true }),
+      };
+
+      handle = await runBridge({
+        config: cfg,
+        bridgeE2eTest: false,
+        createAdapter: async () => adapter,
+      });
+
+      expect(adapter.startCalls).toBe(1);
+      expect((await fetch(`${handle.internalUrl}/healthz`)).status).toBe(503);
+
+      // Past the jittered backoff the supervisor retries; the timer survived
+      // because nothing tore the bridge down.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(adapter.startCalls).toBe(2);
+      expect((await fetch(`${handle.internalUrl}/healthz`)).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("production mode: one adapter fails, one succeeds → bridge stays up, status truthful, inject works", async () => {

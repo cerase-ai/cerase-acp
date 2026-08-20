@@ -545,6 +545,75 @@ describe("internal-server /healthz (M-ACP-HEALTHCHECK-1)", () => {
     const status = await fetch(`${base}/internal/status`);
     expect(status.status).toBe(401);
   });
+
+  // A bridge holding adapters of which not one can carry a message does no
+  // work. It answers this probe, so without a verdict of its own it reports
+  // exactly what a healthy bridge reports, and the container reads as fine.
+  it("every adapter un-ready → 503, so a bridge carrying no chat traffic cannot read as healthy", async () => {
+    await server.close();
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [
+        { id: "d1", channel: "discord", attached: true, ready: false },
+        { id: "d2", channel: "discord", attached: true, ready: false },
+      ],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    const resp = await fetch(`${base}/healthz`);
+    expect(resp.status).toBe(503);
+    const body = (await resp.json()) as { status: string; adapters?: number; ready?: number };
+    expect(body.status).toBe("no_chat_transport");
+    // The counts stay, so the probe still says how much is down.
+    expect(body.adapters).toBe(2);
+    expect(body.ready).toBe(0);
+  });
+
+  it("one adapter with no readiness signal among un-ready ones keeps the bridge healthy", async () => {
+    // Non-vacuity for the verdict above. A web agent reports `ready: null`
+    // because it has no connection to be ready, and it carries traffic; the
+    // 503 must be reserved for a bridge where every adapter is known down.
+    await server.close();
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [
+        { id: "web", channel: "web", attached: true, ready: null },
+        { id: "d1", channel: "discord", attached: true, ready: false },
+      ],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    const resp = await fetch(`${base}/healthz`);
+    expect(resp.status).toBe(200);
+    expect((await resp.json()) as { status: string }).toMatchObject({ status: "ok" });
+  });
+
+  it("a bridge with no adapters at all is not reported as un-servable", async () => {
+    // An empty agents.yaml is a configuration state, not a transport failure,
+    // and `every` over an empty list is true — which would have made the
+    // emptiest possible bridge the loudest.
+    await server.close();
+    const fake = makeFakeDispatcher();
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      getAgentStatus: () => [],
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    const resp = await fetch(`${base}/healthz`);
+    expect(resp.status).toBe(200);
+  });
 });
 
 // The inject endpoint must not deliver text to an arbitrary user on an
