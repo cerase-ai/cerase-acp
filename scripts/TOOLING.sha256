@@ -3,6 +3,6 @@
 # The first divergence between two copies is otherwise silent.
 078ced3cdb793c9563d64343f1d501bc43c0ba15e031bb8e8bf3770ba085cc0b  scripts/docs-parity.sh
 797914ea702f35ba095566448dfd5eecbb4e805c30981c96c75783a2366ff800  scripts/secrets-guard.sh
-a359b47bf653a6b905b7d5cdad6132c44b15ee0306299ea6b6dc004bfff8b260  scripts/_secret_renames.sh
+55d5ac7234da628e1cef4b3ec247f5b080c7180fc70f43af8a49f592c048c400  scripts/_secret_renames.sh
 0d48207f7f32c170d0fc16d9b26bd808c90641d99b7c9080d1ad13133e1c935e  scripts/comment-check.sh
 ec18b3bda3b4e8109c49f4f80e1f77119a6f42cc41537bf59d5a41d083b561e0  scripts/_registry_images.sh

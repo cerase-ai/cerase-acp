@@ -61,6 +61,7 @@ FLEET_ROUTE53_ZONE_ID	CERASE_ROUTE53_ZONE_TENANTS
 ROUTE53_ZONE_CERASE_EMAIL	CERASE_ROUTE53_ZONE_MAIL
 FLEET_ROUTE53_ZONE_CERASE_EMAIL	CERASE_ROUTE53_ZONE_MAIL
 OPENROUTER_PROVISIONING_KEY	CERASE_OPENROUTER_MGMT_KEY
+OPENROUTER_PER_USER_USD	-	retired
 OPENROUTER_WORKSPACE_ID	CERASE_OPENROUTER_WORKSPACE_ID
 BACKUP_S3_ENDPOINT	CERASE_BACKUP_S3_ENDPOINT
 BACKUP_S3_ACCESS_KEY	CERASE_BACKUP_S3_ACCESS_KEY
@@ -114,7 +115,22 @@ _cerase_rename_old_names() {
 
 # Every NEW spelling, deduplicated — two old names can map to one new one.
 _cerase_rename_new_names() {
-    printf '%s' "$_CERASE_SECRET_RENAMES" | awk -F'\t' 'NF>=2 {print $2}' | sort -u
+    printf '%s' "$_CERASE_SECRET_RENAMES" | awk -F'\t' 'NF>=2 && $2!="-" {print $2}' | sort -u
+}
+
+# Whether an old name is RETIRED WITH NO SUCCESSOR, written as `-` in the
+# second column.
+#
+# The table could only ever rename, so a name whose value has no replacement
+# was unreachable by it: `OPENROUTER_PER_USER_USD` outlived the last thing that
+# read it and sat in the management plane's env file for weeks, correctly left
+# alone by a converge that had no way to express "this one goes".
+#
+# The sentinel is a hyphen rather than an empty field because a trailing tab is
+# invisible in a diff and awk cannot tell it from a two-column row.
+_cerase_rename_is_retired() {   # <old-name>
+    printf '%s' "$_CERASE_SECRET_RENAMES" \
+        | awk -F'\t' -v want="${1:-}" 'NF>=2 && $1==want && $2=="-" {found=1} END {exit !found}'
 }
 
 # Every NEW spelling that names a CREDENTIAL, deduplicated.
@@ -172,6 +188,13 @@ _converge_secret_names() {   # <env-file>
     # Anchored at the start of a line and followed by `=`: a VALUE mentioning
     # the old name (a comment, a URL) is not a key and must not be rewritten.
     grep -q "^${old}=" "$f" || continue
+    if _cerase_rename_is_retired "$old"; then
+      # No successor, so there is nothing to rename it to. The line goes, and
+      # the backup taken below is what makes that safe to do in place.
+      sedargs+=(-e "/^${old}=/d")
+      hits=$((hits + 1))
+      continue
+    fi
     new="$(_cerase_rename_for "$old")"
     [ -n "$new" ] || continue
     sedargs+=(-e "s|^${old}=|${new}=|")
