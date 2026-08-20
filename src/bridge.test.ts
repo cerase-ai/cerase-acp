@@ -150,6 +150,66 @@ describe("runBridge", () => {
     expect(injectRes.status).toBe(202);
   });
 
+  // A token the provider refuses will not start working, so the retry loop
+  // that used to run against it hid a dead assistant instead of reporting
+  // one. The bridge must stop retrying and say on /internal/status which
+  // agent is down and which credential was refused.
+  it("production mode: a rejected Discord token stops the retries and is named on /internal/status", async () => {
+    const cfg = makeConfig();
+    const SECRET = "rejected-credential-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    // A backoff short enough that the unfixed loop would fire several times
+    // inside this test's wait, and slow enough not to be flaky.
+    vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_BASE_MS", "20");
+    vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "20");
+
+    const made: Record<string, FakeAdapter> = {};
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, agent.id === "doc-qa" ? "fail" : "ok");
+        if (agent.id === "doc-qa") {
+          a.start = async () => {
+            a.startCalls += 1;
+            const err = new Error("An invalid token was provided.") as Error & { code: string };
+            err.code = "TokenInvalid";
+            throw err;
+          };
+        }
+        made[agent.id] = a;
+        return a;
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    // One attempt, and no retry after it.
+    expect(made["doc-qa"].startCalls).toBe(1);
+
+    const statusRes = await fetch(`${handle.internalUrl}/internal/status`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    expect(statusRes.status).toBe(200);
+    const status = (await statusRes.json()) as {
+      agents: Array<{
+        id: string;
+        ready: boolean | null;
+        failure?: { kind: string; code: string; credential: string; detail: string };
+      }>;
+    };
+    const down = status.agents.find((a) => a.id === "doc-qa");
+    expect(down?.ready).toBe(false);
+    expect(down?.failure).toBeDefined();
+    expect(down?.failure?.kind).toBe("credential_rejected");
+    expect(down?.failure?.code).toBe("TokenInvalid");
+    expect(down?.failure?.credential).toBe("bot_token");
+    expect(down?.failure?.detail).toBeTruthy();
+
+    // The healthy agent carries no failure block.
+    expect(status.agents.find((a) => a.id === "policy-qa")?.failure).toBeUndefined();
+  });
+
   // /internal/inject acks 202 at acceptance (validation + allowlist) and runs
   // the turn detached, so a slow model turn no longer trips the
   // control-plane's fire-and-forget timeout. A swallowed turn/delivery

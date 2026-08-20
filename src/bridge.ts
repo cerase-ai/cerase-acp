@@ -26,6 +26,7 @@ import { type ChatAdapter, createChatAdapter, type DeliveryResult } from "./chat
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { type ConfigDiff, diffConfigs } from "./config-diff.js";
 import { ConfigReloader } from "./config-reloader.js";
+import { type CredentialRejection, classifyCredentialRejection } from "./credential-rejection.js";
 import { checkTenantCredit } from "./credit-check.js";
 import { Dispatcher } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
@@ -91,6 +92,15 @@ export interface ApplyConfigDiffDeps {
   adapters: Map<string, ChatAdapter>;
   createAdapter: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
   dispatcher: Dispatcher;
+  /**
+   * Called after every adapter this reload (re)started, with the failure or
+   * `undefined` on success, so the liveness snapshot sees a reloaded agent
+   * exactly as it sees one started at boot. Without it an operator who fixes
+   * a refused token in agents.yaml gets a working assistant that
+   * /internal/status still reports as refused. Optional so the existing unit
+   * tests can drive applyConfigDiff without wiring the whole bridge.
+   */
+  recordStartOutcome?: (agentId: string, err?: unknown) => void;
 }
 
 /**
@@ -180,8 +190,10 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
         deps.adapters.set(mod.agentId, adapter);
         try {
           await adapter.start();
+          deps.recordStartOutcome?.(mod.agentId);
           logger.info({ agentId: mod.agentId, classification: mod.classification }, "auto-reload: agent respawned");
         } catch (err) {
+          deps.recordStartOutcome?.(mod.agentId, err);
           logger.error(
             { err, agentId: mod.agentId },
             "auto-reload: respawned adapter.start() failed — agent will not receive DMs",
@@ -200,8 +212,10 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
     deps.adapters.set(agent.id, adapter);
     try {
       await adapter.start();
+      deps.recordStartOutcome?.(agent.id);
       logger.info({ agentId: agent.id }, "auto-reload: new agent attached");
     } catch (err) {
+      deps.recordStartOutcome?.(agent.id, err);
       logger.error({ err, agentId: agent.id }, "auto-reload: new adapter.start() failed — agent will not receive DMs");
     }
   }
@@ -449,6 +463,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // successful (re)start.
   const startFailures = new Set<string>();
 
+  // agentIds whose channel provider refused their credential. Distinct from
+  // startFailures, which holds every kind of failed start: this set is the
+  // subset nothing is retrying, because no amount of retrying changes a
+  // provider's verdict on a credential. It is what /internal/status reports so
+  // the stop is visible; a terminal state nobody can see would replace one
+  // invisible failure with another.
+  const credentialRejections = new Map<string, CredentialRejection>();
+
   // Retry a failed channel adapter on a capped, jittered backoff until it
   // connects (no container restart). Production only: in BRIDGE_E2E_TEST mode
   // background retries would interfere with the deterministic test path.
@@ -459,9 +481,44 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     : new AdapterSupervisor({
         baseDelayMs: Number(process.env.CERASE_ACP_ADAPTER_RETRY_BASE_MS ?? "5000"),
         maxDelayMs: Number(process.env.CERASE_ACP_ADAPTER_RETRY_MAX_MS ?? "300000"),
-        onRecovered: (agentId) => startFailures.delete(agentId),
+        onRecovered: (agentId) => {
+          startFailures.delete(agentId);
+          credentialRejections.delete(agentId);
+        },
         onStillFailing: (agentId) => startFailures.add(agentId),
+        onTerminal: (agentId, rejection) => {
+          startFailures.add(agentId);
+          credentialRejections.set(agentId, rejection);
+        },
       });
+
+  /**
+   * Fold one adapter start outcome into the liveness snapshot. Called from the
+   * boot loop and, through applyConfigDiff, from every reload, so the two
+   * paths cannot drift into reporting the same agent differently. Returns the
+   * refusal when the failure was final, which is how the caller knows not to
+   * schedule a retry.
+   */
+  const recordStartOutcome = (agentId: string, err?: unknown): CredentialRejection | undefined => {
+    if (err === undefined) {
+      startFailures.delete(agentId);
+      credentialRejections.delete(agentId);
+      supervisor?.noteStarted(agentId);
+      return undefined;
+    }
+    startFailures.add(agentId);
+    const rejection = classifyCredentialRejection(err);
+    if (!rejection) {
+      credentialRejections.delete(agentId);
+      return undefined;
+    }
+    credentialRejections.set(agentId, rejection);
+    logger.error(
+      { agentId, code: rejection.code, credential: rejection.credential, detail: rejection.detail },
+      "adapter.start() failed: the channel provider refused this agent's credential — not retrying, this assistant is DOWN until the credential is fixed",
+    );
+    return rejection;
+  };
 
   // The live per-agent liveness snapshot served by GET /internal/status.
   // Source of truth = the `adapters` map (an agent dropped from agents.yaml
@@ -473,6 +530,17 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       id,
       channel: config.agents.find((a) => a.id === id)?.channel ?? "unknown",
       attached: true,
+      // Present only for a failure that will not resolve itself, and it names
+      // the credential rather than only the symptom: an operator reading this
+      // has to know which value to replace, on which agent.
+      ...(credentialRejections.has(id)
+        ? {
+            failure: {
+              kind: "credential_rejected" as const,
+              ...(credentialRejections.get(id) as CredentialRejection),
+            },
+          }
+        : {}),
       // An adapter whose start() failed is concretely not-ready — report
       // `false`, never `null`, so the control-plane shows it Disconnesso
       // rather than "stato sconosciuto". Otherwise this was `: true` — a
@@ -553,17 +621,20 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   for (const adapter of adapters.values()) {
     try {
       await adapter.start();
-      startFailures.delete(adapter.agentId);
+      recordStartOutcome(adapter.agentId);
       started += 1;
     } catch (err) {
-      startFailures.add(adapter.agentId);
+      const rejection = recordStartOutcome(adapter.agentId, err);
+      if (rejection) continue;
       logger.error(
         { err, agentId: adapter.agentId },
         "adapter.start() failed — this channel is DOWN; other channels stay up",
       );
       // Schedule a backoff retry so a transient failure (fixed token,
-      // Cloudflare ConnectTimeoutError) recovers itself.
-      supervisor?.scheduleRetry(adapter);
+      // Cloudflare ConnectTimeoutError) recovers itself. A refused credential
+      // took the `continue` above: it has already been recorded as terminal,
+      // and retrying it would only re-ask a question already answered.
+      supervisor?.scheduleRetry(adapter, err);
     }
   }
   if (!bridgeE2eTest && adapters.size > 0 && started === 0) {
@@ -611,6 +682,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         adapters,
         createAdapter,
         dispatcher: productionDispatcher,
+        recordStartOutcome,
       })
         .then(() => {
           currentSnapshot = cloneConfig(nextConfig);

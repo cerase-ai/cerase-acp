@@ -42,6 +42,23 @@ export interface InternalServer {
  * is multi-channel and the control-plane maps it to a single "Connessione"
  * badge regardless of platform.
  */
+/**
+ * Why an agent is down, when the bridge knows and has stopped trying to fix
+ * it. A retry loop against a refused credential looks like recovery in
+ * progress and is not, so the stop has to be reported somewhere a person
+ * looks; this block is that place.
+ */
+export interface AgentFailure {
+  /** The only kind so far: the channel provider refused the credential. */
+  kind: "credential_rejected";
+  /** The provider's own error code, verbatim. */
+  code: string;
+  /** Which credential in agents.yaml was refused. Never its value. */
+  credential: string;
+  /** One line naming what a person has to do to bring the assistant back. */
+  detail: string;
+}
+
 export interface AgentLiveness {
   id: string;
   channel: string;
@@ -54,6 +71,15 @@ export interface AgentLiveness {
    * the control-plane render "stato sconosciuto" rather than a green badge.
    */
   ready: boolean | null;
+  /**
+   * Present only while the bridge is not trying to reconnect this agent
+   * because the failure cannot resolve itself. Absent means either healthy or
+   * a transient failure still being retried, which are different situations
+   * from this one and neither of them needs an operator tonight. Additive:
+   * an existing client that reads `id`, `channel`, `attached` and `ready` is
+   * unaffected by it.
+   */
+  failure?: AgentFailure;
 }
 
 export interface InternalServerOptions {

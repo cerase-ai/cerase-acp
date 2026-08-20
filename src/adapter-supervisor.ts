@@ -12,7 +12,14 @@
 // the bridge can flip getAgentStatus readiness. Best-effort by contract — a
 // retry that throws is swallowed and rescheduled; the supervisor never rejects
 // or crashes the bridge.
+//
+// Not every failure is worth retrying. A credential the provider refuses will
+// be refused again, so the loop hides a dead assistant behind the appearance
+// of recovery in progress. Such a failure is terminal here: the timers stop,
+// the reason is recorded per agent, and the bridge reports it on
+// /internal/status. See credential-rejection.ts for which codes qualify.
 
+import { type CredentialRejection, classifyCredentialRejection } from "./credential-rejection.js";
 import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.adapter-supervisor");
@@ -34,6 +41,18 @@ export interface AdapterSupervisorOptions {
   onRecovered: (agentId: string) => void;
   /** Called when a retry attempt fails — the bridge keeps the not-ready mark. */
   onStillFailing?: (agentId: string, err: unknown) => void;
+  /**
+   * Called once, when a failure is final and the retries for that agent have
+   * stopped. The bridge records the reason so a person reading
+   * /internal/status sees which assistant is down and which credential the
+   * provider refused. Without this the stop would be as silent as the loop.
+   */
+  onTerminal?: (agentId: string, rejection: CredentialRejection) => void;
+  /**
+   * Decides whether a start() failure is final. Injectable for tests; the
+   * default is the credential-rejection table.
+   */
+  classify?: (err: unknown) => CredentialRejection | undefined;
 }
 
 export class AdapterSupervisor {
@@ -42,12 +61,16 @@ export class AdapterSupervisor {
   private readonly random: () => number;
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly attempts = new Map<string, number>();
+  /** agentId to the refusal that stopped its retries. Cleared by noteStarted. */
+  private readonly terminal = new Map<string, CredentialRejection>();
+  private readonly classify: (err: unknown) => CredentialRejection | undefined;
   private stopped = false;
 
   constructor(private readonly opts: AdapterSupervisorOptions) {
     this.base = opts.baseDelayMs ?? 5000;
     this.max = opts.maxDelayMs ?? 300_000;
     this.random = opts.random ?? Math.random;
+    this.classify = opts.classify ?? classifyCredentialRejection;
   }
 
   /**
@@ -65,9 +88,21 @@ export class AdapterSupervisor {
    * Schedule a backoff retry for an adapter that just failed to start. Each
    * call advances the backoff for that agent. A retry already pending for the
    * agent is replaced (the latest call wins).
+   *
+   * Pass the failure as `err` when the caller has it — the boot loop caught
+   * the first one itself — so a refused credential is recognised before the
+   * first timer is armed rather than one backoff later. An agent already
+   * marked terminal is never re-armed, whether or not `err` is passed;
+   * noteStarted is what lets it retry again.
    */
-  scheduleRetry(adapter: SupervisedAdapter): void {
+  scheduleRetry(adapter: SupervisedAdapter, err?: unknown): void {
     if (this.stopped) return;
+    const rejection = err === undefined ? undefined : this.classify(err);
+    if (rejection) {
+      this.markTerminal(adapter.agentId, rejection);
+      return;
+    }
+    if (this.terminal.has(adapter.agentId)) return;
     const existing = this.timers.get(adapter.agentId);
     if (existing) clearTimeout(existing);
 
@@ -87,14 +122,60 @@ export class AdapterSupervisor {
     if (this.stopped) return;
     try {
       await adapter.start();
-      this.attempts.delete(adapter.agentId);
+      this.noteStarted(adapter.agentId);
       logger.info({ agentId: adapter.agentId }, "adapter self-heal: recovered");
       this.opts.onRecovered(adapter.agentId);
     } catch (err) {
-      logger.error({ err, agentId: adapter.agentId }, "adapter self-heal: retry failed — rescheduling");
       this.opts.onStillFailing?.(adapter.agentId, err);
+      const rejection = this.classify(err);
+      if (rejection) {
+        this.markTerminal(adapter.agentId, rejection);
+        return;
+      }
+      logger.error({ err, agentId: adapter.agentId }, "adapter self-heal: retry failed — rescheduling");
       this.scheduleRetry(adapter);
     }
+  }
+
+  /**
+   * Record a final failure and stop retrying this agent. Idempotent: the
+   * bridge may report the same refusal from the boot loop and from a retry,
+   * and a person must not read that as two separate incidents.
+   */
+  private markTerminal(agentId: string, rejection: CredentialRejection): void {
+    const existing = this.timers.get(agentId);
+    if (existing) {
+      clearTimeout(existing);
+      this.timers.delete(agentId);
+    }
+    this.attempts.delete(agentId);
+    if (this.terminal.has(agentId)) return;
+    this.terminal.set(agentId, rejection);
+    logger.error(
+      { agentId, code: rejection.code, credential: rejection.credential, detail: rejection.detail },
+      "adapter self-heal: the channel provider refused this agent's credential — retries stopped, this assistant is DOWN until the credential is fixed",
+    );
+    this.opts.onTerminal?.(agentId, rejection);
+  }
+
+  /**
+   * The adapter for this agent started. Drops the backoff and any terminal
+   * record, so a corrected credential is not still reported as refused after
+   * a config reload put it back in service.
+   */
+  noteStarted(agentId: string): void {
+    const existing = this.timers.get(agentId);
+    if (existing) {
+      clearTimeout(existing);
+      this.timers.delete(agentId);
+    }
+    this.attempts.delete(agentId);
+    this.terminal.delete(agentId);
+  }
+
+  /** The refusal that stopped this agent's retries, if it has one. */
+  terminalFailure(agentId: string): CredentialRejection | undefined {
+    return this.terminal.get(agentId);
   }
 
   /** Is a retry currently pending for this agent? (diagnostic / tests) */
