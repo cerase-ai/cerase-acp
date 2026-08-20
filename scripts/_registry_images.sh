@@ -79,6 +79,11 @@ _registry_sha_for() {
 # this only suppresses the RED — it never asserts an image must be absent.
 _registry_head_is_ignored_only() {
     local repo_dir="$1"
+    # The ref to judge, HEAD by default. The pre-push note asks about the commit
+    # ALREADY pushed rather than the one being pushed, so it needs to name it:
+    # answering about HEAD there meant judging the wrong commit and warning on
+    # every plan-only push.
+    local ref="${2:-HEAD}"
     local wf="$repo_dir/.github/workflows/docker-publish.yml"
     [[ -f "$wf" ]] || return 1
     local -a ignored=()
@@ -88,7 +93,7 @@ _registry_head_is_ignored_only() {
     )
     [[ ${#ignored[@]} -gt 0 ]] || return 1
     local -a changed=()
-    mapfile -t changed < <(git -C "$repo_dir" diff --name-only HEAD~1..HEAD 2>/dev/null)
+    mapfile -t changed < <(git -C "$repo_dir" diff --name-only "${ref}~1..${ref}" 2>/dev/null)
     [[ ${#changed[@]} -gt 0 ]] || return 1
     local f prefix hit
     for f in "${changed[@]}"; do
@@ -99,4 +104,29 @@ _registry_head_is_ignored_only() {
         [[ "$hit" -eq 1 ]] || return 1
     done
     return 0
+}
+
+# The images a ref should have on the registry and does not.
+#
+# This is the question the pre-push note actually asks, and keeping it here
+# rather than in the hook is what makes it testable: the hook backgrounds its
+# own work and disowns it, so nothing about it is observable from a test.
+#
+# A ref no workflow rebuilds has nothing missing BY CONSTRUCTION, so it returns
+# empty rather than listing every image. That is the cry-wolf this closes: a
+# plan-only commit reported nine missing images, twice in one evening.
+_registry_unpublished_images() {
+    local repo_dir="$1" ref="${2:-HEAD}"
+    _registry_head_is_ignored_only "$repo_dir" "$ref" && return 0
+
+    local short
+    short="$(git -C "$repo_dir" rev-parse --short=7 "$ref" 2>/dev/null)" || return 0
+
+    local image
+    while read -r image; do
+        [ -n "$image" ] || continue
+        gh api "orgs/cerase-ai/packages/container/${image}/versions?per_page=100" \
+             --jq '.[].metadata.container.tags[]' 2>/dev/null \
+          | grep -qx "sha-${short}" || printf '%s\n' "$image"
+    done < <(_registry_images_for "$repo_dir" 2>/dev/null)
 }
