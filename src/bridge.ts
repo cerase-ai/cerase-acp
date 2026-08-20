@@ -97,14 +97,24 @@ export interface ApplyConfigDiffDeps {
   createAdapter: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
   dispatcher: Dispatcher;
   /**
-   * Called after every adapter this reload (re)started, with the failure or
-   * `undefined` on success, so the liveness snapshot sees a reloaded agent
-   * exactly as it sees one started at boot. Without it an operator who fixes
-   * a refused token in agents.yaml gets a working assistant that
-   * /internal/status still reports as refused. Optional so the existing unit
-   * tests can drive applyConfigDiff without wiring the whole bridge.
+   * Starts one adapter and reports whether it came up, swallowing the failure
+   * rather than throwing. runBridge supplies the same function its boot loop
+   * uses: it folds the outcome into the liveness snapshot AND hands a failure
+   * to the retry supervisor, so a transient failure here is retried and a
+   * refused credential here is terminal — the two answers the boot path gives,
+   * from the same mechanism rather than a second one written here.
+   *
+   * Optional so the unit tests can drive applyConfigDiff without the bridge;
+   * absent → a plain start() with no status record and no retry.
    */
-  recordStartOutcome?: (agentId: string, err?: unknown) => void;
+  startAdapter?: (adapter: ChatAdapter) => Promise<boolean>;
+  /**
+   * Called for every agent this reload removed, after its adapter is stopped
+   * and dropped. runBridge wires it to the supervisor so a retry armed for
+   * that agent is cancelled: firing it would start an adapter the bridge no
+   * longer holds, and nothing would ever stop it.
+   */
+  forgetAgent?: (agentId: string) => void;
 }
 
 /**
@@ -137,6 +147,23 @@ async function createAdapterWithRetry(deps: ApplyConfigDiffDeps, agent: AgentCon
  * onChange handler of ConfigReloader.
  */
 export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDeps): Promise<void> {
+  // Without the bridge's version there is no supervisor and no liveness
+  // snapshot to fold an outcome into, so this is just a start() that reports
+  // instead of throwing. It is what the standalone unit tests run against.
+  const startAdapter =
+    deps.startAdapter ??
+    (async (adapter: ChatAdapter): Promise<boolean> => {
+      try {
+        await adapter.start();
+        return true;
+      } catch (err) {
+        // One agent's failure must not abort the reload for the rest, which
+        // is why this reports rather than throws.
+        logger.error({ err, agentId: adapter.agentId }, "auto-reload: adapter.start() failed");
+        return false;
+      }
+    });
+
   // 1. Remove old agents first (frees adapter resources before any
   //    same-id add would collide). Stops the adapter, then asks the
   //    SessionManager to terminate ACP children and drop the agent
@@ -152,6 +179,7 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
       deps.adapters.delete(id);
     }
     deps.sessionManager.removeAgent(id);
+    deps.forgetAgent?.(id);
   }
 
   // 2. Apply per-agent mutations.
@@ -192,16 +220,12 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
         const adapter = await createAdapterWithRetry(deps, fresh);
         if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest
         deps.adapters.set(mod.agentId, adapter);
-        try {
-          await adapter.start();
-          deps.recordStartOutcome?.(mod.agentId);
+        // The failure is reported by whoever owns the start: the bridge's
+        // version logs it and decides between a retry and a terminal record.
+        // The line that used to be here said the agent would not receive DMs,
+        // which a scheduled retry makes untrue.
+        if (await startAdapter(adapter)) {
           logger.info({ agentId: mod.agentId, classification: mod.classification }, "auto-reload: agent respawned");
-        } catch (err) {
-          deps.recordStartOutcome?.(mod.agentId, err);
-          logger.error(
-            { err, agentId: mod.agentId },
-            "auto-reload: respawned adapter.start() failed — agent will not receive DMs",
-          );
         }
       }
     }
@@ -214,13 +238,8 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
     const adapter = await createAdapterWithRetry(deps, agent);
     if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest
     deps.adapters.set(agent.id, adapter);
-    try {
-      await adapter.start();
-      deps.recordStartOutcome?.(agent.id);
+    if (await startAdapter(adapter)) {
       logger.info({ agentId: agent.id }, "auto-reload: new agent attached");
-    } catch (err) {
-      deps.recordStartOutcome?.(agent.id, err);
-      logger.error({ err, agentId: agent.id }, "auto-reload: new adapter.start() failed — agent will not receive DMs");
     }
   }
 }
@@ -525,6 +544,37 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   };
 
   /**
+   * Start one adapter, and answer its failure. The answer is two decisions —
+   * what /internal/status reports, and whether a retry is worth arming — and
+   * both belong to whichever path the adapter came through, boot or config
+   * reload. They came through separate code, so the reload path reported a
+   * failure and then dropped it: no retry, and a token corrected while the
+   * provider was having a bad minute stayed down until someone restarted the
+   * container. This is that code, once, for both callers.
+   *
+   * Never throws: a caller loops over adapters, and one failure must not stop
+   * it starting the rest. Returns whether the adapter came up.
+   */
+  const startAdapter = async (adapter: ChatAdapter): Promise<boolean> => {
+    try {
+      await adapter.start();
+      recordStartOutcome(adapter.agentId);
+      return true;
+    } catch (err) {
+      // A refused credential is already recorded and already logged by
+      // recordStartOutcome. Retrying it would re-ask a question the provider
+      // has answered, and the loop would read as recovery in progress.
+      if (recordStartOutcome(adapter.agentId, err)) return false;
+      logger.error(
+        { err, agentId: adapter.agentId },
+        "adapter.start() failed — this channel is DOWN; other channels stay up",
+      );
+      supervisor?.scheduleRetry(adapter, err);
+      return false;
+    }
+  };
+
+  /**
    * The `failure` block for one agent, or nothing when it has none. Split out
    * so the two sources are ordered in one place instead of nested inside the
    * snapshot literal.
@@ -641,23 +691,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // test-injection server must stay reachable even with all-fake tokens).
   let started = 0;
   for (const adapter of adapters.values()) {
-    try {
-      await adapter.start();
-      recordStartOutcome(adapter.agentId);
-      started += 1;
-    } catch (err) {
-      const rejection = recordStartOutcome(adapter.agentId, err);
-      if (rejection) continue;
-      logger.error(
-        { err, agentId: adapter.agentId },
-        "adapter.start() failed — this channel is DOWN; other channels stay up",
-      );
-      // Schedule a backoff retry so a transient failure (fixed token,
-      // Cloudflare ConnectTimeoutError) recovers itself. A refused credential
-      // took the `continue` above: it has already been recorded as terminal,
-      // and retrying it would only re-ask a question already answered.
-      supervisor?.scheduleRetry(adapter, err);
-    }
+    if (await startAdapter(adapter)) started += 1;
   }
   // Total failure: not one adapter came up, so no message reaches any
   // assistant. What that should do depends on whether anything is listening
@@ -732,7 +766,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         adapters,
         createAdapter,
         dispatcher: productionDispatcher,
-        recordStartOutcome,
+        startAdapter,
+        forgetAgent: (agentId) => supervisor?.cancel(agentId),
       })
         .then(() => {
           currentSnapshot = cloneConfig(nextConfig);

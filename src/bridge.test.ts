@@ -1,8 +1,11 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
-import type { AgentConfig, BridgeConfig } from "./config.js";
+import { type AgentConfig, type BridgeConfig, loadConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -523,6 +526,142 @@ describe("runBridge", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // A config reload respawns an adapter and starts it. A start() that failed
+  // there was logged and then left alone: no retry, and the boot path's
+  // supervisor never heard about it. An operator who corrected a token while
+  // the provider was having a bad minute got an assistant that stayed down
+  // until someone restarted the container. Both paths have to reach the same
+  // supervisor, or the answer to a transient failure depends on which of them
+  // the adapter came through.
+  describe("a config reload starts adapters through the same supervisor as boot", () => {
+    const RELOAD_YAML = (token: string) => `
+agents:
+  - id: solo
+    bot_token: ${token}
+    allowed_users: ["111"]
+    spawn:
+      command: "true"
+      args: []
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`;
+
+    /**
+     * Boots a one-agent bridge watching a real agents.yaml, then rewrites the
+     * bot_token so the reloader classifies it as a respawn. The adapter the
+     * respawn creates fails its first start() with `failure`; the boot one
+     * always starts. Returns a getter for the respawned adapter.
+     */
+    async function bootAndRespawn(
+      secret: string,
+      failure: () => Error,
+    ): Promise<{ dir: string; respawned: () => (FakeAdapter & { ready(): boolean }) | undefined }> {
+      const dir = mkdtempSync(join(tmpdir(), "bridge-reload-"));
+      const cfgPath = join(dir, "agents.yaml");
+      writeFileSync(cfgPath, RELOAD_YAML("tok-1"));
+
+      let created = 0;
+      let second: (FakeAdapter & { ready(): boolean }) | undefined;
+      const makeAdapter = (): FakeAdapter & { ready(): boolean } => {
+        const generation = ++created;
+        let failsLeft = generation === 1 ? 0 : 1;
+        let live = false;
+        const a: FakeAdapter & { ready(): boolean } = {
+          agentId: "solo",
+          startCalls: 0,
+          stopCalls: 0,
+          async start() {
+            a.startCalls += 1;
+            if (failsLeft > 0) {
+              failsLeft -= 1;
+              throw failure();
+            }
+            live = true;
+          },
+          async stop() {
+            a.stopCalls += 1;
+            live = false;
+          },
+          ready: () => live,
+          makeSendTarget: () => async () => ({ ok: true }),
+        };
+        if (generation === 2) second = a;
+        return a;
+      };
+
+      vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", secret);
+      vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_BASE_MS", "20");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "20");
+
+      handle = await runBridge({
+        config: loadConfig(cfgPath, process.env),
+        bridgeE2eTest: false,
+        configPath: cfgPath,
+        createAdapter: async () => makeAdapter(),
+      });
+
+      // A new bot_token is classified `bot_token_or_spawn` → respawn.
+      writeFileSync(cfgPath, RELOAD_YAML("tok-2"));
+      await vi.waitFor(() => expect(second?.startCalls).toBeGreaterThanOrEqual(1), { timeout: 8000, interval: 25 });
+
+      return { dir, respawned: () => second };
+    }
+
+    it("a transient failure on the reload path is retried until it connects", async () => {
+      const SECRET = "reload-retry-secret";
+      const { dir, respawned } = await bootAndRespawn(SECRET, () => new Error("transient login failure on respawn"));
+      try {
+        // The retry the boot path would have scheduled, on the reload path.
+        await vi.waitFor(() => expect(respawned()?.startCalls).toBe(2), { timeout: 8000, interval: 25 });
+
+        // And the recovery reaches where an operator reads it.
+        await vi.waitFor(
+          async () => {
+            const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+              headers: { authorization: `Bearer ${SECRET}` },
+            });
+            const body = (await res.json()) as { agents: Array<{ id: string; ready: boolean | null }> };
+            expect(body.agents.find((a) => a.id === "solo")?.ready).toBe(true);
+          },
+          { timeout: 8000, interval: 25 },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a refused credential on the reload path is terminal, not retried", async () => {
+      // The other half of the same mechanism: giving the reload path a
+      // supervisor must not give it a loop against a verdict the provider
+      // will keep returning.
+      const SECRET = "reload-terminal-secret";
+      const { dir, respawned } = await bootAndRespawn(SECRET, () => {
+        const err = new Error("An invalid token was provided.") as Error & { code: string };
+        err.code = "TokenInvalid";
+        return err;
+      });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        expect(respawned()?.startCalls).toBe(1);
+
+        const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        const body = (await res.json()) as {
+          agents: Array<{ id: string; ready: boolean | null; failure?: { kind: string; code: string } }>;
+        };
+        const down = body.agents.find((a) => a.id === "solo");
+        expect(down?.ready).toBe(false);
+        expect(down?.failure?.kind).toBe("credential_rejected");
+        expect(down?.failure?.code).toBe("TokenInvalid");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("production mode: all adapters succeed → bridge resolves + no test server", async () => {

@@ -258,3 +258,100 @@ describe("applyConfigDiff", () => {
     expect(adapters.get("gamma")!.startCalls).toBe(1);
   });
 });
+
+// The reload path used to call adapter.start() itself, which is why a failure
+// there was reported and never retried: the supervisor the boot path uses was
+// not reachable from here. The seam is one injected function, so both paths
+// answer a failure the same way instead of each holding its own answer.
+describe("applyConfigDiff adapter start seam", () => {
+  it("starts a respawned adapter through the injected startAdapter", async () => {
+    const sm = makeFakeSessionManager();
+    const adapters = new Map<string, FakeAdapter>();
+    adapters.set("alpha", makeFakeAdapter(baseAgent("alpha")));
+
+    const started: string[] = [];
+    const prev = cfg([baseAgent("alpha", { bot_token: "old" })]);
+    const next = cfg([baseAgent("alpha", { bot_token: "new" })]);
+    await applyConfigDiff(diffConfigs(prev, next), {
+      next,
+      sessionManager: sm,
+      adapters,
+      createAdapter: async (a) => makeFakeAdapter(a),
+      dispatcher: fakeDispatcher,
+      startAdapter: async (adapter) => {
+        started.push(adapter.agentId);
+        await adapter.start();
+        return true;
+      },
+    });
+
+    expect(started).toEqual(["alpha"]);
+    expect(adapters.get("alpha")!.startCalls).toBe(1);
+  });
+
+  it("starts an added adapter through the injected startAdapter", async () => {
+    const sm = makeFakeSessionManager();
+    const adapters = new Map<string, FakeAdapter>();
+
+    const started: string[] = [];
+    const prev = cfg([]);
+    const next = cfg([baseAgent("gamma")]);
+    await applyConfigDiff(diffConfigs(prev, next), {
+      next,
+      sessionManager: sm,
+      adapters,
+      createAdapter: async (a) => makeFakeAdapter(a),
+      dispatcher: fakeDispatcher,
+      startAdapter: async (adapter) => {
+        started.push(adapter.agentId);
+        await adapter.start();
+        return true;
+      },
+    });
+
+    expect(started).toEqual(["gamma"]);
+  });
+
+  it("hands a removed agent to forgetAgent, so a pending retry cannot outlive it", async () => {
+    // A retry armed for an agent that has since left agents.yaml would start
+    // an adapter the bridge no longer holds: a logged-in client nobody stops,
+    // that shutdown() cannot reach because it is not in the adapters map.
+    const sm = makeFakeSessionManager();
+    const adapters = new Map<string, FakeAdapter>();
+    adapters.set("alpha", makeFakeAdapter(baseAgent("alpha")));
+
+    const forgotten: string[] = [];
+    const prev = cfg([baseAgent("alpha")]);
+    const next = cfg([]);
+    await applyConfigDiff(diffConfigs(prev, next), {
+      next,
+      sessionManager: sm,
+      adapters,
+      createAdapter: async (a) => makeFakeAdapter(a),
+      dispatcher: fakeDispatcher,
+      forgetAgent: (id) => forgotten.push(id),
+    });
+
+    expect(forgotten).toEqual(["alpha"]);
+  });
+
+  it("without the seam wired, a respawn still starts the adapter directly", async () => {
+    // Non-vacuity for the three above, and the contract the standalone unit
+    // tests in this file rely on: both deps are optional.
+    const sm = makeFakeSessionManager();
+    const adapters = new Map<string, FakeAdapter>();
+    adapters.set("alpha", makeFakeAdapter(baseAgent("alpha")));
+
+    const prev = cfg([baseAgent("alpha", { bot_token: "old" })]);
+    const next = cfg([baseAgent("alpha", { bot_token: "new" })]);
+    await applyConfigDiff(diffConfigs(prev, next), {
+      next,
+      sessionManager: sm,
+      adapters,
+      createAdapter: async (a) => makeFakeAdapter(a),
+      dispatcher: fakeDispatcher,
+    });
+
+    expect(adapters.get("alpha")!.startCalls).toBe(1);
+  });
+});

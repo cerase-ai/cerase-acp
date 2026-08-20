@@ -164,6 +164,19 @@ export class AdapterSupervisor {
    * a config reload put it back in service.
    */
   noteStarted(agentId: string): void {
+    this.cancel(agentId);
+  }
+
+  /**
+   * Stop supervising this agent and drop everything remembered about it.
+   *
+   * Called when an agent leaves agents.yaml. A retry left armed for it would
+   * fire against the adapter the bridge has already stopped and dropped, log
+   * in a client for an assistant nobody configured any more, and leave it
+   * running: the bridge's shutdown stops the adapters it holds, and this one
+   * is not among them.
+   */
+  cancel(agentId: string): void {
     const existing = this.timers.get(agentId);
     if (existing) {
       clearTimeout(existing);
