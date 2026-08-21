@@ -123,9 +123,19 @@ _registry_head_is_ignored_only() {
 # rather than in the hook is what makes it testable: the hook backgrounds its
 # own work and disowns it, so nothing about it is observable from a test.
 #
-# A ref no workflow rebuilds has nothing missing BY CONSTRUCTION, so it returns
-# empty rather than listing every image. That is the cry-wolf this closes: a
-# plan-only commit reported nine missing images, twice in one evening.
+# Three things have to be true before a name is printed, and each of them was
+# once missing:
+#
+#   - the ref changed something a workflow rebuilds at all, or a plan-only
+#     commit reports every image the repo publishes;
+#   - the ref's own diff touched that image's build context, or a push that
+#     published exactly what it should reports every image it correctly did
+#     not rebuild;
+#   - the registry ANSWERED, or an outage and an expired credential both read
+#     as an image that was never built.
+#
+# Silence is therefore the normal outcome, and that is the point: a note printed
+# on every push is a note nobody reads.
 _registry_unpublished_images() {
     local repo_dir="$1" ref="${2:-HEAD}"
     _registry_head_is_ignored_only "$repo_dir" "$ref" && return 0
@@ -136,8 +146,141 @@ _registry_unpublished_images() {
     local image
     while read -r image; do
         [ -n "$image" ] || continue
-        gh api "orgs/cerase-ai/packages/container/${image}/versions?per_page=100" \
-             --jq '.[].metadata.container.tags[]' 2>/dev/null \
-          | grep -qx "sha-${short}" || printf '%s\n' "$image"
-    done < <(_registry_images_for "$repo_dir" 2>/dev/null)
+        [ "$(_registry_package_tag_state "$image" "sha-${short}")" = no ] \
+          && printf '%s\n' "$image"
+    done < <(_registry_expected_images "$repo_dir" "$ref" 2>/dev/null)
+    return 0
+}
+
+# The images a ref was EXPECTED to produce, one per line.
+#
+# A workflow that rebuilds only the contexts a push touched publishes a subset
+# on any given push, and every image outside that subset is legitimately absent
+# at that sha. Asking about all of them turned an ordinary push into a note
+# naming seven images whose contexts nobody had touched, beside two that had
+# been built correctly — so the note fired on almost every push and was right on
+# almost none.
+#
+# Under-reports on purpose. CI diffs each image against the commit it was last
+# BUILT from, which can be older than this ref's parent, so an image whose
+# context this commit did not touch may still have been due. Naming it here
+# would be a guess; leaving it out costs a note that `registry-check` gives
+# properly. The direction that matters is the other one: nothing is named unless
+# this commit's own diff touches its context, and then it was certainly due.
+#
+# A repo whose workflow declares no per-image context rebuilds everything on
+# every push, and there the answer is every image it publishes.
+_registry_expected_images() {
+    local repo_dir="$1" ref="${2:-HEAD}"
+    local -a spec=() changed=()
+    mapfile -t spec < <(_registry_image_contexts "$repo_dir")
+    if [[ ${#spec[@]} -eq 0 ]]; then
+        _registry_images_for "$repo_dir"
+        return 0
+    fi
+    # `diff-tree -r` rather than a `ref~1..ref` range, so a repository's first
+    # commit reads as "every file" instead of failing and taking the narrowing
+    # with it.
+    mapfile -t changed < <(git -C "$repo_dir" diff-tree --no-commit-id --name-only -r "$ref" 2>/dev/null)
+    if [[ ${#changed[@]} -eq 0 ]]; then
+        # The diff could not be read. Narrowing on an empty list would silence
+        # the note for every image at once, which is the failure this whole
+        # check exists to remove, so fall back to asking about all of them.
+        _registry_images_for "$repo_dir"
+        return 0
+    fi
+    local line image always ctx excl f
+    for line in "${spec[@]}"; do
+        IFS='|' read -r image always ctx excl <<<"$line"
+        [[ -n "$image" ]] || continue
+        if [[ "$always" == "true" ]]; then
+            printf '%s\n' "$image"
+            continue
+        fi
+        for f in "${changed[@]}"; do
+            _registry_path_under "$f" "$ctx" || continue
+            [[ -n "$excl" ]] && _registry_path_under "$f" "$excl" && continue
+            printf '%s\n' "$image"
+            break
+        done
+    done
+    return 0
+}
+
+# 0 when a path sits at or under a prefix. A bare `.` is the whole tree.
+_registry_path_under() {
+    local p="$1" pre="${2%/}"
+    [[ -n "$pre" ]] || return 1
+    [[ "$pre" == "." ]] && return 0
+    [[ "$p" == "$pre" || "$p" == "$pre"/* ]]
+}
+
+# `<image>|<always>|<context>|<exclude>` per matrix entry that declares a build
+# context, with the leading `./` stripped so the values compare against git
+# paths directly.
+#
+# Only a LITERAL context counts. Every workflow here also carries the build
+# step's own `context: ${{ matrix.context }}`, which sits after the last matrix
+# entry and would otherwise be read as that entry's path — a template expression
+# matches no file, so the last image in the list would silently stop being
+# expected. First literal per entry wins, for the same reason in the other
+# direction.
+#
+# An entry marked `always` opts out of filtering: its context is a directory
+# assembled during the build and absent from git, so no diff can ever touch it.
+_registry_image_contexts() {
+    local repo_dir="$1"
+    local wf="$repo_dir/.github/workflows/docker-publish.yml"
+    [[ -f "$wf" ]] || return 0
+    awk '
+        function literal(v) { return (v ~ /^[.A-Za-z0-9_\/-]+$/) }
+        function flush() {
+            if (img != "" && (ctx != "" || always == "true")) {
+                sub(/^\.\//, "", ctx); sub(/^\.\//, "", excl)
+                print img "|" always "|" ctx "|" excl
+            }
+            img = ""; ctx = ""; excl = ""; always = ""
+        }
+        /^[[:space:]]*-[[:space:]]+image:[[:space:]]+/ { flush(); img = $3; next }
+        /^[[:space:]]*context:[[:space:]]+/ { if (img != "" && ctx == "" && literal($2)) ctx = $2; next }
+        /^[[:space:]]*exclude:[[:space:]]+/ { if (img != "" && literal($2)) excl = $2; next }
+        /^[[:space:]]*always:[[:space:]]+/  { if (img != "") { always = $2; gsub(/['"'"'"]/, "", always) } next }
+        END { flush() }
+    ' "$wf"
+    return 0
+}
+
+# yes | no | unknown — whether a package carries a tag.
+#
+# The read and the answer are separate facts. This asked the packages API with
+# stderr discarded and piped into a match, so a request that FAILED produced no
+# output and read exactly like a tag that is not there: an expired credential,
+# a rate limit or an outage all reported the image as unpublished. Only the
+# registry's own not-found is an absence; everything else is a question that
+# could not be asked, and the caller stays quiet on it.
+#
+# The window is the hundred most recent versions of the package, which is what
+# the caller needs — it asks about a commit pushed minutes ago — and not a
+# general answer about the registry.
+_registry_package_tag_state() {
+    local image="$1" tag="$2" out err rc=0
+    err="$(mktemp)"
+    out="$(gh api "orgs/cerase-ai/packages/container/${image}/versions?per_page=100" \
+             --jq '.[].metadata.container.tags[]' 2>"$err")" || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+        rm -f "$err"
+        grep -qx "$tag" <<<"$out" && { echo yes; return 0; }
+        echo no
+        return 0
+    fi
+    # A package that has never been published answers 404, and that IS an
+    # absence — the first push of a new image is precisely when the note earns
+    # its place.
+    if grep -qiE 'not found|HTTP 404' "$err"; then
+        rm -f "$err"
+        echo no
+        return 0
+    fi
+    rm -f "$err"
+    echo unknown
 }
