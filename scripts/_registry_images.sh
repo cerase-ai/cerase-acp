@@ -42,10 +42,21 @@ _registry_images_for() {
         sed -n 's/^[[:space:]]*-[[:space:]]*image:[[:space:]]*\([A-Za-z0-9._-]\+\).*/\1/p' "$wf"
         sed -n 's/^[[:space:]]*IMAGE_NAME:.*\/\([A-Za-z0-9._-]\+\)[[:space:]]*$/\1/p' "$wf"
         # `images:` lines that name a literal image, not a matrix reference.
-        grep -E '^[[:space:]]*images:' "$wf" \
-            | grep -v 'matrix\.' \
+        #
+        # `|| true` on the filter, and it is load-bearing rather than tidy: a
+        # workflow whose images: lines are ALL matrix references leaves this
+        # grep with no match, so under `pipefail` the branch fails and takes the
+        # whole group with it. The other two branches had already resolved nine
+        # names by then, and the function returned them WITH a failing status —
+        # so every caller running `set -e` threw them away and reported an
+        # unrecognised shape. It was the two matrix repos and only those.
+        { grep -E '^[[:space:]]*images:' "$wf" || true; } \
+            | { grep -v 'matrix\.' || true; } \
             | sed -n 's/.*\/\([A-Za-z0-9._-]\+\)[[:space:]]*$/\1/p'
     } 2>/dev/null | sed '/^$/d' | sort -u
+    # Output is the answer; status says whether the question could be asked, and
+    # here it always could.
+    return 0
 }
 
 # HEAD abbreviated the way the TAG is, not the way git feels like.
