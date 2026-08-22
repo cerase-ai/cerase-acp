@@ -7,6 +7,7 @@ const baseAgent = (id: string, overrides: Partial<AgentConfig> = {}): AgentConfi
   bot_token: `tok-${id}`,
   allowed_users: [`u-${id}-1`],
   cwd: "/home/agent/cerase/workspace",
+  mode: "cerase",
   spawn: { command: "docker", args: ["exec", "-i", `cerase-agent-${id}`, "opencode", "acp"] },
   ...overrides,
 });
@@ -75,6 +76,18 @@ describe("diffConfigs", () => {
   it("classifies a cwd change as `bot_token_or_spawn` (respawn-required)", () => {
     const prev = cfg([baseAgent("a", { cwd: "/old" })]);
     const next = cfg([baseAgent("a", { cwd: "/new" })]);
+    const d = diffConfigs(prev, next);
+    expect(d.modified).toHaveLength(1);
+    expect(d.modified[0]!.classification).toBe("bot_token_or_spawn");
+  });
+
+  // The mode is chosen once, at the handshake. A live session goes on running
+  // under the agent it was created with, so a changed mode that did not
+  // respawn would take effect whenever that session happened to end — which is
+  // a change arriving at a moment nobody chose.
+  it("classifies a mode change as `bot_token_or_spawn` (respawn-required)", () => {
+    const prev = cfg([baseAgent("a", { mode: "cerase" })]);
+    const next = cfg([baseAgent("a", { mode: "probe" })]);
     const d = diffConfigs(prev, next);
     expect(d.modified).toHaveLength(1);
     expect(d.modified[0]!.classification).toBe("bot_token_or_spawn");

@@ -8,7 +8,6 @@ import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { reconcile, type SeenState } from "./reconciler.js";
 import {
-  CERASE_SESSION_MODE,
   decideSessionMode,
   type ModeAdvertisement,
   type SessionModeUnavailable,
@@ -689,11 +688,17 @@ export class SessionManager {
         advertisement = created;
       }
 
-      // Select the de-identified Cerase primary agent (the `agent.cerase` entry
-      // the control-plane's SlotWriter renders into the slot's opencode.json)
-      // so opencode uses the Cerase base prompt instead of its built-in one.
-      // `opencode acp` exposes no flag to pick an agent; the ACP way is to set
-      // the session mode, because opencode maps its primary agents to modes.
+      // Select the primary agent this session runs under — by default the
+      // de-identified Cerase one the control-plane's SlotWriter renders into
+      // the slot's opencode.json, so opencode uses the Cerase base prompt
+      // instead of its built-in one. `opencode acp` exposes no flag to pick an
+      // agent; the ACP way is to set the session mode, because opencode maps
+      // its primary agents to modes.
+      //
+      // Which agent is a per-agent CONFIG value rather than a constant, so a
+      // caller with a different job can ask for a different one. The health
+      // probe does: it needs an assistant that answers one word, and the
+      // customer's assistant reasonably answers a paragraph.
       //
       // The rule is that the session runs under the mode it asked for or it
       // does not run. Carrying on without it used to look like the forgiving
@@ -707,7 +712,7 @@ export class SessionManager {
       // cached as a verdict: every turn re-asks, so a slot re-rendered while
       // the bridge runs starts working again on the next message rather than
       // after a restart.
-      const decision = decideSessionMode(advertisement, CERASE_SESSION_MODE);
+      const decision = decideSessionMode(advertisement, agent.mode);
       if (decision.outcome === "absent") {
         // The handshake already listed the modes, so the request that could
         // only come back "mode not found" is never sent.

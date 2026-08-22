@@ -45,6 +45,7 @@ is retained in git history.
 | M22 | 06-24 | Production bridge resilient to a single adapter start failure (per-adapter try/catch; total-failure threshold; truthful `ready:false`) |
 | M23 | 06-24 | Auto-heal a failed adapter (`adapter-supervisor.ts` — capped jittered exponential-backoff retry, per-agent isolated) |
 | M24 | 06-24 | Truthful container healthcheck — unauthenticated `GET /healthz` on the internal server (counts only, secret gate untouched) |
+| `M-THE-LIVENESS-PROBE-PASSES-ON-ANY-REPLY-1` | 08-22 | The session mode is a per-agent config value instead of a constant. opencode exposes its primary agents as ACP session modes and `opencode acp` has no flag to pick one, so the mode IS the agent selector — and it was hardcoded `"cerase"`, which meant every caller got the customer's own assistant. The health probe in `cerase-core` asks for one word and the customer's assistant reasonably answers a paragraph, so nothing could be asserted about the reply. `agent.mode` defaults to `cerase`, so a config written before the field loads unchanged and asks for what it always asked for; a mode the slot does not define is refused per agent with the modes it does offer, exactly as an absent `cerase` already was; and a changed mode respawns, because the mode is chosen once at the handshake and a live session would otherwise pick it up whenever it happened to end. Driven by `cerase-core/devplan/poc.md` |
 
 (There is no M20 — the numbering skips from M19 to M21.)
 

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { CERASE_SESSION_MODE } from "./session-mode.js";
 
 // Agent ids end up in container names, log keys, and `docker exec`
 // targets — restrict to a portable identifier shape so the operator
@@ -73,6 +74,21 @@ const AgentSchema = z
     // `~/cerase/data` for OpenCode's SQLite WAL. Override if your
     // agent image mounts the workspace elsewhere.
     cwd: z.string().min(1).default("/home/agent/cerase/workspace"),
+    // Which of the slot's primary agents this session runs under.
+    //
+    // opencode exposes its primary agents as ACP session modes and `opencode
+    // acp` has no flag to pick one, so the mode IS the agent selector. It was a
+    // constant until the health probe needed an assistant of its own: the probe
+    // asks the maintainer to answer one word and the maintainer, reasonably,
+    // answers a paragraph, so nothing could be asserted about the reply.
+    //
+    // Defaulted rather than required, and that is what keeps this backwards
+    // compatible in both directions. A config written before this field existed
+    // loads unchanged and asks for the same mode it always did; a config that
+    // names one the slot does not define is refused per agent, with the modes
+    // the slot does offer in the message, exactly as an absent `cerase` already
+    // was.
+    mode: z.string().min(1).default(CERASE_SESSION_MODE),
     spawn: z.object({
       command: z.string().min(1),
       args: z.array(z.string()),

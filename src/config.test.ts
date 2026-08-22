@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, resolveEnvSubstitutions } from "./config.js";
+import { CERASE_SESSION_MODE } from "./session-mode.js";
 
 const VALID_YAML = `
 agents:
@@ -99,6 +100,41 @@ session:
     );
     const cfg = loadConfig(path, {});
     expect(cfg.agents[0]!.cwd).toBe("/custom/workspace");
+  });
+
+  // The mode IS the agent selector: opencode exposes its primary agents as ACP
+  // session modes and `opencode acp` has no flag to pick one. It was a constant
+  // until the health probe needed an assistant that answers one word.
+  it("defaults agent.mode to the Cerase profile when absent", () => {
+    writeFileSync(path, VALID_YAML);
+    const cfg = loadConfig(path, {
+      DISCORD_BOT_TOKEN_DOC_QA: "tok-doc",
+      DISCORD_BOT_TOKEN_POLICY_QA: "tok-pol",
+    });
+    // A config written before the field existed has to go on asking for the
+    // mode it always asked for, or every appliance loses its assistant on the
+    // deploy that adds the field.
+    expect(cfg.agents[0]!.mode).toBe(CERASE_SESSION_MODE);
+    expect(cfg.agents[1]!.mode).toBe(CERASE_SESSION_MODE);
+  });
+
+  it("respects an explicit agent.mode override", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: doc-qa
+    bot_token: tok
+    allowed_users: []
+    mode: probe
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.mode).toBe("probe");
   });
 
   it("C2-0: accepts channel 'web' with NO credential fields (panel-only agent)", () => {

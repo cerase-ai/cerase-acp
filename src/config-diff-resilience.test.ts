@@ -15,6 +15,7 @@ function agent(id: string): AgentConfig {
     bot_token: "x",
     allowed_users: ["1"],
     cwd: "/home/agent/cerase/workspace",
+    mode: "cerase",
     spawn: { command: "true", args: [] },
   } as unknown as AgentConfig;
 }

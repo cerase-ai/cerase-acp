@@ -72,6 +72,11 @@ function classifyMutation(prev: AgentConfig, next: AgentConfig): ModifiedClassif
   const respawnFieldsChanged =
     prev.bot_token !== next.bot_token ||
     prev.cwd !== next.cwd ||
+    // The mode is chosen once per session, at the handshake. A live session
+    // goes on running under the agent it was created with, so a changed mode
+    // that did not respawn would take effect at some unpredictable later
+    // moment — whenever that session happened to end.
+    prev.mode !== next.mode ||
     prev.spawn.command !== next.spawn.command ||
     !arraysEqual(prev.spawn.args, next.spawn.args);
 

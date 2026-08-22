@@ -23,6 +23,7 @@ function makeConfig(overrides?: {
   modes?: string;
   modesShape?: "config" | "modes";
   echoMode?: boolean;
+  mode?: string;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -46,6 +47,7 @@ function makeConfig(overrides?: {
         bot_token: "irrelevant-for-acp-tests",
         allowed_users: ["111"],
         cwd: overrides?.cwd ?? "/home/agent/cerase/workspace",
+        mode: overrides?.mode ?? CERASE_SESSION_MODE,
         spawn: { command: "env", args },
       },
     ],
@@ -500,6 +502,40 @@ describe("session mode", () => {
     // the profile the turn ran under rather than that a call was made.
     expect(chunks.join("")).toBe(CERASE_SESSION_MODE);
     expect(mgr.sessionModeFailure("doc-qa")).toBeUndefined();
+  });
+
+  // The mode is a per-agent config value, not a constant. The health probe is
+  // the caller that needed it: it asks for one word and the customer's own
+  // assistant reasonably answers a paragraph, so it runs under an assistant of
+  // its own instead.
+  //
+  // The fixture echoes the mode it is actually in, so this asserts which
+  // profile the turn RAN under — not that some call was made with some
+  // argument, which is the assertion that would still pass if the constant
+  // were being used.
+  it("selects the mode the agent's config names, not a built-in default", async () => {
+    mgr = new SessionManager(
+      makeConfig({ modes: `build,probe,${CERASE_SESSION_MODE}`, echoMode: true, mode: "probe" }),
+    );
+    const chunks: string[] = [];
+    await mgr.prompt("doc-qa", "user-A", "ciao", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    expect(chunks.join("")).toBe("probe");
+    expect(chunks.join("")).not.toBe(CERASE_SESSION_MODE);
+  });
+
+  // A configured mode the slot does not define is the same fault as an absent
+  // `cerase` and is reported the same way — per agent, naming what the slot
+  // does offer. Nothing silently falls back to another assistant.
+  it("refuses the session when the configured mode is not one the slot offers", async () => {
+    mgr = new SessionManager(makeConfig({ modes: `build,${CERASE_SESSION_MODE}`, mode: "probe" }));
+    await expect(mgr.prompt("doc-qa", "user-A", "ciao", () => {})).rejects.toThrow();
+    const failure = mgr.sessionModeFailure("doc-qa");
+    expect(failure?.requested).toBe("probe");
+    expect(failure?.available).toContain(CERASE_SESSION_MODE);
   });
 
   // The protocol has two places to advertise modes and opencode uses the
