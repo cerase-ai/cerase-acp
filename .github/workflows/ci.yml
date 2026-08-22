@@ -24,10 +24,60 @@ on:
 
 jobs:
   test:
+    name: test + guards (vitest · biome · tsc · docs/comment/secrets · gitleaks)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        # Full history: the comment check compares against the previous commit
+        # of this push, and gitleaks scans the history rather than the tree.
+        with: { fetch-depth: 0 }
+
+      # The repository guards and the secret scan were a JOB of their own, and
+      # cost a whole billed minute for seven seconds of work. GitHub bills each
+      # job rounded up to a whole minute, so they are steps here now.
+      #
+      # Each keeps `continue-on-error` and its own id, and the verdict at the
+      # end names which one refused: as a separate job they were independent of
+      # the node work, and a merge that let a red vitest hide a secret finding
+      # would be worse than the two jobs it replaces.
+      - name: Docs parity
+        id: docs_parity
+        continue-on-error: true
+        run: bash scripts/docs-parity.sh
+
+      - name: Comment convention
+        id: comment_check
+        continue-on-error: true
+        run: bash scripts/comment-check.sh --base "${COMMENT_CHECK_BASE}"
+        env:
+          COMMENT_CHECK_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+
+      - name: Secrets guard
+        id: secrets_guard
+        continue-on-error: true
+        run: bash scripts/secrets-guard.sh
+
+      - name: Install gitleaks
+        id: gitleaks_install
+        continue-on-error: true
+        env:
+          GITLEAKS_VERSION: 8.21.2
+        run: |
+          set -euo pipefail
+          # --retry, because this check HARD-BLOCKS a merge and its input is a
+          # third party's CDN. A 503 from the release host once reddened a repo
+          # whose code was fine, and a security gate that fails on somebody
+          # else's outage is a gate people learn to re-run without reading.
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan repository history
+        id: gitleaks
+        continue-on-error: true
+        run: gitleaks detect --source . --redact --verbose --exit-code 1
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -46,6 +96,30 @@ jobs:
 
       - name: Run vitest suite
         run: npm test
+
+      # Which of the merged checks refused. `always()` is what keeps a red
+      # vitest from hiding a secret finding.
+      - name: Which check refused
+        if: always()
+        env:
+          DOCS: ${{ steps.docs_parity.outcome }}
+          COMMENTS: ${{ steps.comment_check.outcome }}
+          SECRETS: ${{ steps.secrets_guard.outcome }}
+          GITLEAKS_INSTALL: ${{ steps.gitleaks_install.outcome }}
+          GITLEAKS: ${{ steps.gitleaks.outcome }}
+        run: |
+          set -uo pipefail
+          red=""
+          [ "$DOCS" = failure ] && red="$red docs-parity"
+          [ "$COMMENTS" = failure ] && red="$red comment-check"
+          [ "$SECRETS" = failure ] && red="$red secrets-guard"
+          [ "$GITLEAKS_INSTALL" = failure ] && red="$red gitleaks(install)"
+          [ "$GITLEAKS" = failure ] && red="$red gitleaks"
+          if [ -n "$red" ]; then
+            echo "::error::these blocking checks refused:$red"
+            exit 1
+          fi
+          echo "the repository guards and the secret scan all passed"
 
   image-scan:
     # M-ACP-NPM-STRIP-1 (2026-08-02): cerase-acp had NO image scan at all, while
@@ -71,48 +145,3 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
-
-  gitleaks:
-    name: gitleaks (hard block)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      # M-DOCS-PARITY-ALL-REPOS-1 — no document may name a command, file or path
-      # that does not exist. A parity check that lives in one repo's local suite
-      # is a check for one repo, so the same script runs in every repo's CI.
-      - name: Docs parity
-        run: bash scripts/docs-parity.sh
-
-      # No comment carries what git already holds — a past date, a ticket ID,
-      # or markup in an inline comment. Scoped to this push's own commits, so
-      # it never reds on a legacy file nobody touched.
-      - name: Comment convention
-        run: bash scripts/comment-check.sh --base "${COMMENT_CHECK_BASE}"
-        env:
-          COMMENT_CHECK_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-
-      # A0 step 4 · G2 + G3 — no credential file in this checkout, no retired
-      # credential name in use. Same script in every repo, synced from core by
-      # `scripts/sync-tooling.sh` and pinned by `scripts/TOOLING.sha256`: a
-      # secrets guard that lives in one repo guards one repo.
-      - name: Secrets guard
-        run: bash scripts/secrets-guard.sh
-      - name: Install gitleaks
-        env:
-          GITLEAKS_VERSION: 8.21.2
-        run: |
-          set -euo pipefail
-          # ⚠️ `--retry`, because this step HARD-BLOCKS a merge and its input is
-          # a third party's CDN. Measured 2026-08-12: a 503 from the release
-          # host reddened a repo whose code was fine, and a security gate that
-          # fails on somebody else's outage is a gate people learn to re-run
-          # without reading. Retries on transient status too, not only on
-          # connection errors — a 503 IS the case that happened.
-          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
-          gitleaks version
-      - name: Scan repository history
-        run: gitleaks detect --source . --redact --verbose --exit-code 1
