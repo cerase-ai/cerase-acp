@@ -5,12 +5,16 @@ name: CI
 # image push never blocks the unit-test feedback loop.
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-    # M-CI-COST-1: skip CI on planning-only commits.
-    paths-ignore:
-      - 'devplan/**'
+  # M-THE-ACTIONS-BILL-IS-ONE-JOB-IN-SEVEN-1: no standalone `push` trigger.
+  # docker-publish.yml already runs this suite as its `gate` via workflow_call,
+  # on every push to main and every v* tag, so a push trigger here ran every job
+  # a SECOND time on the same commit. Measured 2026-08-20/21 across the five
+  # repositories that had one: 184 jobs and 239 billed minutes over two days,
+  # and 48 of 48 commits also ran the gate — not one standalone run was the only
+  # coverage. cerase-core removed its own for this reason in M-CI-COST-2.
+  #
+  # Nothing loses coverage here: this trigger and the publish ignored the same
+  # `devplan/**`, so every push that ran CI now runs it once through the gate.
   pull_request:
     branches: [main]
     paths-ignore:
