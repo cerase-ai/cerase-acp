@@ -2,7 +2,7 @@
 # Re-sync from cerase-core:  ./scripts/sync-tooling.sh
 # The first divergence between two copies is otherwise silent.
 078ced3cdb793c9563d64343f1d501bc43c0ba15e031bb8e8bf3770ba085cc0b  scripts/docs-parity.sh
-797914ea702f35ba095566448dfd5eecbb4e805c30981c96c75783a2366ff800  scripts/secrets-guard.sh
+0d99f97e2699aff445f2554199c1ef577793ea45037dce513ac1962899c5e69b  scripts/secrets-guard.sh
 55d5ac7234da628e1cef4b3ec247f5b080c7180fc70f43af8a49f592c048c400  scripts/_secret_renames.sh
 0d48207f7f32c170d0fc16d9b26bd808c90641d99b7c9080d1ad13133e1c935e  scripts/comment-check.sh
 1536500c180884e75c06cc36b21bc43b942acb71d8d50bda1db56e4336b4246e  scripts/_registry_images.sh

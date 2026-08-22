@@ -106,6 +106,12 @@ while IFS= read -r f; do
         .env|.env.example|*.example|*.example.*) continue ;;
         # The tool's own pruned backups of `.env`, rule 2's exception.
         .env.bak-secret-*) continue ;;
+        # WHEN each credential was last written, never what it is: one line of
+        # `<NAME><TAB><timestamp>` per rotation, written by `_stamp_rotation`.
+        # It is data ABOUT the credential file rather than a copy of it, and a
+        # guard that reddened on it would redden on ordinary local state — which
+        # is how the rule that actually matters gets switched off.
+        .env.rotations) continue ;;
     esac
     case "$f" in ./.git/*|./vendor/*|./node_modules/*|./.terraform/*|*/tests/*|*/test/*) continue ;; esac
     _fail "named credential variant in the checkout: ${f#./}
