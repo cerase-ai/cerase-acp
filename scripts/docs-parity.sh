@@ -200,79 +200,123 @@ _check_verbs() {   # <tool name> <script path>
     # is exactly what the workspace wants them to do.
     [ -f "$script" ] || return 0
 
-    local known; known="$(_verbs_of "$script")"
-    [ -n "$known" ] || return 0
+    local -A known=()
+    local v
+    while IFS= read -r v; do
+        [ -n "$v" ] && known["$v"]=1
+    done < <(_verbs_of "$script")
+    [ "${#known[@]}" -gt 0 ] || return 0
 
-    local doc verb
-    for doc in "${DOCS[@]}"; do
+    # ONE grep over the whole corpus, not one per document. This pass used to
+    # spawn a process per tool per file -- 640 of them for four tools and 160
+    # documents, a third of the script's cost, and growing with every doc added.
+    # The filename is the only thing the per-file loop was providing, and -H
+    # carries it on every hit.
+    local doc verb hit
+    local -A said=()
+    while IFS= read -r hit; do
+        doc="${hit%%:*}"
+        verb="${hit#*:}"
+        verb="${verb##* }"
+        [ -n "$verb" ] || continue
         # docs/internal/ holds DATED audit snapshots — history, which
         # legitimately records the commands that existed on the day it was
         # written. Same carve-out docs_parity.bats already makes.
         [[ "$doc" == docs/internal/* ]] && continue
         [[ "$doc" == devplan/* ]] && continue
-
-        while read -r verb; do
-            [ -n "$verb" ] || continue
-            grep -qx -- "$verb" <<<"$known" && continue
-            echo "${RED}✗${NC} $doc: \`./$tool $verb\` — $tool has no such subcommand"
-            failures=$((failures + 1))
-        done < <(grep -oE "\./${tool//./\\.} [a-z][a-z-]*" "$doc" 2>/dev/null | awk '{print $2}' | sort -u)
-    done
+        [ -n "${known[$verb]:-}" ] && continue
+        # One line per document and verb, which is what the per-document
+        # `sort -u` used to give.
+        [ -n "${said[$doc|$verb]:-}" ] && continue
+        said[$doc|$verb]=1
+        echo "${RED}✗${NC} $doc: \`./$tool $verb\` — $tool has no such subcommand"
+        failures=$((failures + 1))
+    done < <(grep -oHE "\./${tool//./\\.} [a-z][a-z-]*" "${DOCS[@]}" 2>/dev/null || true)
 }
 
 # ── 2. paths ────────────────────────────────────────────────────────────────
 _check_paths() {
-    local doc line target base
-    for doc in "${DOCS[@]}"; do
+    local doc target base hit
+
+    # Every pass below reads the WHOLE corpus in one grep. It used to read each
+    # document with four of them -- the two opt-out markers and the two shapes a
+    # path is written in -- which is 640 processes for 160 documents and was
+    # nearly all of this script's cost. The work now grows with the bytes
+    # scanned rather than with the number of files, so adding a document costs
+    # what the document weighs.
+
+    # An explicit, VISIBLE opt-out for a document that describes ANOTHER
+    # project's tree -- an evaluation of a third-party gateway, a note about a
+    # skill's own layout. Those paths are correct and this repo cannot resolve
+    # them. The marker lives in the document rather than in a list inside this
+    # script, so the reason travels with the file and a future reader sees why
+    # the guard is quiet about it.
+    local -A external=()
+    while IFS= read -r hit; do
+        [ -n "$hit" ] && external["$hit"]=1
+    done < <(grep -lF '<!-- docs-parity: external' "${DOCS[@]}" 2>/dev/null || true)
+
+    # A SCOPED opt-out, for the handful of strings that look like paths and are
+    # not: an illustrative filename a convention is being taught with, a GitHub
+    # Action reference. One line per string, with its reason next to it, so
+    # nothing is quietly exempt.
+    local -A ignores=()
+    while IFS= read -r hit; do
+        doc="${hit%%:*}"
+        target="${hit##* }"
+        [ -n "$target" ] || continue
+        ignores["$doc"]="${ignores[$doc]:-} $target"
+    done < <(grep -oHE '<!-- docs-parity: ignore [^ ]+' "${DOCS[@]}" 2>/dev/null || true)
+
+    # The slash test -- `_looks_like_path`'s first and cheapest rule -- is
+    # applied HERE rather than in the bash loop, because it discards most of the
+    # candidates: 15.746 backticked strings and links across this repo's
+    # documents, 3.390 of them with a slash in.
+    #
+    # It is a filter on the OUTPUT and must not be pushed into the patterns
+    # above, which is where the first attempt put it. Requiring a slash between
+    # the delimiters changes which PAIR of backticks grep chooses: on a line
+    # holding four backticked spans, the opener of the one that is a path was
+    # consumed as the closer of a span before it, and the path stopped being
+    # extracted at all. Compared against the previous implementation over every
+    # candidate in this repo, that version differed on three of them; this one on
+    # none.
+    {
+        # Markdown links, minus URLs, anchors and mailto.
+        grep -oHE '\]\([^)]+\)' "${DOCS[@]}" 2>/dev/null | sed 's/:](/:/; s/)$//'
+        # Backticked strings that look like paths.
+        grep -oHE '`[^`]+`' "${DOCS[@]}" 2>/dev/null | tr -d '`'
+    } | awk '{ i = index($0, ":"); if (i > 0 && index(substr($0, i + 1), "/")) print }' \
+      | while IFS= read -r hit; do
+        doc="${hit%%:*}"
+        target="${hit#*:}"
+        [ -n "$target" ] || continue
+
         # Same carve-out the verb pass makes, for the same reason: docs/internal/
         # holds DATED audit snapshots, and an audit that names the screenshots it
         # was written from is a correct record of that day even after the
         # screenshots are gone. devplan/ is a work log, not documentation.
         [[ "$doc" == docs/internal/* ]] && continue
         [[ "$doc" == devplan/* ]] && continue
+        [ -n "${external[$doc]:-}" ] && continue
 
-        # An explicit, VISIBLE opt-out for a document that describes ANOTHER
-        # project's tree — an evaluation of a third-party gateway, a note about
-        # a skill's own layout. Those paths are correct and this repo cannot
-        # resolve them. The marker lives in the document rather than in a list
-        # inside this script, so the reason travels with the file and a future
-        # reader sees why the guard is quiet about it.
-        grep -q '<!-- docs-parity: external' "$doc" && continue
+        case "$target" in
+            http*|mailto:*|\#*|'<'*|*' '*|*'$'*|*'*'*) continue ;;
+        esac
+        target="${target%%#*}"
+        [ -n "$target" ] || continue
 
-        # A SCOPED opt-out, for the handful of strings that look like paths and
-        # are not: an illustrative filename a convention is being taught with, a
-        # GitHub Action reference. One line per string, with its reason next to
-        # it, so nothing is quietly exempt.
-        local -a ignores=()
-        mapfile -t ignores < <(grep -oE '<!-- docs-parity: ignore [^ ]+' "$doc" | awk '{print $4}')
+        _looks_like_path "$target" || continue
 
-        base="$(dirname "$doc")"
+        # `dirname` for a top-level document is "." and not the document
+        # itself, and a parameter expansion cannot tell the two apart on its own.
+        base="${doc%/*}"
+        [ "$base" = "$doc" ] && base="."
+        _resolves "$target" "$base" && continue
 
-        {
-            # Markdown links, minus URLs, anchors and mailto.
-            grep -oE '\]\([^)]+\)' "$doc" 2>/dev/null | sed 's/^](//; s/)$//'
-            # Backticked strings that look like paths.
-            grep -oE '`[^`]+`' "$doc" 2>/dev/null | tr -d '`'
-        } | while read -r target; do
-            [ -n "$target" ] || continue
-            case "$target" in
-                http*|mailto:*|\#*|'<'*|*' '*|*'$'*|*'*'*) continue ;;
-            esac
-            target="${target%%#*}"
-            [ -n "$target" ] || continue
+        case " ${ignores[$doc]:-} " in *" $target "*) continue ;; esac
 
-            _looks_like_path "$target" || continue
-
-            _resolves "$target" "$base" && continue
-
-            local ign skip=false
-            for ign in "${ignores[@]}"; do
-                [ "$target" = "$ign" ] && { skip=true; break; }
-            done
-            $skip && continue
-
-            echo "MISSING|$doc|$target"
-        done
+        echo "MISSING|$doc|$target"
     done
 }
 
