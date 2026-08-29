@@ -624,6 +624,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // with a real readiness signal (discord.js client.isReady()) report a
       // concrete boolean.
       ready: startFailures.has(id) ? false : adapter.ready ? adapter.ready() : null,
+      // How long since the channel provider actually answered this adapter.
+      // `ready` above already folds it in, so this is the reader's way of
+      // telling the two down-states apart: a client that knows it dropped, and
+      // a client that believes a dead socket is alive. Null on a channel that
+      // measures nothing, which is every channel but Discord today.
+      lastContactAgeMs: adapter.reachability ? adapter.reachability().ageMs : null,
     }));
 
   // Productionised injection endpoint the control-plane scheduled-message

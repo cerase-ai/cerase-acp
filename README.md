@@ -148,6 +148,8 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `CERASE_ACP_INTERNAL_PORT` | `7476` | Port for the internal server. |
 | `CERASE_ACP_ADAPTER_RETRY_BASE_MS` | `5000` | Self-heal: first retry delay for an adapter whose `start()` failed. Doubles each attempt (half-jittered). |
 | `CERASE_ACP_ADAPTER_RETRY_MAX_MS` | `300000` | Self-heal: cap on the retry backoff interval. |
+| `CERASE_ACP_REACHABILITY_INTERVAL_MS` | `60000` | How often each Discord adapter asks Discord whether it is answering (one unauthenticated gateway lookup). Every message sent or received counts as the same evidence, so a busy bridge rarely probes. |
+| `CERASE_ACP_REACHABILITY_STALE_MS` | `180000` | How long Discord may stay silent before the adapter reports `ready: false` on `/healthz` and `/internal/status`. Three missed probes, so one blip cannot flip it. |
 
 The six below were read by the code and documented nowhere until 2026-08-10
 (`M21`). They are listed because an undocumented default is a decision somebody

@@ -3,42 +3,103 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// Structural pin for the OPT-67 fix. Testing makeSendTarget end-to-end
-// requires a full discord.js client harness (mock channel, DM creation,
-// event loop); the regression we care about is whether the post-
-// channel.send sendTyping ever comes back. A grep over the source is
-// exactly the right level — it catches a future commit that re-adds
-// the line without setting up a real Discord test runtime.
+// Structural pins for the typing-indicator wiring. Driving makeSendTarget
+// end-to-end requires a full discord.js client harness (mock channel, DM
+// creation, event loop); what this file can pin is that the adapter uses the
+// pieces in the right order. The behaviour those pieces have — a refresh
+// never reaching the channel after a message, an in-flight refresh landing
+// before it — is asserted for real against a fake channel in
+// typing-keepalive.test.ts, which is where the ordering logic lives.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const adapter = readFileSync(join(here, "discord-adapter.ts"), "utf8");
 
 describe("discord-adapter (OPT-67 invariants)", () => {
-  it("does NOT call channel.sendTyping() inside makeSendTarget after channel.send()", () => {
-    // Locate the makeSendTarget block. It's the only place where a
-    // post-send sendTyping would re-introduce the bug.
-    const start = adapter.indexOf("makeSendTarget(");
-    expect(start).toBeGreaterThan(0);
-    // Block ends at the closing `};` of the returned async function.
-    // Take a generous window after `makeSendTarget(` to capture the
-    // entire returned closure.
-    const block = adapter.slice(start, start + 1500);
+  const sendTargetAt = adapter.indexOf("makeSendTarget(");
+  const sendFileAt = adapter.indexOf("async sendFile(");
+  // makeSendTarget is the last member of the returned adapter, so its block
+  // runs to the end of the file. sendFile is the member just above it.
+  const sendTargetBlock = adapter.slice(sendTargetAt);
+  const sendFileBlock = adapter.slice(sendFileAt, sendTargetAt);
 
-    // The only acceptable sendTyping inside discord-adapter.ts is the
-    // INITIAL one fired by startTypingKeepalive (in the MessageCreate
-    // handler, NOT in makeSendTarget). Any sendTyping call within
-    // makeSendTarget reintroduces the trailing-typing ghost.
-    const occurrences = (block.match(/sendTyping\s*\(/g) ?? []).length;
+  it("does NOT call channel.sendTyping() inside makeSendTarget after channel.send()", () => {
+    expect(sendTargetAt).toBeGreaterThan(0);
+    // The only acceptable sendTyping in this file is the one the keepalive
+    // fires from the MessageCreate handler. Any call inside makeSendTarget
+    // reintroduces the trailing-typing ghost.
+    const occurrences = (sendTargetBlock.match(/sendTyping\s*\(/g) ?? []).length;
     expect(occurrences).toBe(0);
   });
 
-  it("startTypingKeepalive is imported + used in the MessageCreate flow", () => {
-    expect(adapter).toMatch(/import\s*\{[^}]*startTypingKeepalive[^}]*\}/);
-    expect(adapter).toMatch(/startTypingKeepalive\(/);
+  it("the send target ends the turn's keepalive BEFORE handing the chunk to the channel", () => {
+    // The order is the fix. Ending it after the send — which is what the
+    // handler's finally block did — leaves a refresh free to arrive after the
+    // message and raise the indicator again for another ten seconds.
+    const ended = sendTargetBlock.indexOf("await typing.end(userId)");
+    const sent = sendTargetBlock.indexOf("await channel.send(chunk)");
+    expect(ended).toBeGreaterThan(-1);
+    expect(sent).toBeGreaterThan(-1);
+    expect(ended).toBeLessThan(sent);
+  });
+
+  it("the file-upload path ends the keepalive before uploading", () => {
+    const ended = sendFileBlock.indexOf("await typing.end(userId)");
+    const sent = sendFileBlock.indexOf("await channel.send(");
+    expect(ended).toBeGreaterThan(-1);
+    expect(sent).toBeGreaterThan(-1);
+    expect(ended).toBeLessThan(sent);
+  });
+
+  it("the keepalive is registered per user so the send path can reach it", () => {
+    expect(adapter).toMatch(/import\s*\{[^}]*TypingSessions[^}]*\}/);
+    expect(adapter).toMatch(/new TypingSessions\(\)/);
+    expect(adapter).toMatch(/typing\.start\(userId,/);
   });
 
   it("stopTyping is invoked in a finally block (no leak on dispatcher throw)", () => {
     expect(adapter).toMatch(/finally\s*\{[\s\S]*?stopTyping\(\)/);
+  });
+
+  it("the oversize notice is delivered before the indicator is raised", () => {
+    // The notice is a message, and a message is what takes the indicator
+    // down. Raising it first would spend it on the notice and leave the model
+    // turn behind it with none.
+    const notice = adapter.indexOf("sendSystemMessage(agent.id, userId, notice)");
+    const raised = adapter.indexOf("typing.start(userId,");
+    expect(notice).toBeGreaterThan(-1);
+    expect(raised).toBeGreaterThan(-1);
+    expect(notice).toBeLessThan(raised);
+  });
+});
+
+// The reachability wiring. What the monitor DOES is asserted behaviourally in
+// reachability.test.ts, and what the bridge publishes in bridge.test.ts; what
+// is left here is that this adapter reaches for it at all — the failure being
+// guarded is a future edit that puts the cached client flag back on its own.
+describe("discord-adapter reports reachability, not a cached flag", () => {
+  it("readiness is the client flag AND the measurement", () => {
+    expect(adapter).toMatch(/import\s*\{[^}]*isChannelReady[^}]*\}/);
+    expect(adapter).toMatch(/isChannelReady\(client\.isReady\(\), reachability\.snapshot\(\)\)/);
+  });
+
+  it("the probe is unauthenticated, so a refused token is not read as an outage", () => {
+    // A rejected credential is reported on its own, and it names the value to
+    // fix. Letting it also blank out reachability would put one failure under
+    // two names and send an operator to the wrong one.
+    expect(adapter).toMatch(/Routes\.gateway\(\),\s*\{\s*auth:\s*false\s*\}/);
+  });
+
+  it("the monitor runs for exactly as long as the client does", () => {
+    const startBlock = adapter.slice(adapter.indexOf("async start()"), adapter.indexOf("async stop()"));
+    const stopBlock = adapter.slice(adapter.indexOf("async stop()"), adapter.indexOf("async sendFile("));
+    expect(startBlock).toMatch(/reachability\.start\(\)/);
+    expect(stopBlock).toMatch(/reachability\.stop\(\)/);
+  });
+
+  it("real traffic counts as evidence, so a talking bridge barely probes", () => {
+    // Both directions: an inbound DM in the message handler, and a delivered
+    // chunk in the send target.
+    expect((adapter.match(/reachability\.note\(\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 });
 

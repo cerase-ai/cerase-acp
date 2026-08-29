@@ -15,6 +15,7 @@
 
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import type { ReachabilitySnapshot } from "./reachability.js";
 
 /**
  * The outcome of a single delivery attempt to a chat channel. The adapter
@@ -33,42 +34,70 @@ export interface ChatAdapter {
   start(): Promise<void>;
   stop(): Promise<void>;
   /**
-   * Does the underlying channel client report a live connection right
-   * now? The Discord adapter delegates to discord.js
-   * `client.isReady()` (true after login, false on a gateway drop), so the
-   * control-plane can tell "Attivo ma disconnesso" apart from a healthy
-   * agent. An adapter that doesn't implement it is treated as ready while
-   * it is held (best-effort — those channels expose no finer signal yet).
+   * Can this adapter carry a message right now? The control-plane renders it
+   * as the "Connessione" badge and tells "Attivo ma disconnesso" apart from a
+   * healthy agent, and an operator alert is wired to it — so it has to mean
+   * reachability, not a cached flag.
+   *
+   * The Discord adapter answers with both halves: discord.js `client.isReady()`
+   * (true after login, false on a gateway drop) AND its reachability
+   * measurement below. The flag alone reported a live connection through a
+   * five-minute network outage, which is the case a client's view of its own
+   * socket structurally cannot see. An adapter that doesn't implement this at
+   * all is treated as ready while it is held (best-effort — those channels
+   * expose no finer signal yet).
    */
   ready?(): boolean;
+  /**
+   * What this adapter has measured about the provider answering it: when it
+   * last did, and whether that is now old enough to call silence. Optional —
+   * an adapter without one reports readiness from its client alone, which is
+   * the older and weaker meaning.
+   *
+   * It is published beside `ready` rather than folded away into it, because
+   * the two failures need different answers from an operator: a client that
+   * reports a dropped connection is the library's problem to retry, and a
+   * client that reports a live one while nothing answers is the network's.
+   */
+  reachability?(): ReachabilitySnapshot;
   /**
    * The function the dispatcher uses to send a chunk to this user's DM.
    *
    * **OPT-67 typing-indicator contract (applies to ALL adapters that
    * surface a "is typing…" UX):**
    *
-   *   1. Typing should be visible WHILE chunks are streaming (signals
-   *      "still working").
-   *   2. Typing must STOP cleanly after the final chunk — no ghost
-   *      indicator lingering 5-10s past the actual reply.
+   *   1. Typing should be visible while the turn is silent (signals
+   *      "still working" before any text has arrived).
+   *   2. Typing must be gone the moment the reply lands — no ghost
+   *      indicator lingering 5-10s past it.
+   *
+   * On these platforms the indicator has no "off" call: it comes down
+   * because we posted a message, or because its own timeout expired. So
+   * the message IS the clear, and the only thing that can undo it is a
+   * refresh that reaches the platform afterwards. The whole contract
+   * follows from that.
    *
    * The pattern used by the Discord adapter (see `discord-adapter.ts`
    * + `typing-keepalive.ts`):
    *
-   *   - On MessageCreate: start an interval-based keepalive
-   *     (`startTypingKeepalive` → `setInterval` calling the channel's
-   *     typing API every 7s). Returns a `stopFn`.
-   *   - Inside `makeSendTarget`, **do NOT** call the typing API after
-   *     each `channel.send(chunk)`. The keepalive interval already
-   *     covers the streaming window; an extra post-send typing call
-   *     re-prolongs the indicator past the final chunk → ghost.
-   *   - Wrap the dispatcher call in a `try { … } finally { stopFn(); }`
-   *     block so the interval is cancelled the moment streaming ends.
+   *   - On MessageCreate: start an interval-based keepalive through the
+   *     adapter's `TypingSessions` registry, keyed by the platform user
+   *     id, so the send target can reach it.
+   *   - Inside `makeSendTarget`, **await** the registry's `end(userId)`
+   *     immediately BEFORE `channel.send(chunk)` — never after, and never
+   *     unawaited: a refresh already in flight can otherwise overtake the
+   *     message on the wire and re-raise the indicator.
+   *   - Do not restart the keepalive between chunks. The send target
+   *     cannot know whether another chunk follows, and a refresh issued
+   *     after the last one is the ghost again.
+   *   - Keep the dispatcher call in a `try { … } finally { stopFn(); }`
+   *     block. That is now the leak guard for a turn that delivers
+   *     nothing, not the normal exit path.
    *
    * Telegram (`sendChatAction('typing')`), Slack (assistant.threads.
    * setStatus or similar), Workspace Chat (any future "thinking…"
-   * affordance): same shape — keepalive in the message handler, NO
-   * per-chunk re-trigger.
+   * affordance): same shape — keepalive in the message handler, cleared
+   * by the send that precedes it, NO per-chunk re-trigger.
    */
   makeSendTarget(userId: string): (chunk: string) => Promise<DeliveryResult>;
 

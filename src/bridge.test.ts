@@ -7,6 +7,7 @@ import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import { type AgentConfig, type BridgeConfig, loadConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { isChannelReady } from "./reachability.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -847,5 +848,85 @@ describe("an attach that never arrives cannot close as a delivered turn", () => 
     // arrive. What it is told is asserted on the prompt itself in the
     // dispatcher suite; here the point is that the second turn happens at all.
     expect(chat.filter((c) => c.includes("Tre slide sul progetto Falco")).length).toBe(2);
+  });
+});
+
+// The measured case: the container lost its network for five minutes and both
+// status surfaces reported the Discord adapter healthy throughout, with
+// nothing logged. The adapter recovered on its own, so nothing was broken —
+// but an alert wired to `ready` would not have fired. What the bridge
+// publishes has to move when the provider stops answering.
+describe("a client that believes a dead socket is alive", () => {
+  let handle: RunBridgeHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  const soloConfig = (): BridgeConfig => ({
+    agents: [{ id: "solo", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } }],
+    session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+  });
+
+  const readStatus = async (secret: string) => {
+    const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+      headers: { authorization: `Bearer ${secret}` },
+    });
+    return (await res.json()) as {
+      agents: Array<{ id: string; ready: boolean | null; lastContactAgeMs?: number | null }>;
+    };
+  };
+
+  it("reports not-ready, and publishes the age, while the provider is silent", async () => {
+    const SECRET = "reachability-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+
+    let ageMs = 1_000;
+    const snapshot = () => ({ lastContactAt: 0, ageMs, stale: ageMs > 180_000 });
+    const adapter: ChatAdapter = {
+      agentId: "solo",
+      async start() {},
+      async stop() {},
+      // The client's own flag never wavered during the outage, so it is held
+      // true here and the verdict has to come from the measurement.
+      ready: () => isChannelReady(true, snapshot()),
+      reachability: snapshot,
+      makeSendTarget: () => async () => ({ ok: true }),
+    };
+
+    handle = await runBridge({ config: soloConfig(), bridgeE2eTest: false, createAdapter: async () => adapter });
+
+    expect((await readStatus(SECRET)).agents[0]).toMatchObject({ ready: true, lastContactAgeMs: 1_000 });
+    expect((await fetch(`${handle.internalUrl}/healthz`)).status).toBe(200);
+
+    ageMs = 5 * 60_000;
+    expect((await readStatus(SECRET)).agents[0]).toMatchObject({ ready: false, lastContactAgeMs: 300_000 });
+    const health = await fetch(`${handle.internalUrl}/healthz`);
+    expect(health.status).toBe(503);
+    expect(await health.json()).toMatchObject({ status: "no_chat_transport", ready: 0, readyOf: 1 });
+  });
+
+  it("an adapter that measures nothing keeps the older meaning and a null age", async () => {
+    // Non-vacuity: the change must not make every channel report an age, and a
+    // channel with no probe must not read as unreachable.
+    const SECRET = "no-probe-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+
+    const adapter: ChatAdapter = {
+      agentId: "solo",
+      async start() {},
+      async stop() {},
+      ready: () => true,
+      makeSendTarget: () => async () => ({ ok: true }),
+    };
+
+    handle = await runBridge({ config: soloConfig(), bridgeE2eTest: false, createAdapter: async () => adapter });
+
+    expect((await readStatus(SECRET)).agents[0]).toMatchObject({ ready: true, lastContactAgeMs: null });
+    expect((await fetch(`${handle.internalUrl}/healthz`)).status).toBe(200);
   });
 });

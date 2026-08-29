@@ -99,6 +99,19 @@ export interface AgentLiveness {
    */
   ready: boolean | null;
   /**
+   * Ms since the channel provider last answered this adapter, `null` when it
+   * is not measured (no probe on this channel) or has never answered.
+   *
+   * It is here because `ready` alone was read as reachability and is not the
+   * same question. A bridge that had lost its network answered `ready: true`
+   * for five minutes with nothing logged: the client's cached view of its own
+   * socket said one thing and the network said another, and this surface
+   * carried only the first. `ready` now takes this age into account; the age
+   * itself is published so a reader can tell a dropped socket apart from a
+   * silent provider without guessing.
+   */
+  lastContactAgeMs?: number | null;
+  /**
    * Present only while the bridge is not trying to reconnect this agent
    * because the failure cannot resolve itself. Absent means either healthy or
    * a transient failure still being retried, which are different situations
@@ -266,6 +279,12 @@ async function handleRequest(
       // healthy bridge report fewer ready than adapters, which reads as "one
       // is down" when nothing is down — a number that gets an alert wired to
       // it, and then muted.
+      //
+      // What `ready` MEANS is set by the adapter, and for a Discord adapter it
+      // now includes whether the provider is answering rather than only what
+      // its client caches. That is the other half of the same lesson: this
+      // number is the one an alert is wired to, so it has to be the one that
+      // moves when the bridge cannot reach anybody.
       //
       // So the denominator is published too, over the adapters the question
       // applies to. `readyOf` is 0 on a bridge of only web agents, and
