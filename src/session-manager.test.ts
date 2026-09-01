@@ -14,6 +14,8 @@ function makeConfig(overrides?: {
   reply?: string;
   crashAfterPrompt?: boolean;
   idleTimeoutMinutes?: number;
+  chunks?: number;
+  delayMsPerChunk?: number;
   cwd?: string;
   lateBurstText?: string;
   lateBurstIntervalMs?: number;
@@ -28,6 +30,8 @@ function makeConfig(overrides?: {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
   if (overrides?.crashAfterPrompt) env.push("FAKE_CRASH_AFTER_PROMPT=1");
+  if (overrides?.chunks !== undefined) env.push(`FAKE_CHUNKS=${overrides.chunks}`);
+  if (overrides?.delayMsPerChunk !== undefined) env.push(`FAKE_DELAY_MS_PER_CHUNK=${overrides.delayMsPerChunk}`);
   if (overrides?.loadSession) env.push("FAKE_LOAD_SESSION=1");
   if (overrides?.loadFails) env.push("FAKE_LOAD_FAILS=1");
   if (overrides?.lateBurstText !== undefined) env.push(`FAKE_LATE_BURST_TEXT=${overrides.lateBurstText}`);
@@ -84,6 +88,41 @@ describe("SessionManager", () => {
     expect(mgr.activeSessionCount()).toBe(1);
     await mgr.prompt("doc-qa", "user-A", "second");
     expect(mgr.activeSessionCount()).toBe(1);
+  });
+
+  // The control-plane asks this before it replaces an assistant's AGENTS.md,
+  // because that write restarts the slot and a restart mid-generation loses the
+  // user's message. Everything else in the appliance answers the same question
+  // from a timestamp a cron copies once a minute, which stays true for as long
+  // as the window it is compared against — so an assistant that answers often
+  // never reads idle and never receives the change at all.
+  it("counts a turn in flight while its prompt RPC is outstanding, and not before or after", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "x", chunks: 6, delayMsPerChunk: 40 }));
+    expect(mgr.turnsInFlight("doc-qa")).toBe(0);
+
+    const turn = mgr.prompt("doc-qa", "user-A", "ping");
+    await vi.waitFor(() => expect(mgr.turnsInFlight("doc-qa")).toBeGreaterThan(0));
+
+    await turn;
+    expect(mgr.turnsInFlight("doc-qa")).toBe(0);
+  });
+
+  it("counts a queued second turn, so a user who sent two messages is not read as idle", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "x", chunks: 6, delayMsPerChunk: 40 }));
+    await mgr.prompt("doc-qa", "user-A", "warm the child");
+
+    const first = mgr.prompt("doc-qa", "user-A", "one");
+    const second = mgr.prompt("doc-qa", "user-A", "two");
+    await vi.waitFor(() => expect(mgr.turnsInFlight("doc-qa")).toBe(2));
+
+    await Promise.all([first, second]);
+    expect(mgr.turnsInFlight("doc-qa")).toBe(0);
+  });
+
+  it("counts nothing for an agent that has never talked", async () => {
+    mgr = new SessionManager(makeConfig({ reply: "x" }));
+    await mgr.prompt("doc-qa", "user-A", "ping");
+    expect(mgr.turnsInFlight("some-other-agent")).toBe(0);
   });
 
   it("isolates sessions across different (agent, user) keys", async () => {

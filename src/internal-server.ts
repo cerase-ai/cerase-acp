@@ -112,6 +112,23 @@ export interface AgentLiveness {
    */
   lastContactAgeMs?: number | null;
   /**
+   * Turns outstanding for this agent right now — being generated plus queued
+   * behind them. Absent when the bridge is not asked to count them.
+   *
+   * The bridge is the only component that holds a turn: it makes the ACP
+   * `session/prompt` call and waits for it, so it knows a turn has started
+   * before anything is written down and knows it has ended before anything is
+   * reconciled. Every other reading of "is this assistant busy" in the
+   * appliance is a timestamp somebody's cron copied, which is late in both
+   * directions.
+   *
+   * The control-plane reads it before replacing an assistant's AGENTS.md,
+   * because that write restarts the slot and a restart mid-generation leaves
+   * the user's message unanswered. Additive: a reader that does not know the
+   * field is unaffected.
+   */
+  turnsInFlight?: number;
+  /**
    * Present only while the bridge is not trying to reconnect this agent
    * because the failure cannot resolve itself. Absent means either healthy or
    * a transient failure still being retried, which are different situations

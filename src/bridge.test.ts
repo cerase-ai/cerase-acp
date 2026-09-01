@@ -256,9 +256,19 @@ describe("runBridge", () => {
       headers: { authorization: `Bearer ${SECRET}` },
     });
     expect(statusRes.status).toBe(200);
-    const status = (await statusRes.json()) as { agents: Array<{ id: string; ready: boolean | null }> };
+    const status = (await statusRes.json()) as {
+      agents: Array<{ id: string; ready: boolean | null; turnsInFlight?: number }>;
+    };
     expect(status.agents.find((a) => a.id === "doc-qa")?.ready).toBe(false);
     expect(status.agents.find((a) => a.id === "policy-qa")).toBeDefined();
+
+    // Every agent carries its outstanding-turn count, and zero is a value
+    // rather than an absence. The control-plane reads it before it replaces an
+    // AGENTS.md, so a field that is simply missing would be read as "cannot
+    // tell" and the change would be held back on an assistant doing nothing.
+    for (const a of status.agents) {
+      expect(a.turnsInFlight).toBe(0);
+    }
 
     // Inject to the healthy agent (allowed user 222) succeeds end-to-end.
     const injectRes = await fetch(`${handle.internalUrl}/internal/inject`, {

@@ -189,6 +189,34 @@ export class SessionManager {
   }
 
   /**
+   * How many turns this agent has outstanding right now: prompts being
+   * generated plus prompts queued behind them, across every user talking to
+   * it.
+   *
+   * This is the only place in the appliance that knows. A turn IS the
+   * `session/prompt` RPC this queue holds, so the count is true the instant
+   * the prompt is enqueued and false the instant the RPC settles — no poll,
+   * no timestamp, no window. The control-plane asks it before replacing an
+   * assistant's AGENTS.md, because that write restarts the slot and a restart
+   * mid-generation loses the user's message.
+   *
+   * A session still being spawned counts too. The child is started BY the
+   * first prompt, so the gap between "the user sent something" and "the queue
+   * holds it" is a real part of the turn, and it is the part where a restart
+   * is most likely to be reported as the assistant simply never answering.
+   */
+  turnsInFlight(agentId: string): number {
+    let n = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.agentId === agentId) n += entry.queue.size();
+    }
+    for (const key of this.inFlightSpawns.keys()) {
+      if (key.startsWith(`${agentId}:`)) n += 1;
+    }
+    return n;
+  }
+
+  /**
    * The opencode session id this pair is currently talking through.
    *
    * A test seam, and the only way to tell a resumed conversation from a

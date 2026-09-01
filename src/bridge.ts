@@ -630,6 +630,13 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // a client that believes a dead socket is alive. Null on a channel that
       // measures nothing, which is every channel but Discord today.
       lastContactAgeMs: adapter.reachability ? adapter.reachability().ageMs : null,
+      // Turns outstanding for this assistant right now. The control-plane asks
+      // it before it replaces an AGENTS.md, because that write restarts the
+      // slot; until it could ask, the only answer available on that side was
+      // `conversations.last_msg_ts`, which a cron copies once a minute and
+      // which therefore reports a finished turn as running for as long as the
+      // window it is compared against.
+      turnsInFlight: sessionManager.turnsInFlight(id),
     }));
 
   // Productionised injection endpoint the control-plane scheduled-message
