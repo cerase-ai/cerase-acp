@@ -77,17 +77,72 @@ _registry_sha_for() {
     git -C "$repo_dir" rev-parse --short=7 HEAD 2>/dev/null
 }
 
+# The ignore patterns a publish workflow declares, one per line, verbatim.
+#
+# Verbatim is the whole point. This parser used to keep only the literal head of
+# each pattern, cutting it at the first star, so a subtree filter survived as a
+# directory prefix and a filter that begins with a wildcard survived as the
+# empty string. An empty entry excuses no path, so a two-pattern filter behaved
+# like a one-directory filter and a README outside that directory was judged
+# publishable. The matcher below is what reads the glob, and it needs the glob.
+_registry_ignored_patterns() {
+    local wf="$1" pat
+    [[ -f "$wf" ]] || return 0
+    while IFS= read -r pat; do
+        # A YAML scalar here never contains a space, so cutting at the first one
+        # drops trailing whitespace and any inline comment in a single step.
+        pat="${pat%%[[:space:]]*}"
+        pat="${pat#\'}"; pat="${pat%\'}"
+        pat="${pat#\"}"; pat="${pat%\"}"
+        [[ -n "$pat" ]] && printf '%s\n' "$pat"
+    done < <(
+        sed -n '/paths-ignore:/,/^[[:space:]]*[a-z_]*:[[:space:]]*$/p' "$wf" \
+            | sed -n 's/^[[:space:]]*-[[:space:]]*//p'
+    )
+    return 0
+}
+
+# 0 when one repository path is covered by one workflow filter pattern.
+#
+# GitHub Actions and bash agree on almost all of this: a star already crosses a
+# slash inside a bash pattern match, so a subtree filter needs no rewriting. The
+# one place they differ is a leading doubled-star segment, which GitHub lets
+# stand for NO directory at all -- so a filter written for markdown anywhere has
+# to cover a README sitting at the repository root, and bash on its own would
+# demand a slash. The extglob optional-group form expresses exactly that, and
+# the previous extglob setting is restored because this is sourced into a
+# pre-push hook and into the CLI, neither of which asked for it.
+#
+# An empty pattern matches nothing. A parser that loses a pattern therefore
+# leaves a path unexcused and the check reds, which is the safe direction: the
+# opposite would silence a real missing publish.
+_registry_path_matches() {
+    local pat="$1" path="$2"
+    [[ -n "$pat" && -n "$path" ]] || return 1
+    local any_dirs='?(*/)'
+    pat="${pat//'**/'/$any_dirs}"
+    local had_extglob=1
+    shopt -q extglob || had_extglob=0
+    shopt -s extglob
+    local rc=1
+    # shellcheck disable=SC2053  # the right side is a glob on purpose.
+    [[ "$path" == $pat ]] && rc=0
+    [[ "$had_extglob" -eq 1 ]] || shopt -u extglob
+    return "$rc"
+}
+
 # 0 when HEAD changed nothing the publish workflow cares about.
 #
-# Both workflows carry `paths-ignore: [docs/**, devplan/**]`, so a docs-only or  comment-check: ok
-# devplan-only push does not run the publish job at all and NO image carries
-# that sha — legitimately. Without this, the very next devplan commit would be
-# reported as "CI never published", and a check that cries wolf gets ignored,
-# which is how the original defect survived.
+# The workflows exclude documentation and plan paths from the publish job, so a
+# push touching only those does not run it and NO image carries that sha --
+# legitimately. Without this, the very next plan commit would be reported as
+# "CI never published", and a check that cries wolf gets ignored, which is how
+# the original defect survived.
 #
-# Scoped to HEAD's own diff. A multi-commit push whose head commit is docs-only
-# may still have published (an earlier commit in the range touched code), so
-# this only suppresses the RED — it never asserts an image must be absent.
+# Scoped to HEAD's own diff. A multi-commit push whose head commit is
+# documentation may still have published (an earlier commit in the range touched
+# code), so this only suppresses the RED -- it never asserts an image must be
+# absent.
 _registry_head_is_ignored_only() {
     local repo_dir="$1"
     # The ref to judge, HEAD by default. The pre-push note asks about the commit
@@ -98,19 +153,16 @@ _registry_head_is_ignored_only() {
     local wf="$repo_dir/.github/workflows/docker-publish.yml"
     [[ -f "$wf" ]] || return 1
     local -a ignored=()
-    mapfile -t ignored < <(
-        sed -n "/paths-ignore:/,/^[[:space:]]*[a-z_]*:[[:space:]]*$/p" "$wf" \
-            | sed -n "s/^[[:space:]]*-[[:space:]]*'\{0,1\}\([^'*]*\).*/\1/p"
-    )
+    mapfile -t ignored < <(_registry_ignored_patterns "$wf")
     [[ ${#ignored[@]} -gt 0 ]] || return 1
     local -a changed=()
     mapfile -t changed < <(git -C "$repo_dir" diff --name-only "${ref}~1..${ref}" 2>/dev/null)
     [[ ${#changed[@]} -gt 0 ]] || return 1
-    local f prefix hit
+    local f pat hit
     for f in "${changed[@]}"; do
         hit=0
-        for prefix in "${ignored[@]}"; do
-            [[ -n "$prefix" && "$f" == "$prefix"* ]] && { hit=1; break; }
+        for pat in "${ignored[@]}"; do
+            _registry_path_matches "$pat" "$f" && { hit=1; break; }
         done
         [[ "$hit" -eq 1 ]] || return 1
     done
