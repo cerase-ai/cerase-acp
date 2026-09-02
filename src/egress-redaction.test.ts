@@ -295,3 +295,45 @@ describe("M-ASSISTANT-MULTITASK-1: scrub the internal subagent/task primitive", 
     expect(redactEngineIdentifiers(once)).toBe(once);
   });
 });
+
+describe("the appliance's own summary sections", () => {
+  // Verbatim shape of a block a real assistant put into a customer's chat when
+  // asked to join a meeting and send an email. The detector held the engine's
+  // section names while SlotWriter::compactionPrompt() had replaced them, so
+  // the one form the product asks for was the one it could not recognise.
+  const OURS = [
+    "## Objective",
+    "- L'utente ha chiesto di partecipare a una riunione e di prenderne appunti.",
+    "",
+    "## Important Details",
+    "- La riunione è stata prenotata con titolo \"Riunione\".",
+    "",
+    "## Work State",
+    "### Completed",
+    "- Partecipazione alla riunione tramite il link fornito.",
+    "### Blocked",
+    "- Trascrizione non disponibile.",
+    "",
+    "## Next Move",
+    "1. (none)",
+    "",
+    "## Relevant Files",
+    "- (none)",
+  ].join("\n");
+
+  it("withholds the block the appliance's own prompt asks for", () => {
+    expect(isInternalSummaryBlock(OURS)).toBe(true);
+  });
+
+  it("still needs corroboration — one section heading is not a summary", () => {
+    expect(isInternalSummaryBlock("## Objective\n\nHo scritto a Marta come chiesto.")).toBe(false);
+  });
+
+  it("lets an ordinary reply through", () => {
+    expect(
+      isInternalSummaryBlock(
+        "Ho partecipato alla riunione e ti ho mandato il riassunto per email. Fammi sapere se vuoi che aggiunga altro.",
+      ),
+    ).toBe(false);
+  });
+});

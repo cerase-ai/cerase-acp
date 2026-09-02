@@ -260,12 +260,27 @@ export function stripToolCallArtifacts(text: string): string {
  * engine-identifier list; it also lives in the deploy doc).
  */
 const SUMMARY_SECTION_MARKERS: ReadonlyArray<RegExp> = [
+  // The engine's own names.
   /\banchored\s+summary\b/i,
   /\bconstraints?\s*&\s*preferences\b/i,
   /\bactive\s+tools?\s*&\s*state\b/i,
   /\bnext\s+actions\b/i,
   /\btechnical\s+notes\b/i,
   /\bworkspace\s+paths?\s*(?:&|and)?\s*files\b/i,
+  // OURS. The appliance replaces the engine's section list with its own in
+  // SlotWriter::compactionPrompt(), and this set was left on the engine's —
+  // so the one shape the product actually asks the model to produce was the
+  // one shape the detector could not see. An assistant answered a request to
+  // join a meeting with its whole working-memory block, in a customer's chat.
+  //
+  // The note above says to review these on an OpenCode bump. The drift came
+  // from our side instead: the prompt naming the sections is in cerase-core
+  // and this list is here, with nothing holding them equal.
+  /^\s*#{1,4}\s*objective\s*$/im,
+  /^\s*#{1,4}\s*important\s+details\s*$/im,
+  /^\s*#{1,4}\s*work\s+state\s*$/im,
+  /^\s*#{1,4}\s*next\s+move\s*$/im,
+  /^\s*#{1,4}\s*relevant\s+files\s*$/im,
 ];
 // "Anchored Summary" is the block's title — on its own a strong signal.
 const STRONG_SUMMARY_MARKER = /\banchored\s+summary\b/i;
