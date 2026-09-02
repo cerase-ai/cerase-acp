@@ -306,7 +306,7 @@ describe("the appliance's own summary sections", () => {
     "- L'utente ha chiesto di partecipare a una riunione e di prenderne appunti.",
     "",
     "## Important Details",
-    "- La riunione è stata prenotata con titolo \"Riunione\".",
+    '- La riunione è stata prenotata con titolo "Riunione".',
     "",
     "## Work State",
     "### Completed",
