@@ -155,7 +155,7 @@ const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replace
     // match a bare PREFIX: the exclusion then fires on any suffix beginning
     // with an extension, and `cerase-search.mdlist` -- a real recipe -- would
     // reach the user unredacted.
-    pattern: new RegExp("`[a-z0-9]+(?:[-_][a-z0-9]+)+\\.(?:(?!(?:" + FILE_EXTENSIONS + ")`)[a-z0-9_])+`", "gi"),
+    pattern: new RegExp(`\`[a-z0-9]+(?:[-_][a-z0-9]+)+\\.(?:(?!(?:${FILE_EXTENSIONS})\`)[a-z0-9_])+\``, "gi"),
     replacement: "uno strumento",
   },
 ];
