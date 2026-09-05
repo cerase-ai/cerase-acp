@@ -38,9 +38,32 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # NOTE: `--auto` needs `allow_auto_merge` ON, which is a repo SETTING and
+      # not a file -- and on a FREE organisation it can only be turned on for a
+      # PUBLIC repository. Measured across this org: true on exactly the two
+      # public repos and refused on the six private ones, with the API answering
+      # 200 and returning `false`. A setting that succeeds and does not apply is
+      # a shape this workspace has been caught by before.
+      #
+      # So the step SAYS SO instead of failing. A red job on every Dependabot PR
+      # in six repos is noise nobody can act on: the plan is the constraint, not
+      # the configuration.
       - name: Queue it behind the checks
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
-        run: gh pr merge --auto --squash "$PR_URL"
+        run: |
+          set -uo pipefail
+          if gh pr merge --auto --squash "$PR_URL"; then
+            echo "Queued behind the required checks." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Not queued, and this is not a failure"
+            echo
+            echo "Auto-merge was refused. On a free organisation it can only be"
+            echo "enabled for a public repository, and this one is private — so"
+            echo "nothing here can own the queue and the PR stays open for a"
+            echo "person to look at."
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
