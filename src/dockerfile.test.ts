@@ -100,4 +100,15 @@ describe(".dockerignore", () => {
     expect(dockerignore).toMatch(/^\.git$/m);
     expect(dockerignore).toMatch(/^agents\.yaml$/m);
   });
+
+  // `.claude/worktrees/` holds a full checkout per background agent. It was
+  // half a gigabyte in this repository, untracked, unignored, and therefore
+  // inside the build context of every local `cli.sh build` — a checkout of a
+  // DIFFERENT branch shipped to the docker daemon on every one of them.
+  // It is in `.gitignore` too; this asserts the half that `git status` cannot
+  // show, because a directory can be ignored by git and still be sent to
+  // docker.
+  it("excludes agent worktrees, which are a checkout inside the checkout", () => {
+    expect(dockerignore).toMatch(/^\.claude$/m);
+  });
 });
