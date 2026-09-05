@@ -21,7 +21,15 @@
 # a red on it — which is the outcome an operator should see.
 name: Dependabot auto-merge
 
-on: pull_request_target
+# The mapping form, not the scalar `on: pull_request_target`.
+#
+# Both mean the same thing to GitHub — no `types:` is every default type — but a
+# scalar is a STRING to anything that parses the workflow, and
+# `cerase-marketplace` has a case that walks every workflow's triggers and reds
+# on one that is not a mapping. It went red the moment this file was vendored
+# there. Uniform shape, one less thing for a reader to special-case.
+on:
+  pull_request_target:
 
 permissions:
   contents: write
