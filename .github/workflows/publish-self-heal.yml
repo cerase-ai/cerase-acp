@@ -128,9 +128,15 @@ jobs:
           # By workflow PATH, never by display name: a filter on the name goes
           # blind the day somebody renames the workflow, and goes blind
           # SILENTLY -- it reports "no run" for a publish that ran.
+          # NOTE: `.conclusion // "pending"`, and the fallback is the whole of
+          # it. A queued or running publish has a NULL conclusion, which `@csv`
+          # renders as an empty string -- indistinguishable from "no run at
+          # all", so a commit whose build was still in flight got a SECOND one
+          # dispatched on top of it. Caught by running this for real; no offline
+          # case could see it, because a stub answers a finished list.
           runs="$(gh api \
                     "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?head_sha=${sha}&per_page=20" \
-                    --jq '[.workflow_runs[] | .conclusion] | @csv' 2>/dev/null || echo unreadable)"
+                    --jq '[.workflow_runs[] | (.conclusion // "pending")] | @csv' 2>/dev/null || echo unreadable)"
 
           # THREE outcomes, not two. A list we could not read is not an empty
           # list, and treating it as one dispatches a build every morning for a
@@ -145,7 +151,8 @@ jobs:
             # A superseded run is never retried by anything else.
             echo "verdict=cancelled" >> "$GITHUB_OUTPUT"
           else
-            # Failed, or still running. Neither is ours to repeat.
+            # Failed, or still running. Neither is ours to repeat: a red is a
+            # fix to push, and a build in flight is already doing the work.
             echo "verdict=ran" >> "$GITHUB_OUTPUT"
           fi
 
