@@ -1,33 +1,44 @@
-# A merge this repository performs on itself wakes nothing.
+# A repo publishes its own missed head, with no credential.
 #
-# `dependabot-auto-merge.yml` squash-merges with `secrets.GITHUB_TOKEN`, and
-# GitHub does not raise events for anything that token does -- deliberately, so
-# a workflow cannot trigger itself in a loop. The merge lands on `main` and no
-# `push` event exists, so `docker-publish.yml` never starts. Nothing is red:
-# nothing ran.
+# The fleet watcher in cerase-core finds a commit the registry does not carry
+# and RETRIES the publish before it files. That retry reaches only the
+# repository it lives in: dispatching a SIBLING's workflow is a write on another
+# repository, and `github.token` cannot do it. The answer was going to be a
+# fine-grained PAT with write on actions across the org.
 #
-# Measured 2026-09-05. `feb52bc` bumped `qs` 6.15.3 -> 6.16.0 on 2026-09-03 and
-# carried zero workflow runs of any kind for two days, while `:latest` served
-# the code from before a dependency security fix.
+# It is not needed. `workflow_dispatch` is the documented exception to the rule
+# that a token may not cause its own events -- it may START a run -- so a repo
+# can always dispatch ITS OWN publish. One file, identical in every repo, and
+# nothing to create, rotate or forget has expired.
 #
-# ⚠️ **Reacting to the merge cannot work, and that is the trap.** The obvious
-# repair -- a job on `pull_request_target: closed` that publishes once the PR is
-# merged -- is suppressed by the same rule that suppressed the push. Every event
-# descending from that merge is silent, so the trigger has to come from outside
-# it. Hence a schedule.
+# ── What makes a head unpublished ──
 #
-# `workflow_dispatch` is the documented exception: the token may START a run
-# even though it may not cause one. `cerase-core`'s fleet watcher already relies
-# on that to retry its own publishes, and this is the same recovery moved into
-# the repository that structurally needs it. It needs no credential -- the
-# cross-repo watcher can only report this repo's gap, because dispatching a
-# SIBLING's workflow needs a PAT that does not exist yet.
+# Two causes, and they are the two the watcher's retry exists for:
+#
+#   - NO RUN AT ALL. A merge performed with `secrets.GITHUB_TOKEN` raises no
+#     events -- deliberately, so a workflow cannot trigger itself in a loop --
+#     so a Dependabot auto-merge lands on main and wakes nothing. Nothing is
+#     red: nothing ran.
+#   - A CANCELLED RUN. Two pushes in quick succession, and the concurrency group
+#     kills the first. A superseded run is never retried, because the next
+#     push's path filter diffs against its own parent and sees nothing to do.
+#
+# A FAILED run is deliberately not retried. A publish that failed is a fix to
+# push, not a dice roll, and a workflow that re-dispatches it every morning
+# burns a runner to reproduce the same red.
+#
+# ── What it does NOT cover, said out loud ──
+#
+# A run that SUCCEEDED while publishing nothing. That is what a path filter does
+# on purpose, and telling the two apart needs the image names and the registry.
+# The fleet watcher still asks the registry twice a day and still reports it;
+# what moved here is the ACT, not the detection.
 
 name: Publish the head that has none
 
 on:
   schedule:
-    # Once a day, an hour before the fleet watcher's morning pass, so a gap this
+    # Once a day, an hour before the fleet watcher's morning pass, so a gap a
     # repository can close itself is closed before the watcher files it.
     - cron: '25 6 * * *'
   workflow_dispatch:
@@ -37,11 +48,6 @@ permissions:
   # To START this repository's own publish. Dispatching is a write even though
   # what it starts only reads.
   actions: write
-  # To ASK the registry what it holds. A run's colour is a statement about a
-  # run; a tag is a fact about the world, and only the second is what a deploy
-  # can pull -- `fleet-red-main.yml` in cerase-core draws the same distinction
-  # and for the same reason.
-  packages: read
 
 jobs:
   heal:
@@ -50,77 +56,121 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          # Enough history to walk back past a run of planning-only commits to
-          # the newest one an image was ever expected for.
-          fetch-depth: 25
+          # Enough history to walk back past a run of commits the publish
+          # ignores by path.
+          fetch-depth: 50
 
-      - name: Which commit should the registry be holding, and does it?
+      - name: Which commit should have an image, and has it been through the publish?
         id: ask
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
 
-          # The publish ignores `devplan/**`, so a planning-only commit
-          # correctly produces no image and main's head legitimately has none.
-          # The commit to ask about is the newest one that ISN'T planning-only.
-          # Without this the self-heal would read every devplan commit as a gap
-          # and rebuild the image every morning, on a repository whose Actions
-          # bill is a standing concern.
+          # The publish workflow, by the same candidate names `registry-check`
+          # walks: the repos here do not agree on one. First that exists wins,
+          # and every repo carrying this file has exactly one of them.
+          wf=""
+          for f in docker-publish.yml publish.yml ci.yml; do
+            [ -f ".github/workflows/$f" ] && { wf="$f"; break; }
+          done
+          if [ -z "$wf" ]; then
+            echo "verdict=no-publish-workflow" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "workflow=$wf" >> "$GITHUB_OUTPUT"
+
+          # Its own `paths-ignore`, read from the workflow rather than restated
+          # here: the patterns differ per repo and a copy would go stale in six
+          # of the seven.
+          mapfile -t ignore < <(
+            sed -n '/^[[:space:]]*paths-ignore:/,/^[[:space:]]*[a-z_-]*:/p' ".github/workflows/$wf" \
+              | sed -n "s/^[[:space:]]*-[[:space:]]*['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p"
+          )
+
+          # Two substitutions cover both shapes that occur: `docs/**` becomes
+          # `docs/*` and `**/*.md` becomes `*.md`. A `case` glob spans `/`, so
+          # the first matches at any depth and the second matches at the root.
+          ignored() {
+            local g="$1" p="$2"
+            p="${p//\*\*\//}"
+            p="${p//\*\*/\*}"
+            case "$g" in $p) return 0 ;; esac
+            return 1
+          }
+
+          # The newest commit the publish was meant to fire on. Without this a
+          # docs-only head would be dispatched every morning: it correctly has
+          # no run, for ever.
           sha=""
-          for c in $(git rev-list -n 25 HEAD); do
-            if git show --name-only --format= "$c" | grep -qv '^devplan/'; then
-              sha="$c"; break
-            fi
+          for c in $(git rev-list -n 50 HEAD); do
+            expected=0
+            while IFS= read -r changed; do
+              [ -n "$changed" ] || continue
+              hit=0
+              for p in ${ignore[@]+"${ignore[@]}"}; do
+                ignored "$changed" "$p" && { hit=1; break; }
+              done
+              [ "$hit" -eq 1 ] || { expected=1; break; }
+            done < <(git show --name-only --format= "$c")
+            [ "$expected" -eq 1 ] && { sha="$c"; break; }
           done
 
           if [ -z "$sha" ]; then
             echo "verdict=not-expected" >> "$GITHUB_OUTPUT"
-            echo "short=none" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "short=${sha:0:7}" >> "$GITHUB_OUTPUT"
 
-          # ASK THE REGISTRY, not the run list. A cancelled publish leaves a run
-          # behind, so counting runs answers "it ran" for the single most common
-          # cause of a missing image -- a run superseded by a later push is
-          # never retried, and that trap is already recorded in this workspace.
-          # The tag is the fact a deploy can actually pull.
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1
+          # By workflow PATH, never by display name: a filter on the name goes
+          # blind the day somebody renames the workflow, and goes blind
+          # SILENTLY -- it reports "no run" for a publish that ran.
+          runs="$(gh api \
+                    "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?head_sha=${sha}&per_page=20" \
+                    --jq '[.workflow_runs[] | .conclusion] | @csv' 2>/dev/null || echo unreadable)"
 
-          ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/cerase-acp:sha-${sha:0:7}"
-          out="$(docker manifest inspect "$ref" 2>&1)"; status=$?
-
-          # THREE outcomes, not two. "I could not look" is not "it is not
-          # there", and collapsing them dispatches a full image build every
-          # morning for a registry that is merely refusing us.
-          if [ "$status" -eq 0 ]; then
-            echo "verdict=held" >> "$GITHUB_OUTPUT"
-          elif printf '%s' "$out" | grep -qiE 'manifest unknown|not found'; then
-            echo "verdict=missing" >> "$GITHUB_OUTPUT"
-          else
+          # THREE outcomes, not two. A list we could not read is not an empty
+          # list, and treating it as one dispatches a build every morning for a
+          # repository whose API is merely refusing us.
+          if [ "$runs" = "unreadable" ]; then
             echo "verdict=unreadable" >> "$GITHUB_OUTPUT"
-            printf 'registry said: %s\n' "$out"
+          elif [ -z "${runs//[\"\',]/}" ]; then
+            echo "verdict=missing" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$runs" | grep -q 'success'; then
+            echo "verdict=published" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$runs" | grep -q 'cancelled'; then
+            # A superseded run is never retried by anything else.
+            echo "verdict=cancelled" >> "$GITHUB_OUTPUT"
+          else
+            # Failed, or still running. Neither is ours to repeat.
+            echo "verdict=ran" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish it
-        if: steps.ask.outputs.verdict == 'missing'
+        if: steps.ask.outputs.verdict == 'missing' || steps.ask.outputs.verdict == 'cancelled'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run docker-publish.yml --repo "$GITHUB_REPOSITORY" --ref main
-          echo "Dispatched the publish for ${{ steps.ask.outputs.sha }}." >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run "${{ steps.ask.outputs.workflow }}" \
+            --repo "$GITHUB_REPOSITORY" --ref main
 
       - name: Say what was found
         run: |
           {
-            echo "main is at \`${{ steps.ask.outputs.short }}\` — **${{ steps.ask.outputs.verdict }}**"
+            echo "publish workflow: \`${{ steps.ask.outputs.workflow }}\`"
+            echo
+            echo "commit an image was expected for: \`${{ steps.ask.outputs.short }}\` — **${{ steps.ask.outputs.verdict }}**"
             echo
             case "${{ steps.ask.outputs.verdict }}" in
-              held)         echo "The registry holds this commit. Nothing to do." ;;
-              not-expected) echo "Only \`devplan/\` has changed, so no image was ever meant to carry it." ;;
-              missing)      echo "The registry does not hold it. A publish has been dispatched." ;;
-              unreadable)   echo "The registry could not be read, so nothing was dispatched. Not the same as an absent image." ;;
+              published)  echo "It has been through the publish. Nothing to do." ;;
+              ran)        echo "A run exists and did not succeed. A failed publish is a fix to push, not a retry." ;;
+              cancelled)  echo "Its newest run was cancelled by a later push, and nothing else retries one. Dispatched." ;;
+              missing)    echo "No run of the publish exists for it. Dispatched." ;;
+              not-expected) echo "Every commit in range is one the publish ignores by path, so no image was ever meant to carry them." ;;
+              unreadable) echo "The run list could not be read, so nothing was dispatched. Not the same as no runs." ;;
+              no-publish-workflow) echo "This repository has no publish workflow under any known name." ;;
             esac
           } >> "$GITHUB_STEP_SUMMARY"

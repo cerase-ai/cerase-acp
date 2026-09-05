@@ -50,54 +50,59 @@ describe("an auto-merged head still reaches the registry", () => {
     expect(JSON.stringify(selfHeal.on)).not.toContain("pull_request");
   });
 
-  it("the self-heal may dispatch, and dispatches the publish by path", () => {
+  it("the self-heal may dispatch, and starts the publish it discovered", () => {
     expect(selfHeal.permissions?.actions).toBe("write");
 
     const steps = selfHeal.jobs.heal.steps as Array<Record<string, unknown>>;
     const run = steps.map((s) => String(s.run ?? "")).join("\n");
-    // By file path, never by display name: a filter on the name goes blind the
-    // day the workflow is renamed, and goes blind silently.
-    expect(run).toContain("gh workflow run docker-publish.yml");
+    // By workflow PATH, never by display name: a filter on the name goes blind
+    // the day the workflow is renamed, and goes blind silently.
+    expect(run).toContain("actions/workflows/${wf}/runs");
+    expect(run).toContain("gh workflow run");
   });
 
-  it("it asks the registry, not the run list, because a cancelled publish leaves a run", () => {
-    // The most common cause of a commit with no image is a publish superseded
-    // by a later push, and a superseded run is never retried. That run EXISTS,
-    // so counting runs answers "it ran" for exactly the case this is for. A
-    // tag is the fact a deploy can pull; `fleet-red-main.yml` in cerase-core
-    // draws the same distinction, in those words.
-    const steps = selfHeal.jobs.heal.steps as Array<Record<string, unknown>>;
-    const run = steps.map((s) => String(s.run ?? "")).join("\n");
-    expect(run).toContain("docker manifest inspect");
-    expect(run).not.toContain("/runs?head_sha");
-    expect(selfHeal.permissions?.packages).toBe("read");
+  it("is the file cerase-core vendors, not a copy this repo maintains", () => {
+    // NOTE: this repo had a bespoke self-heal that asked the REGISTRY, which is a
+    // stronger question than the shared one asks. It was replaced anyway: six
+    // repos need this behaviour, and two implementations of one question is the
+    // defect the vendoring exists to remove. The shared file is pinned by
+    // `scripts/TOOLING.sha256` and CI reds when this copy drifts from
+    // cerase-core's.
+    const pin = readFileSync(join(repoRoot, "scripts", "TOOLING.sha256"), "utf8");
+    expect(pin).toContain(".github/workflows/publish-self-heal.yml");
   });
 
-  it("it tells a registry it could not read apart from an absent image", () => {
-    // Two outcomes would dispatch a full image build every morning against a
-    // registry that is merely refusing us — and this repository's Actions bill
-    // is a standing concern.
+  it("tells a run list it could not read apart from an empty one", () => {
+    // Three outcomes, not two. Collapsing them dispatches a full image build
+    // every morning for a repository whose API is merely refusing us.
     const steps = selfHeal.jobs.heal.steps as Array<Record<string, unknown>>;
     const run = steps.map((s) => String(s.run ?? "")).join("\n");
     expect(run).toContain("unreadable");
     expect(run).toContain("not-expected");
-    expect(run).toContain("manifest unknown");
   });
 
-  it("the self-heal honours the publish's own path filter", () => {
-    // `docker-publish.yml` ignores the devplan directory, so a planning-only
-    // commit correctly produces no image. A self-heal that did not know this
-    // would read that as a gap and rebuild every morning after every plan
-    // edit — so it walks back to the newest commit an image was expected for,
-    // rather than judging the head alone.
+  it("does not retry a FAILED publish, only a missing or cancelled one", () => {
+    // A red publish is a fix to push, not a dice roll, and re-dispatching it
+    // every morning burns a runner to reproduce the same red. A CANCELLED run
+    // is the opposite: nothing else ever retries a superseded one.
+    const steps = selfHeal.jobs.heal.steps as Array<Record<string, unknown>>;
+    const dispatch = steps.find((s) => String(s.name ?? "") === "Publish it");
+    expect(String(dispatch?.if)).toContain("missing");
+    expect(String(dispatch?.if)).toContain("cancelled");
+    expect(String(dispatch?.if)).not.toContain("ran");
+  });
+
+  it("reads the publish's own path filter rather than restating it", () => {
+    // The publish here ignores the devplan directory, and something else in five
+    // of the six repos that carry this file, so a copy of the patterns would go
+    // stale in most of them. Without the walk-back a planning-only head would
+    // be dispatched every morning: it correctly has no run, for ever.
     const ignored = publish.on.push["paths-ignore"] as string[];
     expect(ignored).toContain("devplan/**");
 
     const steps = selfHeal.jobs.heal.steps as Array<Record<string, unknown>>;
     const run = steps.map((s) => String(s.run ?? "")).join("\n");
-    expect(run).toContain("devplan/");
-    // It walks back to the newest commit an image was expected for, rather than
-    // judging the head alone.
+    expect(run).toContain("paths-ignore");
     expect(run).toContain("git rev-list");
   });
 });
