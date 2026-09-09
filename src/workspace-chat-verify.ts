@@ -52,6 +52,18 @@ export function svuotaCache(): void {
 }
 
 /**
+ * Solo per i test: mette in cache dei certificati, cosi' un test che esercita
+ * il listener non deve raggiungere Google.
+ *
+ * Sta qui invece di un parametro iniettabile sul gestore HTTP perche' un punto
+ * di iniezione sulla verifica e' un modo per disattivarla: questo riempie una
+ * cache che esiste comunque, e non cambia cosa viene controllato.
+ */
+export function seminaCache(certificati: Certificati, durataMs = 60_000, ora: () => number = Date.now): void {
+  cache = { certificati, scadenza: ora() + durataMs };
+}
+
+/**
  * I certificati di Google, con la cache che la risposta stessa dichiara.
  *
  * Google ruota queste chiavi. Scaricarle a ogni richiesta rende il canale
