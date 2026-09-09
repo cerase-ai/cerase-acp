@@ -35,6 +35,7 @@ import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { detectLanguage } from "./turn-meta.js";
+import { accettabile } from "./workspace-chat-verify.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
 
@@ -42,7 +43,14 @@ const logger = makeLogger("cerase-acp.workspace-chat");
 // process — one port). The first adapter to start binds the port; the
 // rest reuse the same server and register their per-agent handlers in
 // a routing map by agent.id (matched in the URL path).
-const ROUTES = new Map<string, (body: WorkspaceChatEvent) => Promise<WorkspaceChatReply | undefined>>();
+interface Rotta {
+  // L'audience sta QUI, non in una variabile di modulo: due agenti sono due app
+  // Chat con due numeri di progetto, e verificare il token di uno contro
+  // l'audience dell'altro accetterebbe richieste destinate a un'altra app.
+  audience: string;
+  gestisci: (body: WorkspaceChatEvent) => Promise<WorkspaceChatReply | undefined>;
+}
+const ROUTES = new Map<string, Rotta>();
 let sharedServer: Server | undefined;
 const WORKSPACE_CHAT_PORT = Number(process.env.WORKSPACE_CHAT_PORT ?? "7475");
 
@@ -74,8 +82,8 @@ async function ensureServerStarted(): Promise<void> {
         res.end();
         return;
       }
-      const handler = ROUTES.get(agentId);
-      if (!handler) {
+      const rotta = ROUTES.get(agentId);
+      if (!rotta) {
         res.statusCode = 404;
         res.end();
         return;
@@ -85,8 +93,19 @@ async function ensureServerStarted(): Promise<void> {
       req.on("end", () => {
         void (async () => {
           try {
+            // La firma si verifica PRIMA di guardare il corpo. Il corpo dice chi
+            // sta parlando (`event.user.email`) e non prova niente: senza questo
+            // controllo chiunque raggiunga l'URL puo' dichiararsi chiunque e
+            // farsi rispondere dall'assistente di quella persona.
+            if (!(await accettabile(req.headers.authorization, rotta.audience, agentId))) {
+              // 401 senza dettagli: a chi non ha superato la verifica non si
+              // spiega quale controllo ha mancato.
+              res.statusCode = 401;
+              res.end();
+              return;
+            }
             const body = chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            const reply = await handler(body as WorkspaceChatEvent);
+            const reply = await rotta.gestisci(body as WorkspaceChatEvent);
             res.statusCode = 200;
             res.setHeader("content-type", "application/json");
             res.end(JSON.stringify(reply ?? {}));
@@ -138,13 +157,16 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
             `number used to verify the Bearer token Google Chat attaches to each webhook request) to enable this channel.`,
         );
       }
-      // NOTE: enforcement of the Google-signed request check against this
-      // audience on each inbound request is a separate future milestone;
-      // until it ships, keep the listener reachable only via the
-      // appliance's Traefik route — never exposed directly.
-      logger.warn(
+      // La verifica per-richiesta ORA c'e' (`workspace-chat-verify.ts`): ogni
+      // POST deve portare un JWT firmato da Chat, destinato a questa audience e
+      // non scaduto, o riceve 401 prima che il corpo venga letto.
+      //
+      // Il blocco qui sopra controlla che un valore sia scritto in
+      // agents.yaml, non che qualcuno lo usi: da solo era verde mentre
+      // nessuna richiesta veniva verificata.
+      logger.info(
         { agentId: agent.id, audience: agent.workspace_chat_verification_audience },
-        "workspace-chat verification audience configured — per-request signed-request enforcement not yet implemented; keep the listener behind Traefik only",
+        "workspace-chat: ogni richiesta sara' verificata contro questa audience",
       );
 
       // Lazy import the Google Chat client. @googleapis/chat is a thin
@@ -157,7 +179,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       });
       chatClient = google.chat({ version: "v1", auth });
 
-      ROUTES.set(agent.id, async (event) => {
+      ROUTES.set(agent.id, { audience: agent.workspace_chat_verification_audience, gestisci: async (event) => {
         if (event.type !== "MESSAGE") return undefined;
         const userId = event.user?.email;
         const text = event.message?.text ?? "";
@@ -197,7 +219,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
         // API (spaces.messages.create). Workspace Chat tolerates an
         // empty sync reply when the bot acks via the REST API later.
         return { text: "" };
-      });
+      } });
 
       await ensureServerStarted();
       logger.info({ agentId: agent.id }, "workspace-chat bot route registered");
