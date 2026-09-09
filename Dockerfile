@@ -26,7 +26,7 @@
 # a different image tomorrow. cerase-agent pinned by digest under M-SUPPLY-PIN-1;
 # this image was left on the moving tag. Refresh both digests together when the
 # node line moves.
-FROM node:22.22.3@sha256:2d178f2785b96dfbf62a416ca2e40f50e30150b4ff3320d706f0d96e90600eb3 AS build
+FROM node:26.8.1@sha256:f5d1cc40abc10c2843339a2134d07817cf33c405cb16bfd052b0ed790254c3a3 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -40,7 +40,7 @@ RUN npm prune --omit=dev
 # OPT-22: bumped from node:20-slim (see build-stage comment).
 # M-ACP-NPM-STRIP-1: digest-pinned, same digest cerase-agent runs — one node
 # across the fleet, and a base that cannot change under either image.
-FROM node:22.22.3-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752 AS runtime
+FROM node:26.8.1-slim@sha256:c0753125a3789977aefe869cbebccf70e3cfd7ea84ca48547458f02e4f1d7146 AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini docker.io \
  && rm -rf /var/lib/apt/lists/*
