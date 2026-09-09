@@ -9,8 +9,8 @@
 // Questi casi provano il RIFIUTO, non la configurazione. Il controllo che
 // esisteva prima guardava che un valore fosse scritto in `agents.yaml`, ed era
 // verde mentre nessuna richiesta veniva verificata.
-import { generateKeyPairSync, createSign } from "node:crypto";
-import { describe, expect, it, beforeEach } from "vitest";
+import { createSign, generateKeyPairSync } from "node:crypto";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { EMITTENTE, RichiestaNonVerificata, svuotaCache, verifica } from "./workspace-chat-verify.js";
 
@@ -25,9 +25,9 @@ function b64(o: unknown): string {
 }
 
 /** Un JWT firmato come lo firma Chat, con i pezzi che il caso vuole cambiare. */
-function token(opts: {
-  aud?: string; iss?: string; exp?: number; iat?: number; kid?: string; firmaSbagliata?: boolean;
-} = {}): string {
+function token(
+  opts: { aud?: string; iss?: string; exp?: number; iat?: number; kid?: string; firmaSbagliata?: boolean } = {},
+): string {
   const adesso = Math.floor(Date.now() / 1000);
   const testa = b64({ alg: "RS256", typ: "JWT", kid: opts.kid ?? KID });
   const corpo = b64({
@@ -39,7 +39,7 @@ function token(opts: {
   const firmatore = createSign("RSA-SHA256");
   firmatore.update(`${testa}.${corpo}`);
   const firma = firmatore.sign(privateKey).toString("base64url");
-  return `${testa}.${corpo}.${opts.firmaSbagliata ? "AAAA" + firma.slice(4) : firma}`;
+  return `${testa}.${corpo}.${opts.firmaSbagliata ? `AAAA${firma.slice(4)}` : firma}`;
 }
 
 /** I certificati di Google, serviti da una finta rete. */
@@ -82,22 +82,25 @@ describe("workspace-chat: verifica della richiesta", () => {
 
   it("una firma manomessa rifiuta", async () => {
     const { recupera } = rete();
-    await expect(verifica(`Bearer ${token({ firmaSbagliata: true })}`, AUDIENCE, { recupera }))
-      .rejects.toThrow(RichiestaNonVerificata);
+    await expect(verifica(`Bearer ${token({ firmaSbagliata: true })}`, AUDIENCE, { recupera })).rejects.toThrow(
+      RichiestaNonVerificata,
+    );
   });
 
   // Un token vero, firmato da Google, ma emesso per l'app Chat di qualcun
   // altro. Senza il controllo dell'audience basterebbe avere una propria app.
   it("un token destinato a un'altra app rifiuta", async () => {
     const { recupera } = rete();
-    await expect(verifica(`Bearer ${token({ aud: "999999999999" })}`, AUDIENCE, { recupera }))
-      .rejects.toThrow(RichiestaNonVerificata);
+    await expect(verifica(`Bearer ${token({ aud: "999999999999" })}`, AUDIENCE, { recupera })).rejects.toThrow(
+      RichiestaNonVerificata,
+    );
   });
 
   it("un token firmato da un'altra identita' di Google rifiuta", async () => {
     const { recupera } = rete();
-    await expect(verifica(`Bearer ${token({ iss: "qualcunaltro@system.gserviceaccount.com" })}`, AUDIENCE, { recupera }))
-      .rejects.toThrow(RichiestaNonVerificata);
+    await expect(
+      verifica(`Bearer ${token({ iss: "qualcunaltro@system.gserviceaccount.com" })}`, AUDIENCE, { recupera }),
+    ).rejects.toThrow(RichiestaNonVerificata);
   });
 
   // Oltre i 300 secondi di tolleranza sull'orologio che la libreria concede. Un
@@ -106,8 +109,9 @@ describe("workspace-chat: verifica della richiesta", () => {
   it("un token scaduto oltre la tolleranza d'orologio rifiuta", async () => {
     const adesso = Math.floor(Date.now() / 1000);
     const { recupera } = rete();
-    await expect(verifica(`Bearer ${token({ iat: adesso - 3000, exp: adesso - 600 })}`, AUDIENCE, { recupera }))
-      .rejects.toThrow(RichiestaNonVerificata);
+    await expect(
+      verifica(`Bearer ${token({ iat: adesso - 3000, exp: adesso - 600 })}`, AUDIENCE, { recupera }),
+    ).rejects.toThrow(RichiestaNonVerificata);
   });
 
   // maxExpiry va passato in SECONDI: in millisecondi il limite diventa
@@ -117,14 +121,16 @@ describe("workspace-chat: verifica della richiesta", () => {
   it("un token con una vita assurda rifiuta, o il limite non e' un limite", async () => {
     const adesso = Math.floor(Date.now() / 1000);
     const { recupera } = rete();
-    await expect(verifica(`Bearer ${token({ iat: adesso - 10, exp: adesso + 86400 * 30 })}`, AUDIENCE, { recupera }))
-      .rejects.toThrow(RichiestaNonVerificata);
+    await expect(
+      verifica(`Bearer ${token({ iat: adesso - 10, exp: adesso + 86400 * 30 })}`, AUDIENCE, { recupera }),
+    ).rejects.toThrow(RichiestaNonVerificata);
   });
 
   it("una chiave che non e' fra quelle pubblicate da Google rifiuta", async () => {
     const { recupera } = rete();
-    await expect(verifica(`Bearer ${token({ kid: "chiave-inventata" })}`, AUDIENCE, { recupera }))
-      .rejects.toThrow(RichiestaNonVerificata);
+    await expect(verifica(`Bearer ${token({ kid: "chiave-inventata" })}`, AUDIENCE, { recupera })).rejects.toThrow(
+      RichiestaNonVerificata,
+    );
   });
 
   // Senza audience non c'e' niente contro cui verificare: e' un rifiuto, non un
@@ -136,7 +142,12 @@ describe("workspace-chat: verifica della richiesta", () => {
   });
 
   it("se i certificati di Google non si recuperano, nessuna richiesta passa", async () => {
-    const recupera = (async () => ({ ok: false, status: 503, json: async () => ({}), headers: { get: () => null } })) as unknown as typeof fetch;
+    const recupera = (async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+      headers: { get: () => null },
+    })) as unknown as typeof fetch;
     await expect(verifica(`Bearer ${token()}`, AUDIENCE, { recupera })).rejects.toThrow(/non recuperabili/);
   });
 

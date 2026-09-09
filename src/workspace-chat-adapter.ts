@@ -179,47 +179,53 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       });
       chatClient = google.chat({ version: "v1", auth });
 
-      ROUTES.set(agent.id, { audience: agent.workspace_chat_verification_audience, gestisci: async (event) => {
-        if (event.type !== "MESSAGE") return undefined;
-        const userId = event.user?.email;
-        const text = event.message?.text ?? "";
-        // C4-4 — inbound attachments: Google Chat delivers uploaded content via
-        // the media-download API (resourceName), not a plain URL. Download each,
-        // store it in the agent workspace, and prepend the [Uploaded files: …]
-        // marker the message-attachment-receiver skill reads.
-        const wcAttachments = extractWorkspaceChatAttachments(event.message);
-        if (!userId || (!text && wcAttachments.length === 0)) return undefined;
+      ROUTES.set(agent.id, {
+        audience: agent.workspace_chat_verification_audience,
+        gestisci: async (event) => {
+          if (event.type !== "MESSAGE") return undefined;
+          const userId = event.user?.email;
+          const text = event.message?.text ?? "";
+          // C4-4 — inbound attachments: Google Chat delivers uploaded content via
+          // the media-download API (resourceName), not a plain URL. Download each,
+          // store it in the agent workspace, and prepend the [Uploaded files: …]
+          // marker the message-attachment-receiver skill reads.
+          const wcAttachments = extractWorkspaceChatAttachments(event.message);
+          if (!userId || (!text && wcAttachments.length === 0)) return undefined;
 
-        let outText = text;
-        if (wcAttachments.length > 0) {
-          const buffers: { name: string; bytes: Buffer }[] = [];
-          for (const att of wcAttachments) {
-            try {
-              const resp = await chatClient!.media.download(
-                { resourceName: att.resourceName },
-                { responseType: "arraybuffer" },
-              );
-              buffers.push({ name: att.name, bytes: Buffer.from(resp.data as ArrayBuffer) });
-            } catch (err) {
-              logger.warn({ err, agentId: agent.id, name: att.name }, "workspace-chat media download failed — skipped");
+          let outText = text;
+          if (wcAttachments.length > 0) {
+            const buffers: { name: string; bytes: Buffer }[] = [];
+            for (const att of wcAttachments) {
+              try {
+                const resp = await chatClient!.media.download(
+                  { resourceName: att.resourceName },
+                  { responseType: "arraybuffer" },
+                );
+                buffers.push({ name: att.name, bytes: Buffer.from(resp.data as ArrayBuffer) });
+              } catch (err) {
+                logger.warn(
+                  { err, agentId: agent.id, name: att.name },
+                  "workspace-chat media download failed — skipped",
+                );
+              }
+            }
+            const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
+            outText = prependUploadMarker(text, stored);
+            // Tell the user about over-cap files
+            // instead of dropping them silently; the stored files still flow.
+            const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
+            if (notice) {
+              await dispatcher.sendSystemMessage(agent.id, userId, notice);
             }
           }
-          const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
-          outText = prependUploadMarker(text, stored);
-          // Tell the user about over-cap files
-          // instead of dropping them silently; the stored files still flow.
-          const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
-          if (notice) {
-            await dispatcher.sendSystemMessage(agent.id, userId, notice);
-          }
-        }
-        await dispatcher.handleMessage(agent.id, userId, outText);
-        // Acknowledge synchronously; reply chunks are sent
-        // asynchronously via the send-target below using the Chat REST
-        // API (spaces.messages.create). Workspace Chat tolerates an
-        // empty sync reply when the bot acks via the REST API later.
-        return { text: "" };
-      } });
+          await dispatcher.handleMessage(agent.id, userId, outText);
+          // Acknowledge synchronously; reply chunks are sent
+          // asynchronously via the send-target below using the Chat REST
+          // API (spaces.messages.create). Workspace Chat tolerates an
+          // empty sync reply when the bot acks via the REST API later.
+          return { text: "" };
+        },
+      });
 
       await ensureServerStarted();
       logger.info({ agentId: agent.id }, "workspace-chat bot route registered");

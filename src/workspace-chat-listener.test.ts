@@ -7,12 +7,11 @@
 // la suite restava verde.
 process.env.WORKSPACE_CHAT_PORT = "0";
 
-import { generateKeyPairSync, createSign } from "node:crypto";
+import { createSign, generateKeyPairSync } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-import { createChatAdapter } from "./chat-adapter.js";
 import type { ChatAdapter } from "./chat-adapter.js";
+import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { EMITTENTE, seminaCache, svuotaCache } from "./workspace-chat-verify.js";
@@ -21,7 +20,9 @@ const KID = "chiave-di-prova";
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const PEM = publicKey.export({ type: "spki", format: "pem" }).toString();
 
-function b64(o: unknown) { return Buffer.from(JSON.stringify(o)).toString("base64url"); }
+function b64(o: unknown) {
+  return Buffer.from(JSON.stringify(o)).toString("base64url");
+}
 
 function token(aud: string, iss = EMITTENTE): string {
   const adesso = Math.floor(Date.now() / 1000);
@@ -67,7 +68,10 @@ describe("workspace-chat: il listener risponde a richieste vere", () => {
     seminaCache({ [KID]: PEM });
     // Due agenti sullo stesso listener, con due audience diverse: e' la
     // configurazione in cui un errore di verifica per-agente si vede.
-    for (const [id, aud] of [["agente-uno", "111111111111"], ["agente-due", "222222222222"]] as const) {
+    for (const [id, aud] of [
+      ["agente-uno", "111111111111"],
+      ["agente-due", "222222222222"],
+    ] as const) {
       const a = await createChatAdapter(agente(id, aud), dispatcher);
       await a.start();
       adattatori.push(a);

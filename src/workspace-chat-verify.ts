@@ -26,8 +26,7 @@ const logger = makeLogger("cerase-acp.workspace-chat.verify");
 export const EMITTENTE = "chat@system.gserviceaccount.com";
 
 /** I certificati pubblici di quell'identita'. */
-export const URL_CERTIFICATI =
-  `https://www.googleapis.com/service_accounts/v1/metadata/x509/${encodeURIComponent(EMITTENTE)}`;
+export const URL_CERTIFICATI = `https://www.googleapis.com/service_accounts/v1/metadata/x509/${encodeURIComponent(EMITTENTE)}`;
 
 // Vita massima accettata per un token, in SECONDI: e' l'unita' che
 // verifySignedJwtWithCertsAsync vuole, e sbagliarla non da' errore. Passando
@@ -71,10 +70,7 @@ export function seminaCache(certificati: Certificati, durataMs = 60_000, ora: ()
  * rifiutare richieste valide il giorno della rotazione. Il `max-age` della
  * risposta e' la durata che Google dichiara, quindi e' quella che si usa.
  */
-export async function certificati(
-  recupera: typeof fetch = fetch,
-  ora: () => number = Date.now,
-): Promise<Certificati> {
+export async function certificati(recupera: typeof fetch = fetch, ora: () => number = Date.now): Promise<Certificati> {
   if (cache && cache.scadenza > ora()) return cache.certificati;
   const resp = await recupera(URL_CERTIFICATI);
   if (!resp.ok) {
@@ -118,11 +114,9 @@ export async function verifica(
   }
   const client = opzioni.client ?? new OAuth2Client();
   const certs = await certificati(opzioni.recupera ?? fetch, opzioni.ora ?? Date.now);
-  let ticket;
+  let ticket: Awaited<ReturnType<OAuth2Client["verifySignedJwtWithCertsAsync"]>>;
   try {
-    ticket = await client.verifySignedJwtWithCertsAsync(
-      m[1], certs, audience, [EMITTENTE], VITA_MASSIMA_SEC,
-    );
+    ticket = await client.verifySignedJwtWithCertsAsync(m[1], certs, audience, [EMITTENTE], VITA_MASSIMA_SEC);
   } catch (err) {
     // Il messaggio della libreria dice gia' quale controllo e' fallito (firma,
     // destinatario, emittente, scadenza) e va riportato: un rifiuto senza
