@@ -28,9 +28,10 @@ const AgentIdSchema = z
 //   channel='slack'          → bot_token + slack_app_token required
 //                              (bot token = xoxb-…, app token = xapp-…
 //                              for Socket Mode)
-//   channel='workspace_chat' → workspace_chat_credentials_path required
-//                              (path inside the bridge container to a
-//                              Google Cloud service-account JSON)
+//   channel='workspace_chat' → nothing per agent. One Chat app serves the
+//                              whole organisation, so its key, project
+//                              number and domains are the top-level
+//                              `workspace_chat` block (see below).
 //   channel='web'            → NO credentials (C2-0). A panel-only agent
 //                              (e.g. the maintainer assistant): turns arrive
 //                              via /internal/inject and the reply is read
@@ -41,7 +42,7 @@ const AgentIdSchema = z
 //   discord  → snowflake user id (numeric string)
 //   telegram → numeric chat_id (string)
 //   slack    → "U…" workspace user id
-//   workspace_chat → email address (must match Workspace domain)
+//   workspace_chat → the user's Google Workspace email address
 //   web      → a synthetic, deterministic user id (e.g. "maintainer:<orgId>")
 export const ChatChannelSchema = z.enum(["discord", "telegram", "slack", "workspace_chat", "web"]);
 export type ChatChannel = z.infer<typeof ChatChannelSchema>;
@@ -52,18 +53,6 @@ const AgentSchema = z
     channel: ChatChannelSchema.default("discord"),
     bot_token: z.string().optional(),
     slack_app_token: z.string().optional(),
-    workspace_chat_credentials_path: z.string().optional(),
-    // Caller-identity verification config for the workspace_chat webhook
-    // listener — the Google Cloud project number the Bearer JWT that Google
-    // Chat attaches to each webhook request is issued for (the `aud` claim to
-    // verify against). The adapter refuses to start when this is absent
-    // (fail-closed: the listener derives the sender from the request body, so
-    // it must never come up without caller verification configured).
-    // Deliberately not required via superRefine: a config-level requirement
-    // would fail the whole agents.yaml load and take every channel down on
-    // reload — the adapter-level guard downs only this channel, consistent
-    // with per-adapter isolation.
-    workspace_chat_verification_audience: z.string().min(1).optional(),
     allowed_users: z.array(z.string().min(1)),
     // Working directory advertised to the ACP child via `session/new`.
     // MUST be a path that exists INSIDE the agent container — passing
@@ -116,12 +105,6 @@ const AgentSchema = z
         need("bot_token", "channel='slack' requires bot_token (xoxb-… bot token)");
         need("slack_app_token", "channel='slack' requires slack_app_token (xapp-… app-level token for Socket Mode)");
         break;
-      case "workspace_chat":
-        need(
-          "workspace_chat_credentials_path",
-          "channel='workspace_chat' requires workspace_chat_credentials_path (path inside the container to the Google service-account JSON)",
-        );
-        break;
     }
   });
 
@@ -129,6 +112,26 @@ const SessionSchema = z.object({
   idle_timeout_minutes: z.number().int().positive(),
   max_concurrent: z.number().int().positive(),
 });
+
+// The organisation's one Google Chat app. Every field is optional here and
+// checked by the adapter's start(), for the same reason the per-channel
+// credentials are checked per agent: a requirement at this level would fail
+// the whole file, and with it the panel-only maintainer and every reload.
+const WorkspaceChatAppSchema = z.object({
+  // The Google Cloud project number of the Chat app: the audience of the JWT
+  // Google attaches to every event. Accepted as a YAML integer too, since a
+  // renderer that casts the column writes a bare number for the same project.
+  project_number: z
+    .union([z.string(), z.number().int()])
+    .transform((v) => String(v))
+    .optional(),
+  // Path, inside the bridge container, of the app's service-account key.
+  credentials_path: z.string().optional(),
+  // Email domains of the organisation. A sender outside them is refused even
+  // when an assistant lists their address.
+  allowed_domains: z.array(z.string()).optional(),
+});
+export type WorkspaceChatAppConfig = z.infer<typeof WorkspaceChatAppSchema>;
 
 const BridgeConfigSchema = z
   .object({
@@ -141,6 +144,7 @@ const BridgeConfigSchema = z
     // tolerate this without crash-looping.
     agents: z.array(AgentSchema),
     session: SessionSchema,
+    workspace_chat: WorkspaceChatAppSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     const seen = new Set<string>();
@@ -154,9 +158,22 @@ const BridgeConfigSchema = z
       }
       seen.add(a.id);
     }
-  });
+  })
+  // The app block is handed to each workspace_chat agent and removed from the
+  // top level. An adapter is started, stopped and respawned per agent, and the
+  // reload diff compares agents: a key or project number that lived only at
+  // the top would change on disk and reach no running adapter.
+  .transform(({ workspace_chat, ...cfg }) => ({
+    ...cfg,
+    agents: cfg.agents.map(
+      (a): AgentConfig => (a.channel === "workspace_chat" && workspace_chat ? { ...a, workspace_chat } : a),
+    ),
+  }));
 
-export type AgentConfig = z.infer<typeof AgentSchema>;
+export type AgentConfig = z.infer<typeof AgentSchema> & {
+  /** The organisation's Chat app, present only on a workspace_chat agent. */
+  workspace_chat?: WorkspaceChatAppConfig;
+};
 export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
 
 // Replaces every `${env:VAR}` token in `raw` with `env[VAR]`. Throws when

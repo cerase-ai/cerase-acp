@@ -97,10 +97,13 @@ export async function certificati(recupera: typeof fetch = fetch, ora: () => num
  */
 export async function verifica(
   header: string | undefined,
-  audience: string,
+  // Every project this listener serves. The token is checked before the body
+  // is read, so the caller cannot yet say which one the event is for; the
+  // returned `destinatario` is the one the token was issued for.
+  audience: string | string[],
   opzioni: { recupera?: typeof fetch; ora?: () => number; client?: OAuth2Client } = {},
 ): Promise<{ emittente: string; destinatario: string }> {
-  if (!audience) {
+  if (audience.length === 0) {
     throw new RichiestaNonVerificata(
       "nessun audience configurato: senza il numero di progetto non c'e' niente contro cui verificare il token",
     );
@@ -128,18 +131,16 @@ export async function verifica(
   return { emittente: payload.iss ?? "", destinatario: String(payload.aud ?? "") };
 }
 
-/** Come `verifica`, ma logga il rifiuto e restituisce un booleano. */
+/** Like `verifica`, but logs a refusal and returns the verified audience, or undefined. */
 export async function accettabile(
   header: string | undefined,
-  audience: string,
-  agentId: string,
+  audience: string | string[],
   opzioni: Parameters<typeof verifica>[2] = {},
-): Promise<boolean> {
+): Promise<string | undefined> {
   try {
-    await verifica(header, audience, opzioni);
-    return true;
+    return (await verifica(header, audience, opzioni)).destinatario;
   } catch (err) {
-    logger.warn({ agentId, motivo: (err as Error).message }, "richiesta webhook rifiutata");
-    return false;
+    logger.warn({ audience, motivo: (err as Error).message }, "workspace-chat event refused: request not verified");
+    return undefined;
   }
 }

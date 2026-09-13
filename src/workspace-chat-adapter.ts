@@ -1,275 +1,384 @@
-// Google Workspace Chat chat adapter.
+// Google Workspace Chat adapter.
 //
-// DM-only adapter implementing the ChatAdapter contract for a
-// Workspace Chat bot. No upstream OSS adapter exists, so we wire
-// the official @googleapis/chat SDK directly.
+// One Chat app serves the whole organisation. Google POSTs every interaction
+// event for that app to a single route, WORKSPACE_CHAT_EVENT_PATH, which the
+// appliance's Traefik forwards unchanged to this listener. Every workspace_chat
+// agent registers its user's address on the one listener, and the verified
+// sender's email decides which assistant an event reaches.
 //
-// Per-tenant setup (operator runbook in docs/operator/workspace-chat-setup.md):
-//   1. Google Cloud project + Chat API enabled.
-//   2. Service-account JSON key downloaded; path injected into
-//      agents.yaml as workspace_chat_credentials_path (path is
-//      inside the bridge container — see docker-compose.yml
-//      volume mount).
-//   3. Workspace Marketplace bot manifest published; Workspace
-//      admin approves installation in the tenant's domain.
-//   4. Webhook URL configured at the bot manifest: points at
-//      the bridge's :7475 endpoint behind Traefik.
+// What the listener checks, in order, before any assistant is involved:
+//   1. the Bearer JWT Google signs, against the project numbers served here;
+//      nothing in the body is read before this passes
+//   2. that the event is a message in a direct message
+//   3. that the sender's email belongs to one of the organisation's domains
+//   4. that exactly one assistant lists that address
+// A request failing 1 gets a bare 401. An event failing 2 to 4 gets a short
+// synchronous answer and reaches no assistant.
 //
-// Webhook ingress vs. long-polling: Workspace Chat does NOT
-// support a Telegram-style "long-polling" pull model. Events are
-// delivered via HTTP POST. This adapter starts an internal HTTP
-// listener and the operator's appliance Traefik routes
-// /chat/<agent-id>/event → bridge:7475/<agent-id>/event.
+// An accepted message is acknowledged at once with an empty body and the turn
+// runs after the HTTP exchange is over: Google waits thirty seconds for the
+// answer and then shows the user an error, and a turn routinely takes longer.
+// The reply is posted with spaces.messages.create under app authentication,
+// into the space the message came from and into its thread when it was written
+// in one.
 //
-// Out of scope per the architecture brief:
-//   - spaces (group rooms)
-//   - threading
-//   - card UI interactive components
+// Direct messages only: no group spaces, no cards.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { chat_v1 } from "googleapis";
+import type { AddressInfo } from "node:net";
 import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
-import type { Dispatcher } from "./dispatcher.js";
+import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { directMessagesOnlyNotice } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
+import { ChatApiError, GOOGLE_CHAT_API_ROOT, readServiceAccountKey, WorkspaceChatApi } from "./workspace-chat-api.js";
 import { accettabile } from "./workspace-chat-verify.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
 
-// All Workspace Chat adapters share a single HTTP listener (one bridge
-// process — one port). The first adapter to start binds the port; the
-// rest reuse the same server and register their per-agent handlers in
-// a routing map by agent.id (matched in the URL path).
-interface Rotta {
-  // L'audience sta QUI, non in una variabile di modulo: due agenti sono due app
-  // Chat con due numeri di progetto, e verificare il token di uno contro
-  // l'audience dell'altro accetterebbe richieste destinate a un'altra app.
-  audience: string;
-  gestisci: (body: WorkspaceChatEvent) => Promise<WorkspaceChatReply | undefined>;
-}
-const ROUTES = new Map<string, Rotta>();
-let sharedServer: Server | undefined;
-const WORKSPACE_CHAT_PORT = Number(process.env.WORKSPACE_CHAT_PORT ?? "7475");
+/** The one path Google calls: https://<appliance domain>/chat/event. */
+export const WORKSPACE_CHAT_EVENT_PATH = "/chat/event";
 
-interface WorkspaceChatEvent {
+const DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+interface ChatSpace {
+  name?: string;
   type?: string;
-  user?: { name?: string; email?: string };
-  message?: WorkspaceChatMessageLike & { text?: string };
+  spaceType?: string;
 }
 
-interface WorkspaceChatReply {
-  text: string;
+interface ChatUser {
+  email?: string;
+  type?: string;
+}
+
+interface ChatEvent {
+  type?: string;
+  user?: ChatUser;
+  space?: ChatSpace;
+  message?: WorkspaceChatMessageLike & {
+    text?: string;
+    sender?: ChatUser;
+    space?: ChatSpace;
+    thread?: { name?: string };
+    threadReply?: boolean;
+  };
+}
+
+/** The organisation's Chat app, as checked by start(). */
+interface ChatApp {
+  projectNumber: string;
+  credentialsPath: string;
+  allowedDomains: string[];
+}
+
+interface Route {
+  agent: AgentConfig;
+  app: ChatApp;
+  accept(event: ChatEvent, userId: string): void;
+}
+
+/** Where a reply goes: the event's space, and its thread when the message was written inside one. */
+interface Conversation {
+  space: string | undefined;
+  thread: string | undefined;
+}
+
+type Outcome = { kind: "ignore" } | { kind: "answer"; text: string } | { kind: "accept"; route: Route; userId: string };
+
+// Keyed by agent id. Routes are few (one per seat) and matched by scanning the
+// agent objects themselves, so an allowlist that a reload replaces in place is
+// what the next event is matched against; nothing is copied at start().
+const ROUTES = new Map<string, Route>();
+const APIS = new Map<string, WorkspaceChatApi>();
+let sharedServer: Server | undefined;
+
+/** The port the webhook listener is bound to, or undefined while it is closed. */
+export function workspaceChatListenerPort(): number | undefined {
+  if (!sharedServer?.listening) return undefined;
+  return (sharedServer.address() as AddressInfo).port;
+}
+
+function respond(res: ServerResponse, status: number, body?: unknown): void {
+  res.statusCode = status;
+  if (body === undefined) {
+    res.end();
+    return;
+  }
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function isDirectMessage(space: ChatSpace | undefined): boolean {
+  if (!space) return false;
+  if (space.spaceType !== undefined) return space.spaceType === "DIRECT_MESSAGE";
+  return space.type === "DM";
+}
+
+function decide(event: ChatEvent, candidates: Route[]): Outcome {
+  if (event.type !== "MESSAGE") return { kind: "ignore" };
+  const user = event.user ?? event.message?.sender;
+  // Another app's message gets no answer at all: two apps refusing each other
+  // is a loop.
+  if (user?.type === "BOT") return { kind: "ignore" };
+
+  const text = event.message?.text ?? "";
+  if (!isDirectMessage(event.space ?? event.message?.space)) {
+    return { kind: "answer", text: directMessagesOnlyNotice(detectLanguage(text)) };
+  }
+  const refusal: Outcome = { kind: "answer", text: pickRefusalMessage(text) };
+
+  const email = user?.email?.trim().toLowerCase() ?? "";
+  const at = email.lastIndexOf("@");
+  if (at <= 0) {
+    logger.warn("workspace-chat event refused: the event carries no sender email");
+    return refusal;
+  }
+  const domain = email.slice(at + 1);
+  if (!candidates.some((r) => r.app.allowedDomains.includes(domain))) {
+    logger.warn({ domain }, "workspace-chat event refused: the sender is outside the organisation's domains");
+    return refusal;
+  }
+
+  const matches = candidates.flatMap((route) => {
+    const userId = route.agent.allowed_users.find((u) => u.trim().toLowerCase() === email);
+    return userId === undefined ? [] : [{ route, userId }];
+  });
+  if (matches.length > 1) {
+    logger.error(
+      { agentIds: matches.map((m) => m.route.agent.id) },
+      "workspace-chat event refused: the sender's address is listed by more than one assistant",
+    );
+    return refusal;
+  }
+  const match = matches[0];
+  if (!match) {
+    logger.info({ domain }, "workspace-chat event refused: no assistant belongs to the sender");
+    return refusal;
+  }
+  return { kind: "accept", route: match.route, userId: match.userId };
+}
+
+async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const path = (req.url ?? "").split("?")[0];
+  if (req.method !== "POST" || path !== WORKSPACE_CHAT_EVENT_PATH || ROUTES.size === 0) {
+    respond(res, 404);
+    return;
+  }
+  const served = [...new Set([...ROUTES.values()].map((r) => r.app.projectNumber))];
+  // A 401 with no body: whoever failed verification is not told which check
+  // they missed. The reason is in the log.
+  const project = await accettabile(req.headers.authorization, served);
+  if (project === undefined) {
+    respond(res, 401);
+    return;
+  }
+
+  let event: ChatEvent;
+  try {
+    event = JSON.parse(await readBody(req)) as ChatEvent;
+  } catch {
+    respond(res, 400);
+    return;
+  }
+
+  const outcome = decide(
+    event,
+    [...ROUTES.values()].filter((r) => r.app.projectNumber === project),
+  );
+  if (outcome.kind === "answer") {
+    respond(res, 200, { text: outcome.text });
+    return;
+  }
+  respond(res, 200, {});
+  if (outcome.kind === "accept") outcome.route.accept(event, outcome.userId);
 }
 
 async function ensureServerStarted(): Promise<void> {
   if (sharedServer) return;
-  await new Promise<void>((resolve, reject) => {
-    sharedServer = createServer((req: IncomingMessage, res: ServerResponse) => {
-      // URL shape: /<agent-id>/event
-      const url = req.url ?? "";
-      const match = /^\/([a-z0-9-]+)\/event$/i.exec(url);
-      if (!match || req.method !== "POST") {
-        res.statusCode = 404;
-        res.end();
-        return;
-      }
-      const agentId = match[1];
-      if (!agentId) {
-        res.statusCode = 404;
-        res.end();
-        return;
-      }
-      const rotta = ROUTES.get(agentId);
-      if (!rotta) {
-        res.statusCode = 404;
-        res.end();
-        return;
-      }
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        void (async () => {
-          try {
-            // La firma si verifica PRIMA di guardare il corpo. Il corpo dice chi
-            // sta parlando (`event.user.email`) e non prova niente: senza questo
-            // controllo chiunque raggiunga l'URL puo' dichiararsi chiunque e
-            // farsi rispondere dall'assistente di quella persona.
-            if (!(await accettabile(req.headers.authorization, rotta.audience, agentId))) {
-              // 401 senza dettagli: a chi non ha superato la verifica non si
-              // spiega quale controllo ha mancato.
-              res.statusCode = 401;
-              res.end();
-              return;
-            }
-            const body = chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            const reply = await rotta.gestisci(body as WorkspaceChatEvent);
-            res.statusCode = 200;
-            res.setHeader("content-type", "application/json");
-            res.end(JSON.stringify(reply ?? {}));
-          } catch (err) {
-            logger.error({ err, agentId }, "workspace chat handler threw");
-            res.statusCode = 500;
-            res.end();
-          }
-        })();
-      });
-    });
-    sharedServer.on("error", reject);
-    sharedServer.listen(WORKSPACE_CHAT_PORT, () => {
-      logger.info({ port: WORKSPACE_CHAT_PORT }, "workspace-chat HTTP listener started");
-      resolve();
+  const server = createServer((req, res) => {
+    handleRequest(req, res).catch((err) => {
+      logger.error({ err }, "workspace-chat listener failed on a request");
+      if (!res.headersSent) respond(res, 500);
     });
   });
+  sharedServer = server;
+  const port = Number(process.env.WORKSPACE_CHAT_PORT ?? "7475");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, () => resolve());
+    });
+  } catch (err) {
+    sharedServer = undefined;
+    throw err;
+  }
+  logger.info(
+    { port: workspaceChatListenerPort(), path: WORKSPACE_CHAT_EVENT_PATH },
+    "workspace-chat listener started",
+  );
+}
+
+function organisationApp(agent: AgentConfig): ChatApp {
+  const wc = agent.workspace_chat;
+  const missing = [
+    wc?.project_number ? undefined : "workspace_chat.project_number",
+    wc?.credentials_path ? undefined : "workspace_chat.credentials_path",
+    wc?.allowed_domains?.length ? undefined : "workspace_chat.allowed_domains",
+  ].filter((m) => m !== undefined);
+  const problems = missing.length > 0 ? [`${missing.join(", ")} missing from agents.yaml`] : [];
+  if (wc?.project_number && !/^\d+$/.test(wc.project_number)) {
+    problems.push("workspace_chat.project_number must be the Google Cloud project number (digits only)");
+  }
+  const notDomains = (wc?.allowed_domains ?? []).filter((d) => !DOMAIN.test(d.trim().toLowerCase()));
+  if (notDomains.length > 0) {
+    problems.push(
+      `workspace_chat.allowed_domains has ${notDomains.length === 1 ? "an entry that is not a domain" : "entries that are not domains"}: ${notDomains.join(", ")}`,
+    );
+  }
+  if (problems.length > 0 || !wc?.project_number || !wc.credentials_path) {
+    throw new Error(`agent "${agent.id}" channel='workspace_chat' refuses to start: ${problems.join("; ")}`);
+  }
+  return {
+    projectNumber: wc.project_number,
+    credentialsPath: wc.credentials_path,
+    allowedDomains: (wc.allowed_domains ?? []).map((d) => d.trim().toLowerCase()),
+  };
+}
+
+function apiFor(app: ChatApp): WorkspaceChatApi {
+  const apiRoot = (process.env.WORKSPACE_CHAT_API_ROOT ?? GOOGLE_CHAT_API_ROOT).replace(/\/+$/, "");
+  const key = `${app.credentialsPath}\n${apiRoot}`;
+  let api = APIS.get(key);
+  if (!api) {
+    api = new WorkspaceChatApi({ keyPath: app.credentialsPath, apiRoot });
+    APIS.set(key, api);
+  }
+  return api;
 }
 
 export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
-  if (!agent.workspace_chat_credentials_path) {
-    throw new Error(
-      `agent "${agent.id}" channel='workspace_chat' missing workspace_chat_credentials_path — should have been caught at config load via superRefine`,
-    );
-  }
+  let api: WorkspaceChatApi | undefined;
+  const conversations = new Map<string, Conversation>();
 
-  // Lazy-loaded SDK client. Real googleapis chat_v1.Chat type
-  // (M-AUDIT-acp-2).
-  let chatClient: chat_v1.Chat | undefined;
+  async function runTurn(event: ChatEvent, userId: string, conversation: Conversation): Promise<void> {
+    const text = event.message?.text ?? "";
+    const refs = extractWorkspaceChatAttachments(event.message);
+    if (!text && refs.length === 0) return;
+
+    let outText = text;
+    if (refs.length > 0 && api) {
+      const buffers: { name: string; bytes: Buffer }[] = [];
+      for (const att of refs) {
+        try {
+          buffers.push({ name: att.name, bytes: await api.downloadMedia(att.resourceName) });
+        } catch (err) {
+          logger.warn(
+            { agentId: agent.id, name: att.name, reason: (err as Error).message },
+            "workspace-chat media download failed, attachment skipped",
+          );
+        }
+      }
+      const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
+      outText = prependUploadMarker(text, stored);
+      const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
+      if (notice) {
+        conversations.set(userId, conversation);
+        await dispatcher.sendSystemMessage(agent.id, userId, notice);
+      }
+    }
+    // The dispatcher asks for this turn's send target before its first await,
+    // so the conversation set on the line before is the one this reply uses,
+    // even when another message from the same person arrives while it runs.
+    conversations.set(userId, conversation);
+    await dispatcher.handleMessage(agent.id, userId, outText);
+  }
 
   return {
     agentId: agent.id,
     async start() {
-      // Fail-closed caller-identity gate. The
-      // webhook listener below trusts the request BODY for the sender
-      // identity (event.user.email): anyone who can reach the port could
-      // impersonate any allowed user. Refuse to start unless the operator
-      // explicitly configured the verification audience (the Google Cloud
-      // project number the Bearer JWT Google Chat sends with each request
-      // is issued for) — so this listener can never be enabled by accident
-      // without caller verification in place. Thrown from start() (not the
-      // factory / config superRefine) so only this channel goes down; the
-      // bridge keeps every other adapter up.
-      if (!agent.workspace_chat_verification_audience) {
-        throw new Error(
-          `agent "${agent.id}" channel='workspace_chat' refuses to start: caller-identity verification is not configured. ` +
-            `The webhook listener derives the message sender from the request body, so it must never be exposed without ` +
-            `verifying the caller. Set workspace_chat_verification_audience in agents.yaml (the Google Cloud project ` +
-            `number used to verify the Bearer token Google Chat attaches to each webhook request) to enable this channel.`,
-        );
-      }
-      // La verifica per-richiesta ORA c'e' (`workspace-chat-verify.ts`): ogni
-      // POST deve portare un JWT firmato da Chat, destinato a questa audience e
-      // non scaduto, o riceve 401 prima che il corpo venga letto.
-      //
-      // Il blocco qui sopra controlla che un valore sia scritto in
-      // agents.yaml, non che qualcuno lo usi: da solo era verde mentre
-      // nessuna richiesta veniva verificata.
-      logger.info(
-        { agentId: agent.id, audience: agent.workspace_chat_verification_audience },
-        "workspace-chat: ogni richiesta sara' verificata contro questa audience",
-      );
-
-      // Lazy import the Google Chat client. @googleapis/chat is a thin
-      // wrapper around the underlying googleapis package + the auth
-      // helpers from google-auth-library.
-      const { google } = await import("googleapis");
-      const auth = new google.auth.GoogleAuth({
-        keyFile: agent.workspace_chat_credentials_path,
-        scopes: ["https://www.googleapis.com/auth/chat.bot"],
-      });
-      chatClient = google.chat({ version: "v1", auth });
-
+      const app = organisationApp(agent);
+      // Read once here so a key the process cannot read downs this channel at
+      // start, with the path and the reason, instead of at the first reply.
+      readServiceAccountKey(app.credentialsPath);
+      api = apiFor(app);
       ROUTES.set(agent.id, {
-        audience: agent.workspace_chat_verification_audience,
-        gestisci: async (event) => {
-          if (event.type !== "MESSAGE") return undefined;
-          const userId = event.user?.email;
-          const text = event.message?.text ?? "";
-          // C4-4 — inbound attachments: Google Chat delivers uploaded content via
-          // the media-download API (resourceName), not a plain URL. Download each,
-          // store it in the agent workspace, and prepend the [Uploaded files: …]
-          // marker the message-attachment-receiver skill reads.
-          const wcAttachments = extractWorkspaceChatAttachments(event.message);
-          if (!userId || (!text && wcAttachments.length === 0)) return undefined;
-
-          let outText = text;
-          if (wcAttachments.length > 0) {
-            const buffers: { name: string; bytes: Buffer }[] = [];
-            for (const att of wcAttachments) {
-              try {
-                const resp = await chatClient!.media.download(
-                  { resourceName: att.resourceName },
-                  { responseType: "arraybuffer" },
-                );
-                buffers.push({ name: att.name, bytes: Buffer.from(resp.data as ArrayBuffer) });
-              } catch (err) {
-                logger.warn(
-                  { err, agentId: agent.id, name: att.name },
-                  "workspace-chat media download failed — skipped",
-                );
-              }
-            }
-            const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
-            outText = prependUploadMarker(text, stored);
-            // Tell the user about over-cap files
-            // instead of dropping them silently; the stored files still flow.
-            const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
-            if (notice) {
-              await dispatcher.sendSystemMessage(agent.id, userId, notice);
-            }
-          }
-          await dispatcher.handleMessage(agent.id, userId, outText);
-          // Acknowledge synchronously; reply chunks are sent
-          // asynchronously via the send-target below using the Chat REST
-          // API (spaces.messages.create). Workspace Chat tolerates an
-          // empty sync reply when the bot acks via the REST API later.
-          return { text: "" };
+        agent,
+        app,
+        accept: (event, userId) => {
+          const conversation: Conversation = {
+            space: (event.space ?? event.message?.space)?.name,
+            thread: event.message?.threadReply === true ? event.message.thread?.name : undefined,
+          };
+          runTurn(event, userId, conversation).catch((err) => {
+            logger.error(
+              { agentId: agent.id, userId, reason: (err as Error).message },
+              "workspace-chat turn failed after the event was acknowledged",
+            );
+          });
         },
       });
-
-      await ensureServerStarted();
-      logger.info({ agentId: agent.id }, "workspace-chat bot route registered");
+      try {
+        await ensureServerStarted();
+      } catch (err) {
+        ROUTES.delete(agent.id);
+        throw err;
+      }
+      logger.info({ agentId: agent.id, project: app.projectNumber }, "workspace-chat assistant registered");
     },
     async stop() {
       ROUTES.delete(agent.id);
-      // The shared HTTP server stays up as long as at least one
-      // workspace_chat agent is registered. If we just removed the
-      // last route, close it.
+      api = undefined;
       if (ROUTES.size === 0 && sharedServer) {
-        await new Promise<void>((resolve) => {
-          sharedServer!.close(() => resolve());
-        });
+        const server = sharedServer;
         sharedServer = undefined;
+        APIS.clear();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
       }
     },
     makeSendTarget(userId: string) {
+      // Taken now, not at send time: see runTurn.
+      const conversation = conversations.get(userId);
       return async (chunk: string): Promise<DeliveryResult> => {
-        // Any failure (not started, no DM space, a failed
-        // messages.create) is returned as `{ ok: false }` rather than thrown,
-        // so the failure travels up the SendQueue → Dispatcher → inject status.
+        let space = conversation?.space;
+        const thread = conversation?.thread;
         try {
-          if (!chatClient) {
-            throw new Error(`workspace-chat adapter for agent "${agent.id}" not started — refusing to send`);
+          if (!api) {
+            throw new Error(`workspace-chat adapter for agent "${agent.id}" is not started, refusing to send`);
           }
-          // The chat client posts to spaces.messages.create with the
-          // user's DM space name. We resolve the user's DM space via
-          // spaces.findDirectMessage which returns the canonical space
-          // name `spaces/AAA…`. Cached per user inside this closure
-          // would speed it up but is omitted for v0.1 simplicity.
-          const space = await chatClient.spaces.findDirectMessage({
-            name: `users/${userId}`,
-          });
-          const spaceName = space.data.name ?? undefined;
-          if (!spaceName) {
-            throw new Error(`workspace-chat: findDirectMessage returned no space name for user "${userId}"`);
-          }
-          await chatClient.spaces.messages.create({
-            parent: spaceName,
-            requestBody: { text: chunk },
-          });
+          // No event from this person since start: a scheduled message, or a
+          // reply after a restart. Their direct-message space with the app is
+          // asked of Google.
+          space ??= await api.findDirectMessage(userId);
+          await api.createMessage(space, chunk, thread);
           return { ok: true };
         } catch (err) {
-          return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+          const error = err instanceof Error ? err : new Error(String(err));
+          logger.error(
+            {
+              agentId: agent.id,
+              userId,
+              space,
+              thread,
+              httpStatus: error instanceof ChatApiError ? error.httpStatus : undefined,
+              googleStatus: error instanceof ChatApiError ? error.googleStatus : undefined,
+              reason: error.message,
+            },
+            "workspace-chat reply not delivered",
+          );
+          return { ok: false, error };
         }
       };
     },

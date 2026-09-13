@@ -242,9 +242,9 @@ session:
 
   // CHANNEL-1 schema cases (OPT-21 D3). Verifies the per-channel
   // superRefine matrix in config.ts: discord/telegram need bot_token,
-  // slack additionally needs slack_app_token, workspace_chat needs
-  // workspace_chat_credentials_path. Legacy YAMLs without `channel`
-  // default to 'discord' for back-compat.
+  // slack additionally needs slack_app_token, workspace_chat needs nothing
+  // per agent. Legacy YAMLs without `channel` default to 'discord' for
+  // back-compat.
 
   it("CHANNEL-1: legacy YAML without `channel` defaults to discord", () => {
     writeFileSync(
@@ -302,15 +302,31 @@ session:
     expect(() => loadConfig(path, {})).toThrow(/slack_app_token/i);
   });
 
-  it("CHANNEL-1: channel=workspace_chat + workspace_chat_credentials_path is valid", () => {
+  // One Chat app serves the whole organisation, so its key, project number and
+  // domains are written once at the top of the file. Each workspace_chat agent
+  // carries a copy after loading, which is what lets a rotated key or a changed
+  // project number reach the adapters through the same per-agent diff that
+  // already respawns an agent whose token changed.
+  it("the organisation's workspace_chat block reaches every workspace_chat agent and no other", () => {
     writeFileSync(
       path,
       `
+workspace_chat:
+  project_number: "123456789012"
+  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
+  allowed_domains: [example.com]
 agents:
-  - id: wc-agent
+  - id: agent-1
     channel: workspace_chat
-    workspace_chat_credentials_path: /var/cerase/workspace-chat-creds/wc-agent.json
-    allowed_users: ["ops@guidance.studio"]
+    allowed_users: ["mario.rossi@example.com"]
+    spawn: { command: docker, args: [] }
+  - id: agent-2
+    channel: workspace_chat
+    allowed_users: ["anna.bianchi@example.com"]
+    spawn: { command: docker, args: [] }
+  - id: maintainer-1
+    channel: web
+    allowed_users: ["maintainer:org-1"]
     spawn: { command: docker, args: [] }
 session:
   idle_timeout_minutes: 60
@@ -318,25 +334,56 @@ session:
 `,
     );
     const cfg = loadConfig(path, {});
-    expect(cfg.agents[0]!.channel).toBe("workspace_chat");
-    expect(cfg.agents[0]!.workspace_chat_credentials_path).toBe("/var/cerase/workspace-chat-creds/wc-agent.json");
+    const app = {
+      project_number: "123456789012",
+      credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
+      allowed_domains: ["example.com"],
+    };
+    expect(cfg.agents.map((a) => [a.id, a.workspace_chat])).toEqual([
+      ["agent-1", app],
+      ["agent-2", app],
+      ["maintainer-1", undefined],
+    ]);
+    expect(Object.keys(cfg)).toEqual(["agents", "session"]);
   });
 
-  // The caller-identity verification knob must survive loadConfig so the
-  // adapter's fail-closed startup guard can read it. It is optional at the
-  // schema level on purpose — the requirement is enforced in the adapter's
-  // start() so a missing value downs only the workspace_chat channel, never
-  // the whole agents.yaml load.
-  it("M-ACP-WSCHAT-GUARD-1: workspace_chat_verification_audience is plumbed through loadConfig", () => {
+  // Symfony's dumper quotes a numeric string, but a renderer that casts the
+  // column to an integer writes a bare number. Both mean the same project.
+  it("a project number written as a YAML integer loads as the same string", () => {
+    writeFileSync(
+      path,
+      `
+workspace_chat:
+  project_number: 123456789012
+  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
+  allowed_domains: [example.com]
+agents:
+  - id: agent-1
+    channel: workspace_chat
+    allowed_users: ["mario.rossi@example.com"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    expect(loadConfig(path, {}).agents[0]!.workspace_chat?.project_number).toBe("123456789012");
+  });
+
+  // A missing block is the adapter's to refuse, not the loader's: failing the
+  // whole file would take the panel-only maintainer down with the channel.
+  it("a workspace_chat agent without the organisation's block still loads", () => {
     writeFileSync(
       path,
       `
 agents:
-  - id: wc-agent
+  - id: agent-1
     channel: workspace_chat
-    workspace_chat_credentials_path: /var/cerase/workspace-chat-creds/wc-agent.json
-    workspace_chat_verification_audience: "123456789012"
-    allowed_users: ["ops@guidance.studio"]
+    allowed_users: ["mario.rossi@example.com"]
+    spawn: { command: docker, args: [] }
+  - id: maintainer-1
+    channel: web
+    allowed_users: ["maintainer:org-1"]
     spawn: { command: docker, args: [] }
 session:
   idle_timeout_minutes: 60
@@ -344,6 +391,32 @@ session:
 `,
     );
     const cfg = loadConfig(path, {});
-    expect(cfg.agents[0]!.workspace_chat_verification_audience).toBe("123456789012");
+    expect(cfg.agents.map((a) => [a.id, a.workspace_chat])).toEqual([
+      ["agent-1", undefined],
+      ["maintainer-1", undefined],
+    ]);
+  });
+
+  // The per-assistant fields belong to the design where every assistant was
+  // its own Chat app. A file still carrying them loads, and they are dropped:
+  // nothing reads them, so a value left there cannot look like configuration.
+  it("per-assistant key and audience fields from the old design are dropped on load", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: agent-1
+    channel: workspace_chat
+    workspace_chat_credentials_path: /var/cerase/workspace-chat-creds/agent-1.json
+    workspace_chat_verification_audience: "123456789012"
+    allowed_users: ["mario.rossi@example.com"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const agent = loadConfig(path, {}).agents[0]! as Record<string, unknown>;
+    expect(Object.keys(agent).filter((k) => k.startsWith("workspace_chat"))).toEqual([]);
   });
 });

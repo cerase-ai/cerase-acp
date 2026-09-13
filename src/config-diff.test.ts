@@ -134,6 +134,29 @@ describe("diffConfigs", () => {
     expect(d.modified[0]!.classification).toBe("bot_token_or_spawn");
   });
 
+  // The key and project number belong to the organisation's one Chat app and
+  // reach each agent as a copy. An adapter holds them from start(), so a
+  // change that did not respawn would leave it verifying against the old
+  // project and posting with the old key until something else restarted it.
+  it("classifies a change to the organisation's workspace_chat block as `bot_token_or_spawn`", () => {
+    const app = {
+      project_number: "111111111111",
+      credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
+      allowed_domains: ["example.com"],
+    };
+    const wc = (overrides: Partial<typeof app>) =>
+      baseAgent("a", { channel: "workspace_chat", workspace_chat: { ...app, ...overrides } });
+    for (const change of [
+      { project_number: "222222222222" },
+      { credentials_path: "/var/cerase/workspace-chat-creds/rotated.json" },
+      { allowed_domains: ["example.com", "example.org"] },
+    ]) {
+      const d = diffConfigs(cfg([wc({})]), cfg([wc(change)]));
+      expect(d.modified).toEqual([{ agentId: "a", classification: "bot_token_or_spawn" }]);
+    }
+    expect(diffConfigs(cfg([wc({})]), cfg([wc({})])).modified).toEqual([]);
+  });
+
   it("works on empty configs (zero → zero)", () => {
     const c = cfg([]);
     const d = diffConfigs(c, c);

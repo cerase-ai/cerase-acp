@@ -1,86 +1,114 @@
-// Fail-closed caller-identity gate on the Workspace Chat webhook listener.
+// What the Workspace Chat adapter needs before it opens the webhook, and what
+// it says when something is missing.
 //
-// The adapter's HTTP listener derives the message sender from the request
-// BODY (`event.user.email`): anyone who can reach the port could impersonate
-// any allowed user. Until Google-signed request verification ships (a future
-// milestone), the adapter must REFUSE to start unless the operator has
-// explicitly configured the verification audience — so this listener can
-// never be enabled by accident without caller verification in place.
-// Discord / Slack / Telegram / web adapters are unaffected.
+// The listener verifies every event against the organisation's project number
+// and answers with the organisation's key, so it refuses to come up without
+// either, and names what is missing: a channel that stays down for a reason no
+// screen shows is the failure this adapter has already had. Discord, Slack,
+// Telegram and web adapters are unaffected by any of it.
 
-// The shared HTTP listener's port is read at module load
-// (WORKSPACE_CHAT_PORT). Set it to 0 (ephemeral) BEFORE the adapter module
-// is (dynamically) imported so the positive-path test never binds :7475.
-process.env.WORKSPACE_CHAT_PORT = "0";
-
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { makeServiceAccount, writeKeyFile } from "./__tests__/fake-google.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { workspaceChatListenerPort } from "./workspace-chat-adapter.js";
+
+process.env.WORKSPACE_CHAT_PORT = "0";
 
 const DISPATCHER = {} as unknown as Dispatcher;
 
-function wcAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
-  return {
-    id: "wc-agent",
-    channel: "workspace_chat",
-    workspace_chat_credentials_path: "/var/cerase/workspace-chat-creds/wc-agent.json",
-    allowed_users: ["ops@guidance.studio"],
-    cwd: "/home/agent/cerase/workspace",
-    spawn: { command: "docker", args: [] },
-    ...overrides,
-  } as AgentConfig;
-}
-
-describe("workspace-chat adapter fail-closed startup guard (M-ACP-WSCHAT-GUARD-1)", () => {
+describe("workspace-chat adapter: what start() requires", () => {
+  let dir: string;
+  let keyPath: string;
   let adapter: ChatAdapter | undefined;
 
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "wc-start-"));
+    keyPath = join(dir, "service-account.json");
+    writeKeyFile(keyPath, makeServiceAccount(), "https://oauth2.googleapis.com/token");
+  });
+
   afterEach(async () => {
-    // Defensive: if a test unexpectedly started the shared listener, close
-    // it so it never leaks into the next test.
-    if (adapter) {
-      await adapter.stop().catch(() => undefined);
-      adapter = undefined;
-    }
+    await adapter?.stop();
+    adapter = undefined;
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  it("start() throws a descriptive error naming the missing verification config", async () => {
-    adapter = await createChatAdapter(wcAgent(), DISPATCHER);
-    // Fail closed: without workspace_chat_verification_audience the webhook
-    // listener must never come up — the error names the missing knob so the
-    // operator knows exactly what to configure.
-    await expect(adapter.start()).rejects.toThrow(/workspace_chat_verification_audience/);
-    await expect(adapter.start()).rejects.toThrow(/caller-identity verification/i);
+  function wcAgent(app: AgentConfig["workspace_chat"]): AgentConfig {
+    return {
+      id: "agent-1",
+      channel: "workspace_chat",
+      allowed_users: ["mario.rossi@example.com"],
+      cwd: "/home/agent/cerase/workspace",
+      mode: "cerase",
+      spawn: { command: "docker", args: [] },
+      ...(app ? { workspace_chat: app } : {}),
+    };
+  }
+
+  it("refuses without the organisation's Chat app, naming every setting it lacks", async () => {
+    adapter = await createChatAdapter(wcAgent(undefined), DISPATCHER);
+    await expect(adapter.start()).rejects.toThrow(
+      "agent \"agent-1\" channel='workspace_chat' refuses to start: workspace_chat.project_number, workspace_chat.credentials_path, workspace_chat.allowed_domains missing from agents.yaml",
+    );
+    expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
-  it("start() proceeds past the guard when the verification audience is configured", async () => {
-    adapter = await createChatAdapter(wcAgent({ workspace_chat_verification_audience: "123456789012" }), DISPATCHER);
-    // With the audience configured the guard lets the adapter start (the
-    // listener binds an ephemeral port — WORKSPACE_CHAT_PORT=0 above).
-    await expect(adapter.start()).resolves.toBeUndefined();
+  it("refuses a project number that is not one, and a domain that is an address", async () => {
+    adapter = await createChatAdapter(
+      wcAgent({ project_number: "tenant-project", credentials_path: keyPath, allowed_domains: ["@example.com"] }),
+      DISPATCHER,
+    );
+    await expect(adapter.start()).rejects.toThrow(
+      "agent \"agent-1\" channel='workspace_chat' refuses to start: workspace_chat.project_number must be the Google Cloud project number (digits only); workspace_chat.allowed_domains has an entry that is not a domain: @example.com",
+    );
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  it("refuses when the key cannot be read, naming the path and the reason", async () => {
+    const absent = join(dir, "absent.json");
+    adapter = await createChatAdapter(
+      wcAgent({ project_number: "123456789012", credentials_path: absent, allowed_domains: ["example.com"] }),
+      DISPATCHER,
+    );
+    await expect(adapter.start()).rejects.toThrow(
+      `the Workspace Chat service-account key at ${absent} cannot be read (ENOENT)`,
+    );
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  it("opens the webhook with a complete app and a readable key, and closes it with the last adapter", async () => {
+    adapter = await createChatAdapter(
+      wcAgent({ project_number: "123456789012", credentials_path: keyPath, allowed_domains: ["example.com"] }),
+      DISPATCHER,
+    );
+    await adapter.start();
+    expect(workspaceChatListenerPort()).toBeGreaterThan(0);
     await adapter.stop();
     adapter = undefined;
+    expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
-  it("other channels start normally without any workspace-chat verification config", async () => {
-    // web: a real start()-able channel with no external transport — must be
-    // completely unaffected by the workspace_chat guard.
+  it("other channels start normally without any Workspace Chat configuration", async () => {
     const web = await createChatAdapter(
       {
         id: "maintainer-1",
         channel: "web",
         allowed_users: ["maintainer:org-123"],
         cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
         spawn: { command: "docker", args: [] },
-      } as unknown as AgentConfig,
+      },
       DISPATCHER,
     );
     await expect(web.start()).resolves.toBeUndefined();
     await web.stop();
 
-    // discord: construction must not trip the guard either (start() needs a
-    // live gateway + real token, so construction is the right boundary here).
     const discord = await createChatAdapter(
       {
         id: "doc-qa",
@@ -88,8 +116,9 @@ describe("workspace-chat adapter fail-closed startup guard (M-ACP-WSCHAT-GUARD-1
         bot_token: "tok-doc",
         allowed_users: ["111"],
         cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
         spawn: { command: "docker", args: [] },
-      } as unknown as AgentConfig,
+      },
       DISPATCHER,
     );
     expect(discord.agentId).toBe("doc-qa");

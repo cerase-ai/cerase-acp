@@ -8,8 +8,9 @@ import type { AgentConfig, BridgeConfig } from "./config.js";
  *                            ConfigReloader can swap the allowlist
  *                            in-place without restarting the Discord
  *                            adapter or killing ACP child processes.
- *  - `bot_token_or_spawn`  — bot_token, spawn.command, spawn.args, or
- *                            cwd changed; the Discord adapter must be
+ *  - `bot_token_or_spawn`  — bot_token, spawn.command, spawn.args, cwd,
+ *                            mode or the organisation's Workspace Chat
+ *                            app changed; the Discord adapter must be
  *                            torn down + recreated and the agent's
  *                            ACP children must be killed (workspace +
  *                            transcripts persist in named volumes, so
@@ -78,12 +79,25 @@ function classifyMutation(prev: AgentConfig, next: AgentConfig): ModifiedClassif
     // moment — whenever that session happened to end.
     prev.mode !== next.mode ||
     prev.spawn.command !== next.spawn.command ||
-    !arraysEqual(prev.spawn.args, next.spawn.args);
+    !arraysEqual(prev.spawn.args, next.spawn.args) ||
+    // The organisation's Chat app. An adapter verifies events against its
+    // project number and posts with its key from start() on, so either one
+    // changing has to reach the adapter by restarting it.
+    !sameWorkspaceChatApp(prev.workspace_chat, next.workspace_chat);
 
   if (allowedUsersChanged && respawnFieldsChanged) return "mixed";
   if (respawnFieldsChanged) return "bot_token_or_spawn";
   if (allowedUsersChanged) return "allowed_users_only";
   return null;
+}
+
+function sameWorkspaceChatApp(a: AgentConfig["workspace_chat"], b: AgentConfig["workspace_chat"]): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    a.project_number === b.project_number &&
+    a.credentials_path === b.credentials_path &&
+    setsEqual(a.allowed_domains ?? [], b.allowed_domains ?? [])
+  );
 }
 
 function setsEqual(a: string[], b: string[]): boolean {

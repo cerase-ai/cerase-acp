@@ -5,6 +5,7 @@ import {
   attachmentsUnsupportedNotice,
   attachmentUnreadableNotice,
   deliveryFailureNotice,
+  directMessagesOnlyNotice,
   displayFileName,
   oversizeUploadNotice,
 } from "./platform-notices.js";
@@ -109,6 +110,13 @@ describe("the notices that used to be Italian-only", () => {
   });
 });
 
+describe("the direct-messages-only note", () => {
+  it("is in the language of the message it answers, with Italian for an undetermined one", () => {
+    expect(directMessagesOnlyNotice("en")).toBe("I only answer in direct messages: write to me there.");
+    expect(directMessagesOnlyNotice("unknown")).toBe(directMessagesOnlyNotice("it"));
+  });
+});
+
 describe("one register across every platform notice", () => {
   it("carries no emoji in any language", () => {
     const everything = [
@@ -117,6 +125,7 @@ describe("one register across every platform notice", () => {
         attachmentUnreadableNotice("f", l),
         attachmentsUnsupportedNotice("f", l),
         deliveryFailureNotice(l),
+        directMessagesOnlyNotice(l),
         oversizeUploadNotice(["f"], 10, l),
         pickErrorMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickEmptyMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),

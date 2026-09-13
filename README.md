@@ -17,7 +17,8 @@ For each configured agent template:
   `agents.yaml` — `discord` (default; `discord.js` Client, DM intent
   only — no guild channels, no slash commands, no buttons), `telegram`
   (`telegraf`), `slack` (`@slack/bolt`), `workspace_chat` (Google
-  Workspace Chat via `googleapis`), or `web` — with the bot
+  Workspace Chat: one Chat app for the organisation, webhook events,
+  replies through the Chat REST API), or `web` — with the bot
   token / credentials bound to that template.
 - On an inbound DM: checks the per-agent `user_id` allowlist;
   authorised → routes to a long-lived ACP session for the
@@ -116,7 +117,7 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `discord` (default) | `bot_token` | `discord.js` Client, DM-only | Gateway Intents must be enabled in Developer Portal |
 | `telegram` | `bot_token` | `telegraf` | BotFather token; DMs only |
 | `slack` | `bot_token` + `slack_app_token` | `@slack/bolt` Socket Mode | `xoxb-…` bot token + `xapp-…` app-level token |
-| `workspace_chat` | `workspace_chat_credentials_path` | Google Workspace Chat API | Path to service-account JSON inside the container |
+| `workspace_chat` | *none per agent* — the organisation's `workspace_chat` block | Webhook listener + Chat REST API | One Chat app for the organisation; see below |
 | `web` | *none* | Null-sink adapter | For local dev, CLI testing, and panel-only agents |
 
 ### Agent fields
@@ -126,10 +127,50 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `id` | yes | — | Alphanumeric + `-`. Must be unique. |
 | `channel` | no | `discord` | One of the channels above. |
 | `bot_token` | per channel | — | See channel table. Use `${env:VAR}` for env-var substitution. |
-| `allowed_users` | yes | — | List of user IDs authorised to DM this agent. Discord: snowflake string. Telegram: numeric chat ID. Slack: `U…` workspace ID. Web: any synthetic ID. |
+| `allowed_users` | yes | — | List of user IDs authorised to DM this agent. Discord: snowflake string. Telegram: numeric chat ID. Slack: `U…` workspace ID. Workspace Chat: the user's Workspace email, matched case-insensitively. Web: any synthetic ID. |
 | `spawn.command` | yes | — | Command to start one ACP child. Container: `docker`. Local: `opencode` or path to binary. |
 | `spawn.args` | yes | — | Args passed to `spawn.command`. Container: `[exec, -i, cerase-agent-<id>, opencode, acp]`. Local: `[acp]`. |
 | `cwd` | no | `/root/cerase/workspace` | Working directory passed to the ACP child via `session/new`. For local installs, point this at a real project directory. |
+
+### Workspace Chat: one app for the organisation
+
+Every `workspace_chat` agent is reached through the same Google Chat app, so
+the app's settings are written once, at the top level of `agents.yaml`:
+
+```yaml
+workspace_chat:
+  project_number: "123456789012"        # Google Cloud project number of the Chat app
+  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
+  allowed_domains: [example.com]        # the organisation's email domains
+agents:
+  - id: agent-1
+    channel: workspace_chat
+    allowed_users: ["mario.rossi@example.com"]
+    spawn: { command: docker, args: [exec, -i, cerase-agent-1, opencode, acp] }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `project_number` | string of digits (a YAML integer is accepted) | The audience Google puts in the JWT on every event. The app's *Authentication Audience* must be set to *Project Number*. |
+| `credentials_path` | string | Path inside the container of the app's service-account JSON key. Read again whenever an access token is renewed, so a replaced key is used without a restart. |
+| `allowed_domains` | list of domains, at least one | A sender whose email is outside these is refused even when an agent lists the address. |
+
+A missing or malformed block does not fail the load: each `workspace_chat`
+agent refuses to start and names what is wrong, and every other channel keeps
+running. A change to the block respawns the `workspace_chat` agents.
+
+Google calls **`POST /chat/event`** on the listener (`WORKSPACE_CHAT_PORT`). The
+listener verifies the JWT against `project_number` before reading the body,
+accepts only messages in a direct message from a human in `allowed_domains`,
+and routes by the sender's email to the one agent listing it. Anything else
+gets a short refusal and reaches no agent. An accepted message is acknowledged
+with an empty body at once; the reply is posted afterwards with
+`spaces.messages.create` under app authentication (`chat.bot` scope), into the
+event's space, and into its thread when the message was written in one.
+
+The bridge runs as `node` (uid 1000, gid 1000). It needs read permission on the
+key file and search permission on its directory, through its uid or one of its
+groups; it never writes there.
 
 ### Session settings
 
@@ -150,6 +191,7 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `CERASE_ACP_ADAPTER_RETRY_MAX_MS` | `300000` | Self-heal: cap on the retry backoff interval. |
 | `CERASE_ACP_REACHABILITY_INTERVAL_MS` | `60000` | How often each Discord adapter asks Discord whether it is answering (one unauthenticated gateway lookup). Every message sent or received counts as the same evidence, so a busy bridge rarely probes. |
 | `CERASE_ACP_REACHABILITY_STALE_MS` | `180000` | How long Discord may stay silent before the adapter reports `ready: false` on `/healthz` and `/internal/status`. Three missed probes, so one blip cannot flip it. |
+| `WORKSPACE_CHAT_API_ROOT` | `https://chat.googleapis.com` | Base URL of the Google Chat REST API the replies are posted to. |
 
 The six below were read by the code and documented nowhere until 2026-08-10
 (`M21`). They are listed because an undocumented default is a decision somebody
@@ -161,7 +203,7 @@ made once and nobody can find — not because you normally set them.
 | `CERASE_INTERNAL_SECRET` | *(unset)* | The bearer the bridge presents **to** the control-plane. Distinct from `CERASE_ACP_INTERNAL_SECRET`, which is the bearer the bridge **demands**. Two directions, two secrets — confusing them is why the appliance keeps them separately named. |
 | `CERASE_AGENT_WORKSPACE_ROOT` | `/home/agent/cerase/workspace` | Root the workspace-file broker serves from, inside the agent slot. |
 | `CERASE_MAX_ATTACHMENT_MB` | `64` | Ceiling on an inbound attachment. Anything larger is refused with a message the user can read, not truncated. |
-| `WORKSPACE_CHAT_PORT` | `7475` | Port the panel-only `web` transport listens on. |
+| `WORKSPACE_CHAT_PORT` | `7475` | Port the Workspace Chat webhook listener binds. Google's events arrive on `POST /chat/event`. |
 | `OPENCODE_SERVER_PASSWORD` | *(unset)* | Credential for the OpenCode REST server, when the slot runs one. |
 
 `BRIDGE_E2E_TEST=1` also exists and is **not** an operational knob: it enables a

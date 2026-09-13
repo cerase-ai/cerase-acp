@@ -141,6 +141,30 @@ describe("workspace-chat: verifica della richiesta", () => {
     await expect(verifica(`Bearer ${token()}`, "", { recupera })).rejects.toThrow(/nessun audience/);
   });
 
+  // The listener verifies before it reads the body, so it cannot yet know
+  // which assistant the event is for: it checks the token against every
+  // project it serves and learns which one the token was issued for. That
+  // audience, not the body, is what the event is later matched against.
+  it("a token for one of several served projects passes and names the project it was issued for", async () => {
+    const { recupera } = rete();
+    const esito = await verifica(`Bearer ${token({ aud: "222222222222" })}`, ["111111111111", "222222222222"], {
+      recupera,
+    });
+    expect(esito.destinatario).toBe("222222222222");
+  });
+
+  it("a token for none of the served projects is refused", async () => {
+    const { recupera } = rete();
+    await expect(
+      verifica(`Bearer ${token({ aud: "999999999999" })}`, ["111111111111", "222222222222"], { recupera }),
+    ).rejects.toThrow(RichiestaNonVerificata);
+  });
+
+  it("an empty list of served projects refuses instead of skipping the audience check", async () => {
+    const { recupera } = rete();
+    await expect(verifica(`Bearer ${token()}`, [], { recupera })).rejects.toThrow(/nessun audience/);
+  });
+
   it("se i certificati di Google non si recuperano, nessuna richiesta passa", async () => {
     const recupera = (async () => ({
       ok: false,

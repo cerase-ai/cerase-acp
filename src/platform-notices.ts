@@ -114,6 +114,24 @@ export function deliveryFailureNotice(lang: SupportedLang): string {
 }
 
 /**
+ * A message to the assistant written in a group space rather than a direct
+ * message. The answer would be read by everyone in the space, and an assistant
+ * answers with its own user's memory and connectors, so it answers nowhere but
+ * a direct message.
+ */
+export function directMessagesOnlyNotice(lang: SupportedLang): string {
+  return pick(
+    {
+      it: "Rispondo solo nei messaggi diretti: scrivimi lì.",
+      en: "I only answer in direct messages: write to me there.",
+      es: "Solo respondo en mensajes directos: escríbeme allí.",
+      fr: "Je ne réponds qu'en messages directs : écris-moi là-bas.",
+    },
+    lang,
+  );
+}
+
+/**
  * The last segment of a workspace-relative path.
  *
  * A notice used to print the path the model had written, which put
