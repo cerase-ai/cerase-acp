@@ -37,7 +37,7 @@ export function writeKeyFile(path: string, account: ServiceAccount, tokenUri: st
     JSON.stringify({
       type: "service_account",
       project_id: "tenant-project",
-      private_key_id: "0123456789abcdef",
+      private_key_id: "0".repeat(40),
       private_key: account.privateKeyPem,
       client_email: account.clientEmail,
       client_id: "100000000000000000000",

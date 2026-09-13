@@ -1,0 +1,16 @@
+# Findings acknowledged by fingerprint, one line each.
+#
+# A fingerprint is `<commit>:<path>:<rule>:<line>` and pins ONE finding in ONE
+# historical commit. It cannot mask the same pattern reappearing in a later
+# commit, in another file or on another line, which is what makes it the narrow
+# way to acknowledge history. Fix the code and leave the past entry here; never
+# relax a rule in a `.gitleaks.toml`, which would silence the pattern everywhere.
+#
+# The fake Google service-account key written by the Workspace Chat test
+# fixture. Its key-id field held a sixteen-character hexadecimal literal, which
+# the generic-api-key rule reads as a credential by name and entropy. It
+# identified nothing: the fixture's private key is generated at test time and
+# the fake token endpoint trusts only that. The fixture now builds a
+# zero-entropy id, so the line cannot fire again; this entry covers only the
+# commit that already shipped.
+bcbbc1fdb677e05183bd635ec7073c83bdf8e3c7:src/__tests__/fake-google.ts:generic-api-key:40
