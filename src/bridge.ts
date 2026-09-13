@@ -84,7 +84,7 @@ export interface RunBridgeOptions {
 export interface SessionManagerHotOps {
   addAgent(agent: AgentConfig): void;
   removeAgent(agentId: string): void;
-  killAgentSessions(agentId: string): void;
+  replaceAgent(agent: AgentConfig): void;
   updateAllowlist(agentId: string, allowed_users: string[]): void;
 }
 
@@ -204,18 +204,16 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
         }
         deps.adapters.delete(mod.agentId);
       }
-      deps.sessionManager.killAgentSessions(mod.agentId);
-
       const fresh = deps.next.agents.find((a) => a.id === mod.agentId);
       if (fresh) {
-        // OPT-35 fix: the SessionManager keeps an internal AgentConfig
-        // reference per agentId; for `mixed` (token + allowed_users
-        // both changed) and `bot_token_or_spawn`, we previously only
-        // respawned the adapter and left the allowlist stale, so the
-        // dispatcher kept rejecting DMs from users that the new
-        // agents.yaml WAS authorising. Sync the allowlist here too so
-        // every classification path lands at a coherent state.
-        deps.sessionManager.updateAllowlist(mod.agentId, fresh.allowed_users);
+        // One object for the session manager and the new adapter. Each reads
+        // the allowlist from the agent it holds, and an allowed_users_only
+        // reload later updates the session manager's copy in place: with two
+        // copies that update reaches only one of them, and an address added
+        // in the console is refused by the channel that should route it.
+        // Replacing also ends the old sessions, so the next one spawns under
+        // the reloaded command and mode.
+        deps.sessionManager.replaceAgent(fresh);
 
         const adapter = await createAdapterWithRetry(deps, fresh);
         if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest

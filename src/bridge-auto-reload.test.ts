@@ -7,12 +7,17 @@
 // driving the full ConfigReloader through real file writes — the
 // reloader itself is covered in config-reloader.test.ts).
 
-import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { isAllowed } from "./allowlist.js";
 import { applyConfigDiff } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { diffConfigs } from "./config-diff.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { SessionManager } from "./session-manager.js";
+
+const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
 interface FakeAdapter extends ChatAdapter {
   startCalls: number;
@@ -44,11 +49,11 @@ function makeFakeAdapter(agent: AgentConfig): FakeAdapter {
 interface FakeSessionManager {
   added: string[];
   removed: string[];
-  killed: string[];
+  replaced: string[];
   allowlistUpdates: Array<{ agentId: string; allowed_users: string[] }>;
   addAgent(a: AgentConfig): void;
   removeAgent(id: string): void;
-  killAgentSessions(id: string): void;
+  replaceAgent(a: AgentConfig): void;
   updateAllowlist(id: string, allowed_users: string[]): void;
 }
 
@@ -56,7 +61,7 @@ function makeFakeSessionManager(): FakeSessionManager {
   const fsm: FakeSessionManager = {
     added: [],
     removed: [],
-    killed: [],
+    replaced: [],
     allowlistUpdates: [],
     addAgent(a) {
       fsm.added.push(a.id);
@@ -64,8 +69,8 @@ function makeFakeSessionManager(): FakeSessionManager {
     removeAgent(id) {
       fsm.removed.push(id);
     },
-    killAgentSessions(id) {
-      fsm.killed.push(id);
+    replaceAgent(a) {
+      fsm.replaced.push(a.id);
     },
     updateAllowlist(id, allowed_users) {
       fsm.allowlistUpdates.push({ agentId: id, allowed_users: [...allowed_users] });
@@ -150,7 +155,7 @@ describe("applyConfigDiff", () => {
     });
 
     expect(sm.allowlistUpdates).toEqual([{ agentId: "alpha", allowed_users: ["u-1", "u-2"] }]);
-    expect(sm.killed).toEqual([]);
+    expect(sm.replaced).toEqual([]);
     expect(sm.removed).toEqual([]);
     // Same adapter reference, no new start/stop.
     expect(adapters.get("alpha")).toBe(existing);
@@ -158,7 +163,7 @@ describe("applyConfigDiff", () => {
     expect(existing.startCalls).toBe(0);
   });
 
-  it("MODIFIED bot_token_or_spawn → stop old adapter, kill sessions, create new adapter + start", async () => {
+  it("MODIFIED bot_token_or_spawn → stop old adapter, replace the agent (ending its sessions), create new adapter + start", async () => {
     const sm = makeFakeSessionManager();
     const oldAdapter = makeFakeAdapter(baseAgent("alpha"));
     const adapters = new Map<string, FakeAdapter>();
@@ -175,7 +180,7 @@ describe("applyConfigDiff", () => {
     });
 
     expect(oldAdapter.stopCalls).toBe(1);
-    expect(sm.killed).toEqual(["alpha"]);
+    expect(sm.replaced).toEqual(["alpha"]);
     const fresh = adapters.get("alpha")!;
     expect(fresh).not.toBe(oldAdapter);
     expect(fresh.startCalls).toBe(1);
@@ -198,7 +203,7 @@ describe("applyConfigDiff", () => {
     });
 
     expect(oldAdapter.stopCalls).toBe(1);
-    expect(sm.killed).toEqual(["alpha"]);
+    expect(sm.replaced).toEqual(["alpha"]);
     expect(adapters.get("alpha")!.startCalls).toBe(1);
   });
 
@@ -218,7 +223,7 @@ describe("applyConfigDiff", () => {
 
     expect(sm.added).toEqual([]);
     expect(sm.removed).toEqual([]);
-    expect(sm.killed).toEqual([]);
+    expect(sm.replaced).toEqual([]);
     expect(sm.allowlistUpdates).toEqual([]);
   });
 
@@ -353,5 +358,79 @@ describe("applyConfigDiff adapter start seam", () => {
     });
 
     expect(adapters.get("alpha")!.startCalls).toBe(1);
+  });
+});
+
+// The adapter of a respawned agent and the session manager answer questions
+// about the same assistant: who may write to it, and what its sessions run
+// under. Each reads the agent object it was given, so they agree only while
+// they were given the same one.
+describe("a respawn hands one agent config to the adapter and the session manager", () => {
+  let mgr: SessionManager | undefined;
+
+  afterEach(async () => {
+    await mgr?.shutdown();
+    mgr = undefined;
+  });
+
+  const seat = (reply: string, allowed_users: string[]): AgentConfig =>
+    baseAgent("alpha", {
+      channel: "workspace_chat",
+      mode: "cerase",
+      allowed_users,
+      spawn: { command: "env", args: ["--", `FAKE_REPLY=${reply}`, "node", FAKE_CHILD] },
+    });
+
+  async function reload(prev: BridgeConfig, next: BridgeConfig, live: Map<string, FakeAdapter>, got: AgentConfig[]) {
+    await applyConfigDiff(diffConfigs(prev, next), {
+      next,
+      sessionManager: mgr!,
+      adapters: live,
+      createAdapter: async (a) => {
+        got.push(a);
+        return makeFakeAdapter(a);
+      },
+      dispatcher: fakeDispatcher,
+    });
+  }
+
+  // The Workspace Chat listener matches a sender against the allowlist of the
+  // agent object its adapter holds. An address-only reload after a respawn
+  // used to reach the session manager's copy alone, and that user was refused.
+  it("an address added after a respawn reaches the respawned adapter too", async () => {
+    const boot = cfg([seat("before", ["mario.rossi@example.com"])]);
+    mgr = new SessionManager(boot);
+    const adapters = new Map<string, FakeAdapter>([["alpha", makeFakeAdapter(boot.agents[0]!)]]);
+    const given: AgentConfig[] = [];
+
+    const respawn = cfg([seat("after", ["mario.rossi@example.com"])]);
+    await reload(structuredClone(boot), respawn, adapters, given);
+    const addressOnly = cfg([seat("after", ["mario.rossi@example.com", "anna.bianchi@example.com"])]);
+    await reload(structuredClone(respawn), addressOnly, adapters, given);
+
+    expect(given).toHaveLength(1);
+    expect(given[0]!.allowed_users).toEqual(["mario.rossi@example.com", "anna.bianchi@example.com"]);
+    expect(isAllowed(boot, "alpha", "anna.bianchi@example.com")).toBe(true);
+    expect(boot.agents).toEqual([given[0]]);
+    expect(boot.agents[0]).toBe(given[0]);
+  });
+
+  it("the first session after a respawn runs under the new spawn config", async () => {
+    const boot = cfg([seat("before", ["u-1"])]);
+    mgr = new SessionManager(boot);
+    const adapters = new Map<string, FakeAdapter>([["alpha", makeFakeAdapter(boot.agents[0]!)]]);
+    const replyTo = async (text: string) => {
+      const chunks: string[] = [];
+      await mgr!.prompt("alpha", "u-1", text, (u) => {
+        const update = u as { sessionUpdate?: string; content?: { text?: string } };
+        if (update.sessionUpdate === "agent_message_chunk") chunks.push(update.content?.text ?? "");
+      });
+      return chunks.join("");
+    };
+    expect(await replyTo("hi")).toBe("before");
+
+    await reload(structuredClone(boot), cfg([seat("after", ["u-1"])]), adapters, []);
+
+    expect(await replyTo("hi again")).toBe("after");
   });
 });

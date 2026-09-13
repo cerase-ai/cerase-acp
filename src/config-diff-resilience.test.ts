@@ -35,7 +35,7 @@ function makeDeps(createAdapter: ApplyConfigDiffDeps["createAdapter"], agents: A
     sessionManager: {
       addAgent: () => {},
       removeAgent: () => {},
-      killAgentSessions: () => {},
+      replaceAgent: () => {},
       updateAllowlist: () => {},
     },
     adapters: new Map(),

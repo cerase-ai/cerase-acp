@@ -319,6 +319,23 @@ export class SessionManager {
   }
 
   /**
+   * Put a reloaded config in place of a registered agent's and end the
+   * sessions started under the old one. The reload hands this same object to
+   * the adapter it creates, so the adapter, the allowlist check and the next
+   * session all read one agent: an allowlist a later reload changes in place
+   * reaches all three, and the next session spawns under the new command and
+   * mode.
+   */
+  replaceAgent(agent: AgentConfig): void {
+    if (!this.agentsById.has(agent.id)) {
+      throw new Error(`unknown agent id "${agent.id}"`);
+    }
+    this.killAgentSessions(agent.id);
+    this.agentsById.set(agent.id, agent);
+    this.config.agents = this.config.agents.map((a) => (a.id === agent.id ? agent : a));
+  }
+
+  /**
    * Swap the `allowed_users` array for one agent without disturbing
    * its sessions. Used when the diff classifies a mutation as
    * `allowed_users_only`. The mutation lands on the SHARED

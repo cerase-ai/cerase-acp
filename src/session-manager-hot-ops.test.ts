@@ -147,6 +147,28 @@ describe("SessionManager hot ops", () => {
     });
   });
 
+  describe("replaceAgent", () => {
+    it("puts the new object in the old one's place on the shared config, and ends its sessions", async () => {
+      mgr.addAgent(fakeAgent("alpha"));
+      mgr.addAgent(fakeAgent("beta"));
+      await mgr.prompt("alpha", "u-alpha-1", "hi");
+      await mgr.prompt("beta", "u-beta-1", "hi");
+
+      const reloaded = fakeAgent("alpha", { allowed_users: ["u-alpha-2"] });
+      mgr.replaceAgent(reloaded);
+
+      expect(config.agents.map((a) => a.id)).toEqual(["alpha", "beta"]);
+      expect(config.agents[0]).toBe(reloaded);
+      expect(isAllowed(config, "alpha", "u-alpha-2")).toBe(true);
+      expect(isAllowed(config, "alpha", "u-alpha-1")).toBe(false);
+      expect(mgr.activeSessionCount()).toBe(1);
+    });
+
+    it("throws when the agent id is unknown", () => {
+      expect(() => mgr.replaceAgent(fakeAgent("ghost"))).toThrow(/unknown agent/i);
+    });
+  });
+
   describe("updateAllowlist", () => {
     it("swaps the allowed_users on the shared config + on agentsById", () => {
       mgr.addAgent(fakeAgent("alpha", { allowed_users: ["u-1"] }));
