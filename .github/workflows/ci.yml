@@ -127,6 +127,13 @@ jobs:
     # gated by Trivy. The exposure here was never absent, only unalarmed, and an
     # asymmetry like that is how one of two identical images stays vulnerable.
     # Blocking, like cerase-agent's: HIGH/CRITICAL fails the job.
+    #
+    # Pull requests only. On a push the publish job scans the image it is
+    # about to push; scanning here as well built a second image, never the
+    # one published, and billed a job on every commit. A plain docker build
+    # on a fresh runner has no layer cache, so this one always meets today's
+    # debian mirror.
+    if: github.event_name == 'pull_request'
     name: trivy image scan (hard block)
     runs-on: ubuntu-latest
     timeout-minutes: 15

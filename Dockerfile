@@ -41,7 +41,13 @@ RUN npm prune --omit=dev
 # M-ACP-NPM-STRIP-1: digest-pinned, same digest cerase-agent runs — one node
 # across the fleet, and a base that cannot change under either image.
 FROM node:22.22.3-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752 AS runtime
+# The digest-pinned base lags the debian security feed, so this stage applies
+# the published security upgrades before installing anything. The blocking
+# Trivy scan in the publish workflow holds the image to that, and it can only
+# do so because the scan build excludes this stage from the layer cache: a
+# cached apt layer keeps the packages of whichever day it was first built.
 RUN apt-get update \
+ && apt-get -y upgrade \
  && apt-get install -y --no-install-recommends tini docker.io \
  && rm -rf /var/lib/apt/lists/*
 

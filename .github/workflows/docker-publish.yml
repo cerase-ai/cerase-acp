@@ -86,6 +86,44 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0
 
+      # Build the image into the local daemon first, so the image Trivy scans
+      # is the one this job pushes. The gate's own scan runs on pull requests
+      # only: on a push it built a second image that was never published.
+      #
+      # The runtime stage is excluded from the cache, and that exclusion is
+      # what lets a blocking scan be satisfied at all. That stage runs
+      # apt-get upgrade, and a cached layer keeps the debian packages of
+      # whichever day it was first built, so a re-run after debian publishes a
+      # fix would rebuild the same vulnerable image. The build stage stays
+      # cached: npm ci and tsc are the expensive steps, the apt layer is
+      # seconds.
+      - name: Build image (load for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: cerase-acp:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          no-cache-filters: runtime
+          provenance: false
+
+      # Blocking: any HIGH or CRITICAL with a published fix, in the OS layer
+      # or in node_modules, stops the publish before a tag moves.
+      - name: Trivy image scan (HIGH/CRITICAL block)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: cerase-acp:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+      # Deliberately NOT excluding the runtime stage here. This build has to
+      # reproduce the image Trivy just approved, and it does that by reading
+      # the cache the scan build wrote a moment ago; a second apt run could
+      # meet a different mirror snapshot and push packages nobody scanned.
       - name: Build & push image
         uses: docker/build-push-action@v6
         with:
@@ -94,8 +132,6 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Use GitHub Actions cache so re-builds reuse npm install
-          # + tsc compile layers when only source changes.
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false

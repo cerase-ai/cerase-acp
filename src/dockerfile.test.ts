@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 // dockerfile.test.ts lives at src/dockerfile.test.ts → repo root is one dir up.
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -56,19 +57,67 @@ describe("Dockerfile", () => {
   });
 });
 
-describe("CI", () => {
-  const ci = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+describe("the runtime stage and the scan that holds it", () => {
+  type Step = { name?: string; uses?: string; with?: Record<string, unknown> };
+  const publish = parse(readFileSync(join(repoRoot, ".github/workflows/docker-publish.yml"), "utf8"));
+  const ci = parse(readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8"));
+  const steps = publish.jobs["build-and-push"].steps as Step[];
+  const isBuild = (s: Step) => String(s.uses ?? "").startsWith("docker/build-push-action");
+  const scanBuildAt = steps.findIndex((s) => isBuild(s) && s.with?.load === true);
+  const trivyAt = steps.findIndex((s) => String(s.uses ?? "").startsWith("aquasecurity/trivy-action"));
+  const pushBuildAt = steps.findIndex((s) => isBuild(s) && s.with?.push !== undefined);
+  const runtimeStage = dockerfile.slice(dockerfile.lastIndexOf("\nFROM "));
+  const runtimeAlias = /^\nFROM\s+\S+\s+AS\s+(\S+)/i.exec(runtimeStage)?.[1];
 
-  it("scans the built image with Trivy and blocks on HIGH/CRITICAL", () => {
-    // The npm exposure was invisible here not because it was absent but
-    // because the alarm was — two node images in the fleet, one gated by
-    // Trivy and one not. A vulnerability nobody scans for is not a
-    // vulnerability anyone finds.
-    expect(ci).toMatch(/trivy-action/);
-    expect(ci).toMatch(/severity:\s*HIGH,CRITICAL/);
-    expect(ci).toMatch(/exit-code:\s*['"]1['"]/);
+  // The digest pin freezes the base, and debian publishes security fixes
+  // against it every week: a pinned image that never upgrades reds the
+  // blocking scan on the first advisory with a fix, and stays red until the
+  // pin moves.
+  it("applies the published debian security upgrades in the runtime stage", () => {
+    expect(runtimeStage).toMatch(/apt-get update[\s\S]*?apt-get -y upgrade[\s\S]*?apt-get install/);
   });
 
+  it("scans the image before it is pushed, and blocks on a fixable HIGH or CRITICAL", () => {
+    expect(scanBuildAt).toBeGreaterThanOrEqual(0);
+    expect(trivyAt).toBeGreaterThan(scanBuildAt);
+    expect(pushBuildAt).toBeGreaterThan(trivyAt);
+    const trivy = steps[trivyAt]!.with!;
+    expect(trivy["image-ref"]).toBe(steps[scanBuildAt]!.with!.tags);
+    expect(trivy.severity).toBe("HIGH,CRITICAL");
+    expect(trivy["ignore-unfixed"]).toBe(true);
+    expect(String(trivy["exit-code"])).toBe("1");
+  });
+
+  // A cached apt layer keeps the packages of the day it was first built, so a
+  // scan build that reads it can never see a fix debian has published since.
+  // The filter names a stage by alias; an alias that no longer exists makes it
+  // a no-op that nothing reports.
+  it("builds the scanned image without the cached runtime stage", () => {
+    expect(runtimeAlias).toBe("runtime");
+    expect(steps[scanBuildAt]!.with!["no-cache-filters"]).toBe(runtimeAlias);
+    expect(String(steps[scanBuildAt]!.with!["cache-to"])).toMatch(/^type=gha/);
+  });
+
+  // The push build must reproduce the image Trivy approved. It does that by
+  // reading the cache the scan build has just written; a second apt run could
+  // meet a different mirror and push packages nobody scanned.
+  it("pushes the image it scanned, from the cache the scan build wrote", () => {
+    const push = steps[pushBuildAt]!.with!;
+    expect(push["no-cache-filters"]).toBeUndefined();
+    expect(push["cache-from"]).toBe(steps[scanBuildAt]!.with!["cache-from"]);
+  });
+
+  // The gate is called by the publish, so a scan there on a push is a second
+  // build of an image that is not the one pushed, billed on every commit.
+  it("leaves the gate's image scan to pull requests, which push nothing", () => {
+    const gateScan = Object.values(ci.jobs as Record<string, { steps: Step[]; if?: string }>).find((job) =>
+      job.steps.some((s) => String(s.uses ?? "").startsWith("aquasecurity/trivy-action")),
+    );
+    expect(gateScan?.if).toBe("github.event_name == 'pull_request'");
+  });
+});
+
+describe("CI", () => {
   it("installs tini and runs it as PID 1", () => {
     expect(dockerfile).toMatch(/apt-get .*install.* tini/s);
     expect(dockerfile).toMatch(/ENTRYPOINT \["\/usr\/bin\/tini",\s*"--"\]/);
