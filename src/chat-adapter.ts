@@ -121,7 +121,7 @@ export interface OutgoingFile {
 /**
  * Factory dispatching on `agent.channel`. Each branch lazy-imports its
  * adapter file so unused channels don't pull their transport deps
- * (discord.js, telegraf, @slack/bolt, @google-apis/chat) into the
+ * (discord.js, telegraf, @slack/bolt, google-auth-library) into the
  * runtime closure when no agent uses that channel.
  *
  * Returned promise resolves to a fully constructed (but NOT started)

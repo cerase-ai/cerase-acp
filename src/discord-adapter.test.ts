@@ -138,7 +138,7 @@ describe("cross-adapter typing invariants (OPT-67)", () => {
 // Every real adapter that ingests inbound attachments must, when the size
 // cap rejects a file, tell the user instead of dropping it silently. Driving
 // the wired-in SDK handlers end-to-end needs a full discord.js / telegraf /
-// @slack/bolt / googleapis harness (the same reason the tests above grep the
+// @slack/bolt / Google Chat harness (the same reason the tests above grep the
 // source); a structural pin is the right level here. The notice-building +
 // cap logic itself is covered behaviourally in inbound-attachments.test.ts
 // (buildOversizeNotice + ingest `rejected` shape). This guards that each

@@ -61,7 +61,7 @@ export interface RunBridgeOptions {
    * real cross-channel factory (`createChatAdapter`), which dispatches
    * on `agent.channel`. Returns a Promise to support lazy-loading of
    * the per-channel transport library (discord.js / telegraf / @slack/bolt
-   * / @google-apis/chat). Tests typically supply a synchronous fake and
+   * / google-auth-library). Tests typically supply a synchronous fake and
    * wrap it in Promise.resolve.
    */
   createAdapter?: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
