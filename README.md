@@ -168,6 +168,12 @@ with an empty body at once; the reply is posted afterwards with
 `spaces.messages.create` under app authentication (`chat.bot` scope), into the
 event's space, and into its thread when the message was written in one.
 
+The listener is open whenever the block carries a `project_number`, even with no
+`workspace_chat` agent in the file, and it follows the block across reloads. A
+verified message from somebody with no agent is answered with the refusal; with
+the port closed, the appliance's proxy would answer Google with a 502 and the
+person would see the app as broken.
+
 The bridge runs as `node` (uid 1000, gid 1000). It needs read permission on the
 key file and search permission on its directory, through its uid or one of its
 groups; it never writes there.

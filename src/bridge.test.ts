@@ -8,6 +8,7 @@ import type { ChatAdapter } from "./chat-adapter.js";
 import { type AgentConfig, type BridgeConfig, loadConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { isChannelReady } from "./reachability.js";
+import { workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -938,5 +939,79 @@ describe("a client that believes a dead socket is alive", () => {
 
     expect((await readStatus(SECRET)).agents[0]).toMatchObject({ ready: true, lastContactAgeMs: null });
     expect((await fetch(`${handle.internalUrl}/healthz`)).status).toBe(200);
+  });
+});
+
+// Google calls one route for the organisation's Chat app, and the appliance's
+// proxy forwards it to the bridge whether or not any assistant is on that
+// channel. The bridge serves the app from the configuration, so the port is
+// open, and verifying, from boot and across reloads that change no assistant.
+describe("the organisation's Workspace Chat app with no workspace_chat assistant", () => {
+  let handle: RunBridgeHandle | undefined;
+  let dir: string;
+  let cfgPath: string;
+
+  const yaml = (withApp: boolean) =>
+    `${
+      withApp
+        ? `workspace_chat:
+  project_number: "123456789012"
+  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
+  allowed_domains: [example.com]
+`
+        : ""
+    }agents:
+  - id: maintainer-1
+    channel: web
+    allowed_users: ["maintainer:org-1"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`;
+
+  async function boot(withApp: boolean, watch: boolean) {
+    vi.stubEnv("WORKSPACE_CHAT_PORT", "0");
+    dir = mkdtempSync(join(tmpdir(), "bridge-chat-app-"));
+    cfgPath = join(dir, "agents.yaml");
+    writeFileSync(cfgPath, yaml(withApp));
+    handle = await runBridge({
+      config: loadConfig(cfgPath, {}),
+      bridgeE2eTest: false,
+      ...(watch ? { configPath: cfgPath } : {}),
+      createAdapter: async (agent, dispatcher) => makeFakeAdapter(agent, dispatcher, "ok"),
+    });
+  }
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it("the webhook is open from boot, and closes with the bridge", async () => {
+    await boot(true, false);
+    expect(workspaceChatListenerPort()).toBeGreaterThan(0);
+
+    await handle!.shutdown();
+    handle = undefined;
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  it("without the app nothing listens", async () => {
+    await boot(false, false);
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  it("a reload that adds or removes only the app opens or closes the webhook", async () => {
+    await boot(false, true);
+    expect(workspaceChatListenerPort()).toBeUndefined();
+
+    writeFileSync(cfgPath, yaml(true));
+    await vi.waitFor(() => expect(workspaceChatListenerPort()).toBeGreaterThan(0), { timeout: 8000, interval: 25 });
+
+    writeFileSync(cfgPath, yaml(false));
+    await vi.waitFor(() => expect(workspaceChatListenerPort()).toBeUndefined(), { timeout: 8000, interval: 25 });
   });
 });

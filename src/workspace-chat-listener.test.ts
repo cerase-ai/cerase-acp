@@ -32,7 +32,11 @@ import { Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { directMessagesOnlyNotice } from "./platform-notices.js";
 import type { SessionManager } from "./session-manager.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
-import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
+import {
+  serveWorkspaceChatApp,
+  WORKSPACE_CHAT_EVENT_PATH,
+  workspaceChatListenerPort,
+} from "./workspace-chat-adapter.js";
 import { EMITTENTE, seminaCache, svuotaCache } from "./workspace-chat-verify.js";
 
 process.env.WORKSPACE_CHAT_PORT = "0";
@@ -409,5 +413,90 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     expect(google.posts.map((p) => [p.space, p.text, p.thread])).toEqual([
       ["spaces/dm-Anna-Bianchi-example-com", "Promemoria.", undefined],
     ]);
+  });
+});
+
+// The appliance's proxy forwards /chat/ to the bridge whether or not anybody
+// has an assistant on this channel. With the port closed Google meets a 502 and
+// shows the person an error about the app; with the organisation's app served,
+// the same person is told they have no assistant here.
+describe("workspace-chat: the organisation's app with no assistant registered", () => {
+  let dir: string;
+  let app: NonNullable<AgentConfig["workspace_chat"]>;
+  let adapter: ChatAdapter | undefined;
+
+  async function post(body: unknown, authorization: string | null = chatJwt(PROJECT)) {
+    const resp = await fetch(`http://127.0.0.1:${workspaceChatListenerPort()}${WORKSPACE_CHAT_EVENT_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
+      body: JSON.stringify(body),
+    });
+    const text = await resp.text();
+    return { status: resp.status, body: text === "" ? undefined : (JSON.parse(text) as unknown) };
+  }
+
+  beforeEach(() => {
+    logs.length = 0;
+    dir = mkdtempSync(join(tmpdir(), "wc-no-assistant-"));
+    app = {
+      project_number: PROJECT,
+      credentials_path: join(dir, "service-account.json"),
+      allowed_domains: ["example.com"],
+    };
+    writeKeyFile(app.credentials_path!, makeServiceAccount(), "https://oauth2.googleapis.com/token");
+    svuotaCache();
+    seminaCache({ [KID]: SIGNER_PEM });
+  });
+
+  afterEach(async () => {
+    await adapter?.stop();
+    adapter = undefined;
+    await serveWorkspaceChatApp(undefined);
+    svuotaCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a verified message is answered with the refusal", async () => {
+    await serveWorkspaceChatApp(app);
+    const event = chatEvent({ text: "ciao, mi aiuti con il budget?" });
+    expect(await post(event)).toEqual({
+      status: 200,
+      body: { text: pickRefusalMessage("ciao, mi aiuti con il budget?") },
+    });
+    // A message-only pino call puts the message where the mock keeps fields.
+    const said = logs.map((l) => (typeof l.fields === "string" ? l.fields : l.msg));
+    expect(said.filter((m) => m.startsWith("workspace-chat event refused"))).toEqual([
+      "workspace-chat event refused: no assistant is registered for this Chat app",
+    ]);
+  });
+
+  it("an event without Google's signature still gets a bare 401", async () => {
+    await serveWorkspaceChatApp(app);
+    expect(await post(chatEvent(), null)).toEqual({ status: 401, body: undefined });
+    expect(await post(chatEvent(), chatJwt("999999999999"))).toEqual({ status: 401, body: undefined });
+  });
+
+  it("when the last assistant stops, the listener stays open and refuses", async () => {
+    await serveWorkspaceChatApp(app);
+    const dispatcher = {} as unknown as Dispatcher;
+    adapter = await createChatAdapter(agent("agent-1", "mario.rossi@example.com", app), dispatcher);
+    await adapter.start();
+    await adapter.stop();
+    adapter = undefined;
+
+    const event = chatEvent();
+    expect(await post(event)).toEqual({ status: 200, body: { text: pickRefusalMessage(event.message.text) } });
+  });
+
+  it("withdrawing the organisation's app closes the listener when no assistant is registered", async () => {
+    await serveWorkspaceChatApp(app);
+    expect(workspaceChatListenerPort()).toBeGreaterThan(0);
+    await serveWorkspaceChatApp(undefined);
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  it("an app without a usable project number opens nothing, since no event could be verified", async () => {
+    await serveWorkspaceChatApp({ ...app, project_number: undefined });
+    expect(workspaceChatListenerPort()).toBeUndefined();
   });
 });

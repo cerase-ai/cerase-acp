@@ -344,7 +344,7 @@ session:
       ["agent-2", app],
       ["maintainer-1", undefined],
     ]);
-    expect(Object.keys(cfg)).toEqual(["agents", "session"]);
+    expect(cfg.workspace_chat).toEqual(app);
   });
 
   // Symfony's dumper quotes a numeric string, but a renderer that casts the
@@ -395,6 +395,38 @@ session:
       ["agent-1", undefined],
       ["maintainer-1", undefined],
     ]);
+    expect(Object.keys(cfg)).toEqual(["agents", "session"]);
+  });
+
+  // The webhook belongs to the app, not to an assistant: Google calls it for
+  // every user of the organisation's domain, including one nobody has given an
+  // assistant yet. The block therefore stays at the top level for the listener,
+  // even when no agent is on the channel to carry a copy.
+  it("the organisation's workspace_chat block stays at the top level with no workspace_chat agent", () => {
+    writeFileSync(
+      path,
+      `
+workspace_chat:
+  project_number: "123456789012"
+  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
+  allowed_domains: [example.com]
+agents:
+  - id: maintainer-1
+    channel: web
+    allowed_users: ["maintainer:org-1"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.workspace_chat).toEqual({
+      project_number: "123456789012",
+      credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
+      allowed_domains: ["example.com"],
+    });
+    expect(cfg.agents.map((a) => [a.id, a.workspace_chat])).toEqual([["maintainer-1", undefined]]);
   });
 
   // The per-assistant fields belong to the design where every assistant was

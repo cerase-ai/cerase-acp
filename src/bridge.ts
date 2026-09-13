@@ -27,7 +27,7 @@ import {
 import { AttachOutcomeTracker } from "./attach-outcome.js";
 import { hasAttachments, parseAttachments } from "./attachment.js";
 import { type ChatAdapter, createChatAdapter, type DeliveryResult } from "./chat-adapter.js";
-import type { AgentConfig, BridgeConfig } from "./config.js";
+import type { AgentConfig, BridgeConfig, WorkspaceChatAppConfig } from "./config.js";
 import { type ConfigDiff, diffConfigs } from "./config-diff.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { type CredentialRejection, classifyCredentialRejection } from "./credential-rejection.js";
@@ -743,6 +743,27 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     );
   }
 
+  // The organisation's Workspace Chat app is served on its webhook whether or
+  // not any assistant is on that channel. The appliance's proxy forwards the
+  // route either way, and without a listener Google gets a 502 and shows the
+  // person a broken app instead of a refusal. Loaded only when a configuration
+  // has named an app, so a box on another channel never imports the module.
+  let chatAppServed = false;
+  const serveChatApp = async (app: WorkspaceChatAppConfig | undefined): Promise<void> => {
+    if (app === undefined && !chatAppServed) return;
+    chatAppServed = app !== undefined;
+    try {
+      const { serveWorkspaceChatApp } = await import("./workspace-chat-adapter.js");
+      await serveWorkspaceChatApp(app);
+    } catch (err) {
+      logger.error(
+        { err },
+        "the Workspace Chat webhook could not be opened for the organisation's app: Google's events get no answer until it is",
+      );
+    }
+  };
+  await serveChatApp(config.workspace_chat);
+
   logger.info(
     { agentCount: adapters.size, startedCount: started, bridgeE2eTest },
     noTransport ? "cerase-acp bridge up with no working chat transport" : "cerase-acp bridge ready",
@@ -756,6 +777,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   let reloader: ConfigReloader | undefined;
   if (opts.configPath) {
     reloader = new ConfigReloader(opts.configPath, (nextConfig) => {
+      // Before the diff, which compares agents only: an app added or removed
+      // with no assistant on the channel changes no agent at all.
+      void serveChatApp(nextConfig.workspace_chat);
       const diff = diffConfigs(currentSnapshot, nextConfig);
       if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
         return;
@@ -802,6 +826,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       if (reloader) reloader.stop();
       supervisor?.stop();
       await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
+      await serveChatApp(undefined);
       if (testServer) await testServer.close();
       if (internalServer) await internalServer.close();
       await sessionManager.shutdown();
@@ -823,5 +848,6 @@ function cloneConfig(c: BridgeConfig): BridgeConfig {
       spawn: { command: a.spawn.command, args: [...a.spawn.args] },
     })),
     session: { ...c.session },
+    ...(c.workspace_chat ? { workspace_chat: c.workspace_chat } : {}),
   };
 }

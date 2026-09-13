@@ -159,15 +159,21 @@ const BridgeConfigSchema = z
       seen.add(a.id);
     }
   })
-  // The app block is handed to each workspace_chat agent and removed from the
-  // top level. An adapter is started, stopped and respawned per agent, and the
-  // reload diff compares agents: a key or project number that lived only at
-  // the top would change on disk and reach no running adapter.
+  // The app block is handed to each workspace_chat agent. An adapter is
+  // started, stopped and respawned per agent, and the reload diff compares
+  // agents: a key or project number that lived only at the top would change on
+  // disk and reach no running adapter.
+  //
+  // It also stays at the top level, for the webhook listener. Google calls the
+  // app's route for anybody in the organisation's domain, including somebody
+  // with no assistant, and with no workspace_chat agent there is no copy to
+  // verify that call against.
   .transform(({ workspace_chat, ...cfg }) => ({
     ...cfg,
     agents: cfg.agents.map(
       (a): AgentConfig => (a.channel === "workspace_chat" && workspace_chat ? { ...a, workspace_chat } : a),
     ),
+    ...(workspace_chat ? { workspace_chat } : {}),
   }));
 
 export type AgentConfig = z.infer<typeof AgentSchema> & {

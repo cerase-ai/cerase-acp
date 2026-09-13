@@ -4,7 +4,10 @@
 // event for that app to a single route, WORKSPACE_CHAT_EVENT_PATH, which the
 // appliance's Traefik forwards unchanged to this listener. Every workspace_chat
 // agent registers its user's address on the one listener, and the verified
-// sender's email decides which assistant an event reaches.
+// sender's email decides which assistant an event reaches. The listener is
+// open while the configuration names the organisation's app or any assistant is
+// registered, so a person with no assistant is refused instead of meeting a
+// closed port.
 //
 // What the listener checks, in order, before any assistant is involved:
 //   1. the Bearer JWT Google signs, against the project numbers served here;
@@ -28,7 +31,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
-import type { AgentConfig } from "./config.js";
+import type { AgentConfig, WorkspaceChatAppConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
@@ -95,6 +98,12 @@ type Outcome = { kind: "ignore" } | { kind: "answer"; text: string } | { kind: "
 const ROUTES = new Map<string, Route>();
 const APIS = new Map<string, WorkspaceChatApi>();
 let sharedServer: Server | undefined;
+// The project number of the organisation's Chat app as the bridge configuration
+// states it. While it is set the listener stays open with no route at all, and
+// a verified event nobody's assistant can take is answered with the refusal:
+// the appliance's proxy forwards the route regardless, and a closed port is a
+// 502 that Google shows the person as a broken app.
+let organisationProject: string | undefined;
 
 /** The port the webhook listener is bound to, or undefined while it is closed. */
 export function workspaceChatListenerPort(): number | undefined {
@@ -139,6 +148,10 @@ function decide(event: ChatEvent, candidates: Route[]): Outcome {
     return { kind: "answer", text: directMessagesOnlyNotice(detectLanguage(text)) };
   }
   const refusal: Outcome = { kind: "answer", text: pickRefusalMessage(text) };
+  if (candidates.length === 0) {
+    logger.info("workspace-chat event refused: no assistant is registered for this Chat app");
+    return refusal;
+  }
 
   const email = user?.email?.trim().toLowerCase() ?? "";
   const at = email.lastIndexOf("@");
@@ -173,11 +186,16 @@ function decide(event: ChatEvent, candidates: Route[]): Outcome {
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const path = (req.url ?? "").split("?")[0];
-  if (req.method !== "POST" || path !== WORKSPACE_CHAT_EVENT_PATH || ROUTES.size === 0) {
+  const served = [
+    ...new Set([
+      ...[...ROUTES.values()].map((r) => r.app.projectNumber),
+      ...(organisationProject ? [organisationProject] : []),
+    ]),
+  ];
+  if (req.method !== "POST" || path !== WORKSPACE_CHAT_EVENT_PATH || served.length === 0) {
     respond(res, 404);
     return;
   }
-  const served = [...new Set([...ROUTES.values()].map((r) => r.app.projectNumber))];
   // A 401 with no body: whoever failed verification is not told which check
   // they missed. The reason is in the log.
   const project = await accettabile(req.headers.authorization, served);
@@ -229,6 +247,33 @@ async function ensureServerStarted(): Promise<void> {
     { port: workspaceChatListenerPort(), path: WORKSPACE_CHAT_EVENT_PATH },
     "workspace-chat listener started",
   );
+}
+
+/** Closes the listener once nothing is served on it: no route and no organisation app. */
+async function closeServerIfUnused(): Promise<void> {
+  if (ROUTES.size > 0 || organisationProject !== undefined || !sharedServer) return;
+  const server = sharedServer;
+  sharedServer = undefined;
+  APIS.clear();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+/**
+ * Serves the organisation's Chat app on the webhook listener independently of
+ * any assistant, or stops serving it with `undefined`. The bridge calls it at
+ * boot and on every reload with the configuration's top-level block. An app
+ * with no usable project number serves nothing, since no event could be
+ * verified against it. Throws when the listener cannot be opened.
+ */
+export async function serveWorkspaceChatApp(app: WorkspaceChatAppConfig | undefined): Promise<void> {
+  // Set before any await, so an adapter stopping meanwhile sees it and leaves
+  // the listener open.
+  organisationProject = app?.project_number && /^\d+$/.test(app.project_number) ? app.project_number : undefined;
+  if (organisationProject === undefined) {
+    await closeServerIfUnused();
+    return;
+  }
+  await ensureServerStarted();
 }
 
 function organisationApp(agent: AgentConfig): ChatApp {
@@ -341,12 +386,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     async stop() {
       ROUTES.delete(agent.id);
       api = undefined;
-      if (ROUTES.size === 0 && sharedServer) {
-        const server = sharedServer;
-        sharedServer = undefined;
-        APIS.clear();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-      }
+      await closeServerIfUnused();
     },
     makeSendTarget(userId: string) {
       // Taken now, not at send time: see runTurn.
