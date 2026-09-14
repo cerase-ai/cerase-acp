@@ -19,13 +19,14 @@
 // riconosce non e' una verifica.
 import { OAuth2Client } from "google-auth-library";
 import { makeLogger } from "./logger.js";
+import { googleEndpointProblem } from "./workspace-chat-api.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat.verify");
 
 /** L'unico emittente accettato. Chat firma con questa identita' di sistema. */
 export const EMITTENTE = "chat@system.gserviceaccount.com";
 
-/** I certificati pubblici di quell'identita'. */
+/** I certificati pubblici di quell'identita', dove Google li pubblica. */
 export const URL_CERTIFICATI = `https://www.googleapis.com/service_accounts/v1/metadata/x509/${encodeURIComponent(EMITTENTE)}`;
 
 // Vita massima accettata per un token, in SECONDI: e' l'unita' che
@@ -43,23 +44,13 @@ export class RichiestaNonVerificata extends Error {}
 
 type Certificati = Record<string, string>;
 
-let cache: { certificati: Certificati; scadenza: number } | undefined;
+// One entry per address. Certificates fetched from one address never answer
+// for another, so an address moved by a reload is fetched at once.
+const cache = new Map<string, { certificati: Certificati; scadenza: number }>();
 
 /** Solo per i test: svuota la cache dei certificati. */
 export function svuotaCache(): void {
-  cache = undefined;
-}
-
-/**
- * Solo per i test: mette in cache dei certificati, cosi' un test che esercita
- * il listener non deve raggiungere Google.
- *
- * Sta qui invece di un parametro iniettabile sul gestore HTTP perche' un punto
- * di iniezione sulla verifica e' un modo per disattivarla: questo riempie una
- * cache che esiste comunque, e non cambia cosa viene controllato.
- */
-export function seminaCache(certificati: Certificati, durataMs = 60_000, ora: () => number = Date.now): void {
-  cache = { certificati, scadenza: ora() + durataMs };
+  cache.clear();
 }
 
 /**
@@ -70,9 +61,18 @@ export function seminaCache(certificati: Certificati, durataMs = 60_000, ora: ()
  * rifiutare richieste valide il giorno della rotazione. Il `max-age` della
  * risposta e' la durata che Google dichiara, quindi e' quella che si usa.
  */
-export async function certificati(recupera: typeof fetch = fetch, ora: () => number = Date.now): Promise<Certificati> {
-  if (cache && cache.scadenza > ora()) return cache.certificati;
-  const resp = await recupera(URL_CERTIFICATI);
+export async function certificati(
+  indirizzo: string = URL_CERTIFICATI,
+  recupera: typeof fetch = fetch,
+  ora: () => number = Date.now,
+): Promise<Certificati> {
+  // The address decides where the certificates come from, never whether they
+  // are checked: one the endpoint rule refuses is a refusal of the request.
+  const problema = googleEndpointProblem("workspace_chat.certificates_url", indirizzo);
+  if (problema) throw new RichiestaNonVerificata(`certificati di Google non recuperabili: ${problema}`);
+  const tenuti = cache.get(indirizzo);
+  if (tenuti && tenuti.scadenza > ora()) return tenuti.certificati;
+  const resp = await recupera(indirizzo);
   if (!resp.ok) {
     throw new RichiestaNonVerificata(
       `certificati di Google non recuperabili (HTTP ${resp.status}): senza di essi nessuna richiesta puo' essere verificata, quindi nessuna viene accettata`,
@@ -84,7 +84,7 @@ export async function certificati(recupera: typeof fetch = fetch, ora: () => num
   // Senza `max-age` un'ora: abbastanza da non martellare, poco da seguire una
   // rotazione. Mai "per sempre".
   const durata = (maxAge ? Number(maxAge[1]) : 3600) * 1000;
-  cache = { certificati, scadenza: ora() + durata };
+  cache.set(indirizzo, { certificati, scadenza: ora() + durata });
   return certificati;
 }
 
@@ -101,7 +101,7 @@ export async function verifica(
   // is read, so the caller cannot yet say which one the event is for; the
   // returned `destinatario` is the one the token was issued for.
   audience: string | string[],
-  opzioni: { recupera?: typeof fetch; ora?: () => number; client?: OAuth2Client } = {},
+  opzioni: { urlCertificati?: string; recupera?: typeof fetch; ora?: () => number; client?: OAuth2Client } = {},
 ): Promise<{ emittente: string; destinatario: string }> {
   if (audience.length === 0) {
     throw new RichiestaNonVerificata(
@@ -116,7 +116,7 @@ export async function verifica(
     );
   }
   const client = opzioni.client ?? new OAuth2Client();
-  const certs = await certificati(opzioni.recupera ?? fetch, opzioni.ora ?? Date.now);
+  const certs = await certificati(opzioni.urlCertificati, opzioni.recupera ?? fetch, opzioni.ora ?? Date.now);
   let ticket: Awaited<ReturnType<OAuth2Client["verifySignedJwtWithCertsAsync"]>>;
   try {
     ticket = await client.verifySignedJwtWithCertsAsync(m[1], certs, audience, [EMITTENTE], VITA_MASSIMA_SEC);
@@ -131,16 +131,27 @@ export async function verifica(
   return { emittente: payload.iss ?? "", destinatario: String(payload.aud ?? "") };
 }
 
-/** Like `verifica`, but logs a refusal and returns the verified audience, or undefined. */
+/**
+ * Like `verifica` over every app served, keyed by the address of its signing
+ * certificates: a token is checked against the projects of each address with
+ * that address's certificates. Logs a refusal and returns the verified
+ * project, or undefined.
+ */
 export async function accettabile(
   header: string | undefined,
-  audience: string | string[],
-  opzioni: Parameters<typeof verifica>[2] = {},
+  served: ReadonlyMap<string, readonly string[]>,
 ): Promise<string | undefined> {
-  try {
-    return (await verifica(header, audience, opzioni)).destinatario;
-  } catch (err) {
-    logger.warn({ audience, motivo: (err as Error).message }, "workspace-chat event refused: request not verified");
-    return undefined;
+  const motivi = new Set<string>();
+  for (const [urlCertificati, audience] of served) {
+    try {
+      return (await verifica(header, [...audience], { urlCertificati })).destinatario;
+    } catch (err) {
+      motivi.add((err as Error).message);
+    }
   }
+  logger.warn(
+    { audience: [...served.values()].flat(), motivo: [...motivi].join("; ") },
+    "workspace-chat event refused: request not verified",
+  );
+  return undefined;
 }

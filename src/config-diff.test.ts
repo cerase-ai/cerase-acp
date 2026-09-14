@@ -139,7 +139,7 @@ describe("diffConfigs", () => {
   // change that did not respawn would leave it verifying against the old
   // project and posting with the old key until something else restarted it.
   it("classifies a change to the organisation's workspace_chat block as `bot_token_or_spawn`", () => {
-    const app = {
+    const app: NonNullable<AgentConfig["workspace_chat"]> = {
       project_number: "111111111111",
       credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
       allowed_domains: ["example.com"],
@@ -150,6 +150,8 @@ describe("diffConfigs", () => {
       { project_number: "222222222222" },
       { credentials_path: "/var/cerase/workspace-chat-creds/rotated.json" },
       { allowed_domains: ["example.com", "example.org"] },
+      { certificates_url: "http://fake-google:8080/certs" },
+      { api_root: "http://fake-google:8080" },
     ]) {
       const d = diffConfigs(cfg([wc({})]), cfg([wc(change)]));
       expect(d.modified).toEqual([{ agentId: "a", classification: "bot_token_or_spawn" }]);

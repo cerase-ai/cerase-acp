@@ -18,6 +18,25 @@ export const CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot";
 export const GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token";
 export const GOOGLE_CHAT_API_ROOT = "https://chat.googleapis.com";
 
+const LOOPBACK = /^(?:127(?:\.\d{1,3}){3}|\[::1\])$/;
+
+/**
+ * Why `value`, written under `key` in the configuration, cannot be the address
+ * of a Google endpoint, or undefined when it can.
+ *
+ * The addresses are configurable so a test can serve the endpoints itself.
+ * Plaintext is accepted only toward a host name without a dot or a loopback
+ * address, which is where such a stand-in runs. Toward any other host a
+ * dropped letter in Google's own address would route the request, and for the
+ * signing certificates the whole signature check, through anybody on the path.
+ */
+export function googleEndpointProblem(key: string, value: string): string | undefined {
+  const url = URL.canParse(value) ? new URL(value) : undefined;
+  if (url?.protocol === "https:") return undefined;
+  if (url?.protocol === "http:" && (LOOPBACK.test(url.hostname) || !/[.[]/.test(url.hostname))) return undefined;
+  return `${key} must be an https URL, or an http URL to a host name without a dot or to a loopback address, and ${JSON.stringify(value)} is neither`;
+}
+
 // Google issues an access token for an hour. It is renewed a minute before
 // that, so a post that starts just before expiry does not arrive with a token
 // Google has already stopped accepting.

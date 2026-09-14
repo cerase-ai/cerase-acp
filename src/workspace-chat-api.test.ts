@@ -19,7 +19,7 @@ import {
   startFakeGoogle,
   writeKeyFile,
 } from "./__tests__/fake-google.js";
-import { ChatApiError, readServiceAccountKey, WorkspaceChatApi } from "./workspace-chat-api.js";
+import { ChatApiError, googleEndpointProblem, readServiceAccountKey, WorkspaceChatApi } from "./workspace-chat-api.js";
 
 describe("workspace-chat API: app authentication and the calls made with it", () => {
   let google: FakeGoogle;
@@ -208,5 +208,38 @@ describe("workspace-chat API: reading the service-account key", () => {
     const account = makeServiceAccount();
     writeFileSync(path, JSON.stringify({ client_email: account.clientEmail, private_key: account.privateKeyPem }));
     expect(readServiceAccountKey(path).token_uri).toBe("https://oauth2.googleapis.com/token");
+  });
+});
+
+// The addresses of Google's endpoints can be written in the configuration so a
+// test can serve them. Plaintext toward a dotted name would let a dropped letter
+// in Google's own address hand the certificate fetch, and with it the signature
+// check, to anybody on the path; a name without a dot or a loopback address is
+// where a test's stand-in lives.
+describe("workspace-chat: which configured Google endpoint addresses are accepted", () => {
+  it.each([
+    "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com",
+    "https://chat.googleapis.com",
+    "http://fake-google:8080/certs",
+    "http://localhost:4000",
+    "http://127.0.0.1:4000/certs",
+    "http://[::1]:4000",
+  ])("%s is accepted", (value) => {
+    expect(googleEndpointProblem("workspace_chat.certificates_url", value)).toBeUndefined();
+  });
+
+  it.each([
+    "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com",
+    "http://10.0.0.5:8080",
+    "http://[2001:db8::1]:8080",
+    "htps://www.googleapis.com/certs",
+    "www.googleapis.com/certs",
+    "file:///etc/cerase-acp/certs.json",
+    "data:application/json,{}",
+    "",
+  ])("%j is refused, naming the key and the value", (value) => {
+    expect(googleEndpointProblem("workspace_chat.certificates_url", value)).toBe(
+      `workspace_chat.certificates_url must be an https URL, or an http URL to a host name without a dot or to a loopback address, and ${JSON.stringify(value)} is neither`,
+    );
   });
 });

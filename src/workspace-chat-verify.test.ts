@@ -12,7 +12,7 @@
 import { createSign, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { EMITTENTE, RichiestaNonVerificata, svuotaCache, verifica } from "./workspace-chat-verify.js";
+import { EMITTENTE, RichiestaNonVerificata, svuotaCache, URL_CERTIFICATI, verifica } from "./workspace-chat-verify.js";
 
 const AUDIENCE = "123456789012";
 const KID = "chiave-di-prova";
@@ -45,8 +45,10 @@ function token(
 /** I certificati di Google, serviti da una finta rete. */
 function rete(certificati: Record<string, string> = { [KID]: PEM_PUBBLICA }, headers: Record<string, string> = {}) {
   let chiamate = 0;
-  const recupera = (async () => {
+  const indirizzi: string[] = [];
+  const recupera = (async (indirizzo: string) => {
     chiamate += 1;
+    indirizzi.push(String(indirizzo));
     return {
       ok: true,
       status: 200,
@@ -54,7 +56,7 @@ function rete(certificati: Record<string, string> = { [KID]: PEM_PUBBLICA }, hea
       headers: { get: (k: string) => headers[k.toLowerCase()] ?? null },
     };
   }) as unknown as typeof fetch;
-  return { recupera, quante: () => chiamate };
+  return { recupera, quante: () => chiamate, indirizzi };
 }
 
 describe("workspace-chat: verifica della richiesta", () => {
@@ -188,5 +190,42 @@ describe("workspace-chat: verifica della richiesta", () => {
     orologio += 101_000;
     await verifica(`Bearer ${token()}`, AUDIENCE, { recupera, ora });
     expect(quante()).toBe(2);
+  });
+
+  it("without an address the certificates come from the one Google publishes for Chat", async () => {
+    const { recupera, indirizzi } = rete();
+    await verifica(`Bearer ${token()}`, AUDIENCE, { recupera });
+    expect(indirizzi).toEqual([
+      "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com",
+    ]);
+    expect(URL_CERTIFICATI).toBe(indirizzi[0]);
+  });
+
+  // A reload can move the address. Certificates kept from the old one would
+  // go on deciding which events pass until Google's max-age ran out.
+  it("certificates are fetched from the address given, and those kept for one address never answer for another", async () => {
+    const { recupera, indirizzi } = rete({ [KID]: PEM_PUBBLICA }, { "cache-control": "public, max-age=3600" });
+    await verifica(`Bearer ${token()}`, AUDIENCE, { recupera, urlCertificati: "http://fake-google:8080/a" });
+    await verifica(`Bearer ${token()}`, AUDIENCE, { recupera, urlCertificati: "http://fake-google:8080/b" });
+    await verifica(`Bearer ${token()}`, AUDIENCE, { recupera, urlCertificati: "http://fake-google:8080/a" });
+    expect(indirizzi).toEqual(["http://fake-google:8080/a", "http://fake-google:8080/b"]);
+  });
+
+  // The address changes where the certificates come from and nothing else. One
+  // the endpoint rule refuses is a refusal of the request, never a request
+  // let through unchecked, and it is not fetched.
+  it("an address the endpoint rule refuses rejects every request and fetches nothing", async () => {
+    const { recupera, quante } = rete();
+    for (const urlCertificati of [
+      "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com",
+      "",
+    ]) {
+      await expect(verifica(`Bearer ${token()}`, AUDIENCE, { recupera, urlCertificati })).rejects.toThrow(
+        new RichiestaNonVerificata(
+          `certificati di Google non recuperabili: workspace_chat.certificates_url must be an https URL, or an http URL to a host name without a dot or to a loopback address, and ${JSON.stringify(urlCertificati)} is neither`,
+        ),
+      );
+    }
+    expect(quante()).toBe(0);
   });
 });

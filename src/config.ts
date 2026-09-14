@@ -130,6 +130,12 @@ const WorkspaceChatAppSchema = z.object({
   // Email domains of the organisation. A sender outside them is refused even
   // when an assistant lists their address.
   allowed_domains: z.array(z.string()).optional(),
+  // Where the certificates Chat signs events with are fetched, and the base URL
+  // of the Chat API replies are posted to. Absent, they are Google's. They exist
+  // so a test can serve both endpoints itself; an address the adapter's
+  // endpoint rule refuses keeps the app from being served.
+  certificates_url: z.string().optional(),
+  api_root: z.string().optional(),
 });
 export type WorkspaceChatAppConfig = z.infer<typeof WorkspaceChatAppSchema>;
 

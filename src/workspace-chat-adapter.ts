@@ -37,8 +37,14 @@ import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "
 import { makeLogger } from "./logger.js";
 import { directMessagesOnlyNotice } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
-import { ChatApiError, GOOGLE_CHAT_API_ROOT, readServiceAccountKey, WorkspaceChatApi } from "./workspace-chat-api.js";
-import { accettabile } from "./workspace-chat-verify.js";
+import {
+  ChatApiError,
+  GOOGLE_CHAT_API_ROOT,
+  googleEndpointProblem,
+  readServiceAccountKey,
+  WorkspaceChatApi,
+} from "./workspace-chat-api.js";
+import { accettabile, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
 
@@ -76,6 +82,10 @@ interface ChatApp {
   projectNumber: string;
   credentialsPath: string;
   allowedDomains: string[];
+  /** Where the certificates Chat signs events with are fetched. */
+  certificatesUrl: string;
+  /** The Chat API's base URL, without a trailing slash. */
+  apiRoot: string;
 }
 
 interface Route {
@@ -98,12 +108,13 @@ type Outcome = { kind: "ignore" } | { kind: "answer"; text: string } | { kind: "
 const ROUTES = new Map<string, Route>();
 const APIS = new Map<string, WorkspaceChatApi>();
 let sharedServer: Server | undefined;
-// The project number of the organisation's Chat app as the bridge configuration
-// states it. While it is set the listener stays open with no route at all, and
-// a verified event nobody's assistant can take is answered with the refusal:
-// the appliance's proxy forwards the route regardless, and a closed port is a
-// 502 that Google shows the person as a broken app.
-let organisationProject: string | undefined;
+// The organisation's Chat app as the bridge configuration states it: its
+// project number and where its signing certificates are fetched. While it is
+// set the listener stays open with no route at all, and a verified event
+// nobody's assistant can take is answered with the refusal: the appliance's
+// proxy forwards the route regardless, and a closed port is a 502 that Google
+// shows the person as a broken app.
+let organisation: { projectNumber: string; certificatesUrl: string } | undefined;
 
 /** The port the webhook listener is bound to, or undefined while it is closed. */
 export function workspaceChatListenerPort(): number | undefined {
@@ -186,13 +197,16 @@ function decide(event: ChatEvent, candidates: Route[]): Outcome {
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const path = (req.url ?? "").split("?")[0];
-  const served = [
-    ...new Set([
-      ...[...ROUTES.values()].map((r) => r.app.projectNumber),
-      ...(organisationProject ? [organisationProject] : []),
-    ]),
-  ];
-  if (req.method !== "POST" || path !== WORKSPACE_CHAT_EVENT_PATH || served.length === 0) {
+  // Every project served, under the address of the certificates its tokens are
+  // checked with. All of them name the same address unless a reload that moved
+  // it is still being applied.
+  const served = new Map<string, string[]>();
+  for (const app of [...[...ROUTES.values()].map((r) => r.app), ...(organisation ? [organisation] : [])]) {
+    const projects = served.get(app.certificatesUrl) ?? [];
+    if (!projects.includes(app.projectNumber)) projects.push(app.projectNumber);
+    served.set(app.certificatesUrl, projects);
+  }
+  if (req.method !== "POST" || path !== WORKSPACE_CHAT_EVENT_PATH || served.size === 0) {
     respond(res, 404);
     return;
   }
@@ -251,7 +265,7 @@ async function ensureServerStarted(): Promise<void> {
 
 /** Closes the listener once nothing is served on it: no route and no organisation app. */
 async function closeServerIfUnused(): Promise<void> {
-  if (ROUTES.size > 0 || organisationProject !== undefined || !sharedServer) return;
+  if (ROUTES.size > 0 || organisation !== undefined || !sharedServer) return;
   const server = sharedServer;
   sharedServer = undefined;
   APIS.clear();
@@ -263,14 +277,21 @@ async function closeServerIfUnused(): Promise<void> {
  * any assistant, or stops serving it with `undefined`. The bridge calls it at
  * boot and on every reload with the configuration's top-level block. An app
  * with no usable project number serves nothing, since no event could be
- * verified against it. Throws when the listener cannot be opened.
+ * verified against it. Throws when the listener cannot be opened, and when
+ * the app names a certificates address the endpoint rule refuses, after
+ * withdrawing it.
  */
 export async function serveWorkspaceChatApp(app: WorkspaceChatAppConfig | undefined): Promise<void> {
+  const projectNumber = app?.project_number && /^\d+$/.test(app.project_number) ? app.project_number : undefined;
+  const certificatesUrl = app?.certificates_url ?? URL_CERTIFICATI;
+  const problem =
+    projectNumber === undefined ? undefined : googleEndpointProblem("workspace_chat.certificates_url", certificatesUrl);
   // Set before any await, so an adapter stopping meanwhile sees it and leaves
   // the listener open.
-  organisationProject = app?.project_number && /^\d+$/.test(app.project_number) ? app.project_number : undefined;
-  if (organisationProject === undefined) {
+  organisation = projectNumber === undefined || problem ? undefined : { projectNumber, certificatesUrl };
+  if (organisation === undefined) {
     await closeServerIfUnused();
+    if (problem) throw new Error(`the organisation's Workspace Chat app is not served: ${problem}`);
     return;
   }
   await ensureServerStarted();
@@ -293,6 +314,13 @@ function organisationApp(agent: AgentConfig): ChatApp {
       `workspace_chat.allowed_domains has ${notDomains.length === 1 ? "an entry that is not a domain" : "entries that are not domains"}: ${notDomains.join(", ")}`,
     );
   }
+  for (const [key, value] of [
+    ["workspace_chat.certificates_url", wc?.certificates_url],
+    ["workspace_chat.api_root", wc?.api_root],
+  ] as const) {
+    const problem = value === undefined ? undefined : googleEndpointProblem(key, value);
+    if (problem) problems.push(problem);
+  }
   if (problems.length > 0 || !wc?.project_number || !wc.credentials_path) {
     throw new Error(`agent "${agent.id}" channel='workspace_chat' refuses to start: ${problems.join("; ")}`);
   }
@@ -300,15 +328,16 @@ function organisationApp(agent: AgentConfig): ChatApp {
     projectNumber: wc.project_number,
     credentialsPath: wc.credentials_path,
     allowedDomains: (wc.allowed_domains ?? []).map((d) => d.trim().toLowerCase()),
+    certificatesUrl: wc.certificates_url ?? URL_CERTIFICATI,
+    apiRoot: (wc.api_root ?? GOOGLE_CHAT_API_ROOT).replace(/\/+$/, ""),
   };
 }
 
 function apiFor(app: ChatApp): WorkspaceChatApi {
-  const apiRoot = (process.env.WORKSPACE_CHAT_API_ROOT ?? GOOGLE_CHAT_API_ROOT).replace(/\/+$/, "");
-  const key = `${app.credentialsPath}\n${apiRoot}`;
+  const key = `${app.credentialsPath}\n${app.apiRoot}`;
   let api = APIS.get(key);
   if (!api) {
-    api = new WorkspaceChatApi({ keyPath: app.credentialsPath, apiRoot });
+    api = new WorkspaceChatApi({ keyPath: app.credentialsPath, apiRoot: app.apiRoot });
     APIS.set(key, api);
   }
   return api;

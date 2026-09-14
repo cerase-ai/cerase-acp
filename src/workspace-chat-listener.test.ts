@@ -7,7 +7,7 @@
 // than Google's thirty-second deadline is expressed without waiting for one.
 // Google's certificates, token endpoint and Chat API are fakes on loopback.
 
-import { createSign, generateKeyPairSync } from "node:crypto";
+import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +37,7 @@ import {
   WORKSPACE_CHAT_EVENT_PATH,
   workspaceChatListenerPort,
 } from "./workspace-chat-adapter.js";
-import { EMITTENTE, seminaCache, svuotaCache } from "./workspace-chat-verify.js";
+import { EMITTENTE, svuotaCache, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
 process.env.WORKSPACE_CHAT_PORT = "0";
 
@@ -45,12 +45,14 @@ const PROJECT = "111111111111";
 const KID = "chat-signing-key";
 const signer = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const SIGNER_PEM = signer.publicKey.export({ type: "spki", format: "pem" }).toString();
+const otherSigner = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const OTHER_SIGNER_PEM = otherSigner.publicKey.export({ type: "spki", format: "pem" }).toString();
 
-function chatJwt(aud: string): string {
+function chatJwt(aud: string, by: { privateKey: KeyObject } = signer): string {
   const now = Math.floor(Date.now() / 1000);
   const head = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: KID })).toString("base64url");
   const body = Buffer.from(JSON.stringify({ aud, iss: EMITTENTE, iat: now - 5, exp: now + 300 })).toString("base64url");
-  const signature = createSign("RSA-SHA256").update(`${head}.${body}`).sign(signer.privateKey).toString("base64url");
+  const signature = createSign("RSA-SHA256").update(`${head}.${body}`).sign(by.privateKey).toString("base64url");
   return `Bearer ${head}.${body}.${signature}`;
 }
 
@@ -151,6 +153,7 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     turnWaiters = [];
     postWaiters = [];
     google = await startFakeGoogle();
+    google.publishCertificates({ [KID]: SIGNER_PEM });
     const account = makeServiceAccount();
     google.trust(account);
     google.onPost = () => {
@@ -161,11 +164,11 @@ describe("workspace-chat: one Chat app for the organisation", () => {
       project_number: PROJECT,
       credentials_path: join(dir, "service-account.json"),
       allowed_domains: ["example.com"],
+      certificates_url: google.certificatesUrl,
+      api_root: google.apiRoot,
     };
     writeKeyFile(app.credentials_path!, account, google.tokenUri);
-    process.env.WORKSPACE_CHAT_API_ROOT = google.apiRoot;
     svuotaCache();
-    seminaCache({ [KID]: SIGNER_PEM });
 
     config = { agents: [], session: { idle_timeout_minutes: 60, max_concurrent: 16 } };
     const sessionManager = {
@@ -200,7 +203,6 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     adapters.clear();
     await google.close();
     svuotaCache();
-    delete process.env.WORKSPACE_CHAT_API_ROOT;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -253,6 +255,16 @@ describe("workspace-chat: one Chat app for the organisation", () => {
   it("an event signed for another Chat app is refused and reaches no assistant", async () => {
     expect(await post(chatEvent(), chatJwt("999999999999"))).toEqual({ status: 401, body: undefined });
     expect(reached()).toEqual([]);
+  });
+
+  // The configured address decides which keys sign a valid event. A test
+  // serves its own there; a tenant's configuration names none and gets Google's.
+  it("events are verified against the certificates at the configured address, fetched once while Google's max-age holds", async () => {
+    expect(await post(chatEvent(), chatJwt(PROJECT, otherSigner))).toEqual({ status: 401, body: undefined });
+    expect(await post(chatEvent())).toEqual({ status: 200, body: {} });
+    await turnCount(1);
+    expect(reached()).toEqual([["agent-1", "mario.rossi@example.com"]]);
+    expect(google.certificateRequests()).toBe(1);
   });
 
   it("a verified sender with no assistant gets a short refusal and reaches none", async () => {
@@ -421,6 +433,7 @@ describe("workspace-chat: one Chat app for the organisation", () => {
 // shows the person an error about the app; with the organisation's app served,
 // the same person is told they have no assistant here.
 describe("workspace-chat: the organisation's app with no assistant registered", () => {
+  let google: FakeGoogle;
   let dir: string;
   let app: NonNullable<AgentConfig["workspace_chat"]>;
   let adapter: ChatAdapter | undefined;
@@ -435,23 +448,27 @@ describe("workspace-chat: the organisation's app with no assistant registered", 
     return { status: resp.status, body: text === "" ? undefined : (JSON.parse(text) as unknown) };
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     logs.length = 0;
+    google = await startFakeGoogle();
+    google.publishCertificates({ [KID]: SIGNER_PEM });
     dir = mkdtempSync(join(tmpdir(), "wc-no-assistant-"));
     app = {
       project_number: PROJECT,
       credentials_path: join(dir, "service-account.json"),
       allowed_domains: ["example.com"],
+      certificates_url: google.certificatesUrl,
     };
     writeKeyFile(app.credentials_path!, makeServiceAccount(), "https://oauth2.googleapis.com/token");
     svuotaCache();
-    seminaCache({ [KID]: SIGNER_PEM });
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await adapter?.stop();
     adapter = undefined;
     await serveWorkspaceChatApp(undefined);
+    await google.close();
     svuotaCache();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -498,5 +515,68 @@ describe("workspace-chat: the organisation's app with no assistant registered", 
   it("an app without a usable project number opens nothing, since no event could be verified", async () => {
     await serveWorkspaceChatApp({ ...app, project_number: undefined });
     expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  it("with no certificates_url, events are verified against the certificates Google publishes for Chat", async () => {
+    const realFetch = globalThis.fetch;
+    const asked: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input).startsWith("http://127.0.0.1:")) return realFetch(input, init);
+      asked.push(String(input));
+      return Response.json({ [KID]: SIGNER_PEM }, { headers: { "cache-control": "public, max-age=3600" } });
+    });
+    const { certificates_url: _, ...withoutAddress } = app;
+    await serveWorkspaceChatApp(withoutAddress);
+
+    const event = chatEvent({ text: "ciao, mi aiuti con il budget?" });
+    expect(await post(event)).toEqual({ status: 200, body: { text: pickRefusalMessage(event.message.text) } });
+    expect(asked).toEqual([URL_CERTIFICATI]);
+    expect(URL_CERTIFICATI).toBe(
+      "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com",
+    );
+  });
+
+  // An address that let a dropped letter send the certificate fetch over
+  // plaintext to a public name would leave the signature check to whoever
+  // answers it. The app is not served, and the reason reaches the log.
+  it("an app whose certificates_url the endpoint rule refuses opens nothing and says why", async () => {
+    await expect(
+      serveWorkspaceChatApp({
+        ...app,
+        certificates_url: "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat",
+      }),
+    ).rejects.toThrow(
+      'the organisation\'s Workspace Chat app is not served: workspace_chat.certificates_url must be an https URL, or an http URL to a host name without a dot or to a loopback address, and "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat" is neither',
+    );
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
+  // Mid-reload the organisation's app and an assistant's copy of it can name
+  // different addresses. A token counts only against the certificates of the
+  // app whose project it was issued for.
+  it("two apps served with different certificate addresses each accept only tokens their own certificates verify", async () => {
+    const other = await startFakeGoogle();
+    try {
+      other.publishCertificates({ [KID]: OTHER_SIGNER_PEM });
+      await serveWorkspaceChatApp(app);
+      adapter = await createChatAdapter(
+        agent("agent-1", "mario.rossi@example.com", {
+          ...app,
+          project_number: "222222222222",
+          certificates_url: other.certificatesUrl,
+        }),
+        {} as unknown as Dispatcher,
+      );
+      await adapter.start();
+
+      const event = chatEvent({ email: "giulia.neri@example.com" });
+      const refusal = { status: 200, body: { text: pickRefusalMessage(event.message.text) } };
+      expect(await post(event, chatJwt(PROJECT))).toEqual(refusal);
+      expect(await post(event, chatJwt("222222222222", otherSigner))).toEqual(refusal);
+      expect(await post(event, chatJwt("222222222222"))).toEqual({ status: 401, body: undefined });
+      expect(await post(event, chatJwt(PROJECT, otherSigner))).toEqual({ status: 401, body: undefined });
+    } finally {
+      await other.close();
+    }
   });
 });

@@ -154,6 +154,17 @@ agents:
 | `project_number` | string of digits (a YAML integer is accepted) | The audience Google puts in the JWT on every event. The app's *Authentication Audience* must be set to *Project Number*. |
 | `credentials_path` | string | Path inside the container of the app's service-account JSON key. Read again whenever an access token is renewed, so a replaced key is used without a restart. |
 | `allowed_domains` | list of domains, at least one | A sender whose email is outside these is refused even when an agent lists the address. |
+| `certificates_url` | URL, optional | Where the certificates Chat signs events with are fetched. Absent, Google's: `https://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com`. Every event is verified against them whatever the value. |
+| `api_root` | URL, optional | Base URL of the Chat API replies are posted to. Absent, `https://chat.googleapis.com`. |
+
+`certificates_url` and `api_root` exist so a test can serve Google's endpoints
+itself; an appliance's configuration leaves them out. Each must be an `https`
+URL, or an `http` URL to a host name without a dot (a container on the same
+network) or to a loopback address, so a dropped letter in Google's own address
+cannot move the certificate fetch to plaintext. A `certificates_url` outside
+that rule keeps the organisation's app from being served, either key outside it
+keeps every `workspace_chat` agent from starting, and the log names the key and
+the value. The token endpoint is the `token_uri` the service-account key names.
 
 A missing or malformed block does not fail the load: each `workspace_chat`
 agent refuses to start and names what is wrong, and every other channel keeps
@@ -197,7 +208,6 @@ groups; it never writes there.
 | `CERASE_ACP_ADAPTER_RETRY_MAX_MS` | `300000` | Self-heal: cap on the retry backoff interval. |
 | `CERASE_ACP_REACHABILITY_INTERVAL_MS` | `60000` | How often each Discord adapter asks Discord whether it is answering (one unauthenticated gateway lookup). Every message sent or received counts as the same evidence, so a busy bridge rarely probes. |
 | `CERASE_ACP_REACHABILITY_STALE_MS` | `180000` | How long Discord may stay silent before the adapter reports `ready: false` on `/healthz` and `/internal/status`. Three missed probes, so one blip cannot flip it. |
-| `WORKSPACE_CHAT_API_ROOT` | `https://chat.googleapis.com` | Base URL of the Google Chat REST API the replies are posted to. |
 
 The six below were read by the code and documented nowhere until 2026-08-10
 (`M21`). They are listed because an undocumented default is a decision somebody

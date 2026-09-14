@@ -81,8 +81,9 @@ function classifyMutation(prev: AgentConfig, next: AgentConfig): ModifiedClassif
     prev.spawn.command !== next.spawn.command ||
     !arraysEqual(prev.spawn.args, next.spawn.args) ||
     // The organisation's Chat app. An adapter verifies events against its
-    // project number and posts with its key from start() on, so either one
-    // changing has to reach the adapter by restarting it.
+    // project number and certificates and posts with its key to its API from
+    // start() on, so any of them changing has to reach the adapter by
+    // restarting it.
     !sameWorkspaceChatApp(prev.workspace_chat, next.workspace_chat);
 
   if (allowedUsersChanged && respawnFieldsChanged) return "mixed";
@@ -96,6 +97,8 @@ function sameWorkspaceChatApp(a: AgentConfig["workspace_chat"], b: AgentConfig["
   return (
     a.project_number === b.project_number &&
     a.credentials_path === b.credentials_path &&
+    a.certificates_url === b.certificates_url &&
+    a.api_root === b.api_root &&
     setsEqual(a.allowed_domains ?? [], b.allowed_domains ?? [])
   );
 }

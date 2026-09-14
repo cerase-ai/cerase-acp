@@ -70,6 +70,23 @@ describe("workspace-chat adapter: what start() requires", () => {
     expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
+  it("refuses a certificates_url or api_root the endpoint rule refuses, naming each key and its value", async () => {
+    adapter = await createChatAdapter(
+      wcAgent({
+        project_number: "123456789012",
+        credentials_path: keyPath,
+        allowed_domains: ["example.com"],
+        certificates_url: "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat",
+        api_root: "chat.googleapis.com",
+      }),
+      DISPATCHER,
+    );
+    await expect(adapter.start()).rejects.toThrow(
+      'agent "agent-1" channel=\'workspace_chat\' refuses to start: workspace_chat.certificates_url must be an https URL, or an http URL to a host name without a dot or to a loopback address, and "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat" is neither; workspace_chat.api_root must be an https URL, or an http URL to a host name without a dot or to a loopback address, and "chat.googleapis.com" is neither',
+    );
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
   it("refuses when the key cannot be read, naming the path and the reason", async () => {
     const absent = join(dir, "absent.json");
     adapter = await createChatAdapter(

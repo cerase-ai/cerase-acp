@@ -347,6 +347,42 @@ session:
     expect(cfg.workspace_chat).toEqual(app);
   });
 
+  // Where the bridge reaches Google can be written in the block, so a test can
+  // serve those endpoints itself. The load keeps what is written, a malformed
+  // address included: the workspace_chat agents refuse it when they start,
+  // and the other channels in the file keep running.
+  it("the addresses of Google's endpoints in the block load as written and reach the workspace_chat agents", () => {
+    writeFileSync(
+      path,
+      `
+workspace_chat:
+  project_number: "123456789012"
+  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
+  allowed_domains: [example.com]
+  certificates_url: http://fake-google:8080/certs
+  api_root: htps://chat.googleapis.com
+agents:
+  - id: agent-1
+    channel: workspace_chat
+    allowed_users: ["mario.rossi@example.com"]
+    spawn: { command: docker, args: [] }
+  - id: doc-qa
+    channel: discord
+    bot_token: tok-doc
+    allowed_users: ["111"]
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents.map((a) => [a.id, a.workspace_chat?.certificates_url, a.workspace_chat?.api_root])).toEqual([
+      ["agent-1", "http://fake-google:8080/certs", "htps://chat.googleapis.com"],
+      ["doc-qa", undefined, undefined],
+    ]);
+  });
+
   // Symfony's dumper quotes a numeric string, but a renderer that casts the
   // column to an integer writes a bare number. Both mean the same project.
   it("a project number written as a YAML integer loads as the same string", () => {

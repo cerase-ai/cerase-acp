@@ -1,8 +1,9 @@
-// A stand-in for the two Google endpoints the Workspace Chat adapter talks to
-// when it answers: the OAuth token endpoint that turns a service-account
-// assertion into an access token, and the Chat REST API that the reply is
-// posted to. Both are served over real HTTP on loopback, so the adapter's own
-// request code runs unchanged and nothing reaches the network.
+// A stand-in for the three Google endpoints the Workspace Chat adapter talks
+// to: the certificates Chat signs its events with, the OAuth token endpoint
+// that turns a service-account assertion into an access token, and the Chat
+// REST API that the reply is posted to. All are served over real HTTP on
+// loopback, so the adapter's own request code runs unchanged and nothing
+// reaches the network.
 //
 // The token endpoint checks what Google checks: the assertion's signature
 // against the service account's public key, its issuer, its scope and its
@@ -14,6 +15,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 
 export const CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot";
+
+const CERTIFICATES_PATH = "/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com";
 
 export interface ServiceAccount {
   clientEmail: string;
@@ -57,9 +60,15 @@ export interface PostedMessage {
 }
 
 export interface FakeGoogle {
-  /** Base URL of the fake Chat API, the value WORKSPACE_CHAT_API_ROOT takes. */
+  /** Base URL of the fake Chat API, the value workspace_chat.api_root takes. */
   apiRoot: string;
+  /** Where the signing certificates are served, the value workspace_chat.certificates_url takes. */
+  certificatesUrl: string;
   tokenUri: string;
+  /** The certificates served at certificatesUrl from now on, keyed by key id. */
+  publishCertificates(certificates: Record<string, string>): void;
+  /** Every request for the signing certificates. */
+  certificateRequests(): number;
   /** Decoded claims of every assertion the token endpoint accepted, in order. */
   assertions: Record<string, unknown>[];
   /** Every call to the token endpoint, accepted or not. */
@@ -97,8 +106,14 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   const failures: { status: number; body: unknown }[] = [];
   let issued = 0;
   let tokenCalls = 0;
+  let certificates: Record<string, string> = {};
+  let certificateCalls = 0;
 
-  const fake: Omit<FakeGoogle, "apiRoot" | "tokenUri" | "close"> = {
+  const fake: Omit<FakeGoogle, "apiRoot" | "certificatesUrl" | "tokenUri" | "close"> = {
+    publishCertificates: (published) => {
+      certificates = published;
+    },
+    certificateRequests: () => certificateCalls,
     assertions: [],
     tokenRequests: () => tokenCalls,
     posts: [],
@@ -151,6 +166,12 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       const url = new URL(req.url ?? "/", "http://fake.google");
       if (req.method === "POST" && url.pathname === "/token") return handleToken(req, res);
 
+      if (req.method === "GET" && url.pathname === CERTIFICATES_PATH) {
+        certificateCalls += 1;
+        res.setHeader("cache-control", "public, max-age=3600");
+        return json(res, 200, certificates);
+      }
+
       const post = /^\/v1\/(spaces\/[^/]+)\/messages$/.exec(url.pathname);
       if (req.method === "POST" && post?.[1]) {
         const body = JSON.parse(await readBody(req)) as { text?: string; thread?: { name?: string } };
@@ -194,6 +215,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
   return Object.assign(fake, {
     apiRoot: base,
+    certificatesUrl: `${base}${CERTIFICATES_PATH}`,
     tokenUri,
     close: () =>
       new Promise<void>((resolve) => {
