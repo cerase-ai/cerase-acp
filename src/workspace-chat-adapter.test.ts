@@ -99,6 +99,19 @@ describe("workspace-chat adapter: what start() requires", () => {
     expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
+  it("refuses a key whose token_uri would send the signed assertion in plaintext, naming the path and the field", async () => {
+    writeKeyFile(keyPath, makeServiceAccount(), "http://oauth2.googleapis.com/token");
+    adapter = await createChatAdapter(
+      wcAgent({ project_number: "123456789012", credentials_path: keyPath, allowed_domains: ["example.com"] }),
+      DISPATCHER,
+    );
+    const err = await adapter.start().catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      `the Workspace Chat service-account key at ${keyPath} is refused: token_uri must be an https URL, or an http URL to a host name without a dot or to a loopback address`,
+    );
+    expect(workspaceChatListenerPort()).toBeUndefined();
+  });
+
   it("opens the webhook with a complete app and a readable key, and closes it with the last adapter", async () => {
     adapter = await createChatAdapter(
       wcAgent({ project_number: "123456789012", credentials_path: keyPath, allowed_domains: ["example.com"] }),

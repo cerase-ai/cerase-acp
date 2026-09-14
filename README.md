@@ -164,7 +164,11 @@ network) or to a loopback address, so a dropped letter in Google's own address
 cannot move the certificate fetch to plaintext. A `certificates_url` outside
 that rule keeps the organisation's app from being served, either key outside it
 keeps every `workspace_chat` agent from starting, and the log names the key and
-the value. The token endpoint is the `token_uri` the service-account key names.
+the value. The token endpoint is the `token_uri` the service-account key names,
+held to the same rule: a key whose `token_uri` is outside it keeps every
+`workspace_chat` agent from starting, a key replaced with one is refused before
+anything is signed or sent, and the log names the key's path and the field
+without repeating anything the file holds.
 
 A missing or malformed block does not fail the load: each `workspace_chat`
 agent refuses to start and names what is wrong, and every other channel keeps

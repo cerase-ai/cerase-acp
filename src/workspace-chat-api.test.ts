@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CHAT_BOT_SCOPE,
   type FakeGoogle,
@@ -39,6 +39,7 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await google.close();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -160,6 +161,23 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
     expect(google.assertions.map((a) => a.iss)).toEqual([account.clientEmail, rotated.clientEmail]);
   });
 
+  // start() reads the key too, but a key replaced after start is first read
+  // here. The token endpoint receives the signed assertion, and over plaintext
+  // anybody on the path could exchange it for the app's access.
+  it("a key replaced in the console with a plaintext token_uri is refused at renewal, before anything is sent", async () => {
+    const client = api();
+    await client.createMessage("spaces/AAAA", "prima");
+    writeKeyFile(keyPath, account, "http://oauth2.googleapis.com/token");
+    clock += 3600_000;
+    const fetched = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("nothing may be fetched"));
+    const err = await client.createMessage("spaces/AAAA", "dopo").catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      `the Workspace Chat service-account key at ${keyPath} is refused: token_uri must be an https URL, or an http URL to a host name without a dot or to a loopback address`,
+    );
+    expect(fetched).toHaveBeenCalledTimes(0);
+    expect(google.tokenRequests()).toBe(1);
+  });
+
   it("finds the direct-message space of a user by email", async () => {
     expect(await api().findDirectMessage("mario.rossi@example.com")).toBe("spaces/dm-mario-rossi-example-com");
     expect(google.dmLookups).toEqual(["users/mario.rossi@example.com"]);
@@ -209,6 +227,33 @@ describe("workspace-chat API: reading the service-account key", () => {
     writeFileSync(path, JSON.stringify({ client_email: account.clientEmail, private_key: account.privateKeyPem }));
     expect(readServiceAccountKey(path).token_uri).toBe("https://oauth2.googleapis.com/token");
   });
+
+  // The token endpoint is held to the rule the configured Google addresses are.
+  // The refusal names the file and the field and repeats nothing from the file,
+  // which holds the app's private key.
+  it.each(["http://oauth2.googleapis.com/token", "http://10.0.0.5:8080/token", "oauth2.googleapis.com/token"])(
+    "a key whose token_uri is %j is refused, naming the path and the field and nothing the key holds",
+    (tokenUri) => {
+      const path = join(dir, "refused-token-uri.json");
+      writeKeyFile(path, makeServiceAccount(), tokenUri);
+      expect(() => readServiceAccountKey(path)).toThrow(
+        new Error(
+          `the Workspace Chat service-account key at ${path} is refused: token_uri must be an https URL, or an http URL to a host name without a dot or to a loopback address`,
+        ),
+      );
+    },
+  );
+
+  // http://fake-google:8080/token is the value cerase-core's Traefik test writes
+  // into its key, toward its stand-in container on the test network.
+  it.each(["https://oauth2.googleapis.com/token", "http://fake-google:8080/token"])(
+    "a key whose token_uri is %j is read with that token endpoint",
+    (tokenUri) => {
+      const path = join(dir, "accepted-token-uri.json");
+      writeKeyFile(path, makeServiceAccount(), tokenUri);
+      expect(readServiceAccountKey(path).token_uri).toBe(tokenUri);
+    },
+  );
 });
 
 // The addresses of Google's endpoints can be written in the configuration so a

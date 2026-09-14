@@ -19,22 +19,29 @@ export const GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token";
 export const GOOGLE_CHAT_API_ROOT = "https://chat.googleapis.com";
 
 const LOOPBACK = /^(?:127(?:\.\d{1,3}){3}|\[::1\])$/;
+const ENDPOINT_RULE = "must be an https URL, or an http URL to a host name without a dot or to a loopback address";
 
 /**
- * Why `value`, written under `key` in the configuration, cannot be the address
- * of a Google endpoint, or undefined when it can.
+ * Whether `value` may be the address of a Google endpoint: the signing
+ * certificates and the Chat API named in the configuration, and the token
+ * endpoint named in the service-account key.
  *
- * The addresses are configurable so a test can serve the endpoints itself.
+ * The addresses can be changed so a test can serve the endpoints itself.
  * Plaintext is accepted only toward a host name without a dot or a loopback
  * address, which is where such a stand-in runs. Toward any other host a
- * dropped letter in Google's own address would route the request, and for the
- * signing certificates the whole signature check, through anybody on the path.
+ * dropped letter in Google's own address would route the request through
+ * anybody on the path: for the signing certificates the whole signature check,
+ * for the token endpoint the signed assertion that buys the app's access.
  */
-export function googleEndpointProblem(key: string, value: string): string | undefined {
+function acceptedGoogleEndpoint(value: string): boolean {
   const url = URL.canParse(value) ? new URL(value) : undefined;
-  if (url?.protocol === "https:") return undefined;
-  if (url?.protocol === "http:" && (LOOPBACK.test(url.hostname) || !/[.[]/.test(url.hostname))) return undefined;
-  return `${key} must be an https URL, or an http URL to a host name without a dot or to a loopback address, and ${JSON.stringify(value)} is neither`;
+  if (url?.protocol === "https:") return true;
+  return url?.protocol === "http:" && (LOOPBACK.test(url.hostname) || !/[.[]/.test(url.hostname));
+}
+
+/** Why `value`, written under `key` in the configuration, cannot be the address of a Google endpoint, or undefined when it can. */
+export function googleEndpointProblem(key: string, value: string): string | undefined {
+  return acceptedGoogleEndpoint(value) ? undefined : `${key} ${ENDPOINT_RULE}, and ${JSON.stringify(value)} is neither`;
 }
 
 // Google issues an access token for an hour. It is renewed a minute before
@@ -66,7 +73,8 @@ export class ChatApiError extends Error {
  * Reads and checks the service-account key the control-plane projects onto
  * disk. Every failure names the path and the reason, because the likeliest
  * one on an appliance is a permission the process does not have, and an error
- * that only says the channel is down sends the reader to Google instead.
+ * that only says the channel is down sends the reader to Google instead. No
+ * failure repeats a value from the file, which holds the app's private key.
  */
 export function readServiceAccountKey(path: string): ServiceAccountKey {
   let raw: string;
@@ -90,11 +98,16 @@ export function readServiceAccountKey(path: string): ServiceAccountKey {
   if (missing.length > 0) {
     throw new Error(`the Workspace Chat service-account key at ${path} has no ${missing.join(", ")}`);
   }
+  const tokenUri =
+    typeof parsed.token_uri === "string" && parsed.token_uri !== "" ? parsed.token_uri : GOOGLE_TOKEN_URI;
+  if (!acceptedGoogleEndpoint(tokenUri)) {
+    throw new Error(`the Workspace Chat service-account key at ${path} is refused: token_uri ${ENDPOINT_RULE}`);
+  }
   return {
     client_email: parsed.client_email as string,
     private_key: parsed.private_key as string,
     private_key_id: typeof parsed.private_key_id === "string" ? parsed.private_key_id : undefined,
-    token_uri: typeof parsed.token_uri === "string" && parsed.token_uri !== "" ? parsed.token_uri : GOOGLE_TOKEN_URI,
+    token_uri: tokenUri,
   };
 }
 
