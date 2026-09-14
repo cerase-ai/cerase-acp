@@ -1,0 +1,94 @@
+name: ghcr-retention
+
+# Cap GHCR storage for the images this repo publishes. Every push to main
+# publishes each of them, so the sha- tagged history grows without bound, and a
+# manifest that loses its tag stays behind as an untagged version.
+#
+# The pruning itself is `scripts/ghcr-retention.sh`, which cerase-core owns and
+# every repo with a retention workflow carries a byte-identical copy of. The copy
+# here is written by `scripts/sync-tooling.sh` in cerase-core and pinned by
+# `scripts/TOOLING.sha256`; the step below verifies the pin before running the
+# script, so an edited copy stops the run instead of pruning with it. Do not edit
+# the copy — the edit is what the pin exists to catch.
+#
+# A tag a Fleet Console release pins is kept whatever its age. The script reads
+# those tags from the console before it lists a version, and deletes nothing and
+# fails its run when it cannot read them. Weekly, so a console that does not
+# answer is one red a week rather than one a day.
+#
+# The package list is derived from docker-publish.yml by
+# `scripts/_registry_images.sh`, the function every repo carries to answer which
+# images a commit should have become, so an image this repo starts publishing is
+# pruned without editing this file.
+#
+# The floor is lower than in cerase-core because each image here gains one
+# version per push to one repo, not one per push to a repo that builds nine.
+
+on:
+  schedule:
+    # Weekly, Monday, offset from the other repos' retention runs so they do
+    # not contend on the same registry at the same minute.
+    - cron: '5 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.derive.outputs.packages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The grep is half the check: sha256sum passes a pin that no longer lists
+      # the file, and a pin that pins nothing is the failure this cannot afford.
+      - name: Verify the vendored tooling against its pin
+        run: |
+          set -euo pipefail
+          grep -q 'scripts/_registry_images.sh' scripts/TOOLING.sha256
+          sha256sum --check scripts/TOOLING.sha256
+
+      # An empty list would give the matrix nothing to do and report success for
+      # it, so it is an error instead.
+      - name: Derive the package list from docker-publish.yml
+        id: derive
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . scripts/_registry_images.sh
+          mapfile -t images < <(_registry_images_for "$PWD")
+          if [ "${#images[@]}" -eq 0 ]; then
+            echo "::error::docker-publish.yml named no image, so there is nothing to prune and that cannot be right"
+            exit 1
+          fi
+          echo "retention covers ${#images[@]} images: ${images[*]}"
+          printf 'packages=%s\n' \
+            "$(printf '%s\n' "${images[@]}" | jq -R . | jq -sc .)" >>"$GITHUB_OUTPUT"
+
+  prune:
+    needs: images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.images.outputs.packages) }}
+    env:
+      PACKAGE: ${{ matrix.package }}
+      KEEP: 10
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify the vendored tooling against its pin
+        run: |
+          set -euo pipefail
+          grep -q 'scripts/ghcr-retention.sh' scripts/TOOLING.sha256
+          sha256sum --check scripts/TOOLING.sha256
+
+      - name: Prune GHCR versions of ${{ matrix.package }} to its retention floor
+        run: bash scripts/ghcr-retention.sh
