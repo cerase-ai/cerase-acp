@@ -41,6 +41,18 @@ jobs:
       # end names which one refused: as a separate job they were independent of
       # the node work, and a merge that let a red vitest hide a secret finding
       # would be worse than the two jobs it replaces.
+      #
+      # The guard scripts below are cerase-core's, copied here by its
+      # scripts/sync-tooling.sh. The pin is what makes the copy a copy: without
+      # this step a copy edited here decides the push, and the divergence shows
+      # only in cerase-core's local suite. It runs before them, and the verdict
+      # names it when it refuses. A push reaches it through the gate in
+      # docker-publish.yml, whose path filter ignores no pinned file.
+      - name: Vendored tooling matches the sha it recorded
+        id: tooling_pin
+        continue-on-error: true
+        run: sha256sum --check scripts/TOOLING.sha256
+
       - name: Docs parity
         id: docs_parity
         continue-on-error: true
@@ -102,6 +114,7 @@ jobs:
       - name: Which check refused
         if: always()
         env:
+          TOOLING: ${{ steps.tooling_pin.outcome }}
           DOCS: ${{ steps.docs_parity.outcome }}
           COMMENTS: ${{ steps.comment_check.outcome }}
           SECRETS: ${{ steps.secrets_guard.outcome }}
@@ -110,6 +123,7 @@ jobs:
         run: |
           set -uo pipefail
           red=""
+          [ "$TOOLING" = failure ] && red="$red tooling-pin"
           [ "$DOCS" = failure ] && red="$red docs-parity"
           [ "$COMMENTS" = failure ] && red="$red comment-check"
           [ "$SECRETS" = failure ] && red="$red secrets-guard"
