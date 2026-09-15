@@ -33,9 +33,13 @@
 # which is the correct outcome: nobody can say what a group contains from one
 # field, and a person opening it can.
 #
-# The green suite is the gate. `--auto` queues the merge behind the required
-# checks rather than merging now, so a bump that breaks the build stays open with
-# a red on it — which is the outcome an operator should see.
+# Every run on the pull request's commit is the gate. The merge waits until each
+# other workflow run on that commit has finished and merges only when all of
+# them succeeded, so an update that breaks the build, or an image that does not
+# start, stays open with a red on it, which is the outcome an operator should
+# see. Waiting on `--auto` is not enough: with no required checks the gh CLI
+# merges a mergeable pull request at once, and branch protection, the only way
+# to require a check, is not available to a private repository on a free plan.
 name: Dependabot auto-merge
 
 # The mapping form, not the scalar `on: pull_request_target`.
@@ -48,14 +52,26 @@ name: Dependabot auto-merge
 on:
   pull_request_target:
 
+# Reading the runs on the commit needs `actions: read`; a permissions block
+# grants nothing it does not name.
 permissions:
+  actions: read
   contents: write
   pull-requests: write
+
+# A newer commit on the pull request replaces the wait on the older one, and
+# `--match-head-commit` below refuses a merge the older wait would still attempt.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   merge:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    # The bound on the wait: a run that never finishes leaves the pull request
+    # open with this job red, rather than a runner waiting for ever.
+    timeout-minutes: 120
     steps:
       - name: What kind of bump is this
         id: meta
@@ -63,36 +79,80 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # NOTE: `--auto` needs `allow_auto_merge` ON, which is a repo SETTING and
-      # not a file -- and on a FREE organisation it can only be turned on for a
-      # PUBLIC repository. Measured across this org: true on exactly the two
-      # public repos and refused on the six private ones, with the API answering
-      # 200 and returning `false`. A setting that succeeds and does not apply is
-      # a shape this workspace has been caught by before.
+      # The merge waits for every other workflow run on the pull request's head
+      # commit to finish, and merges only when each one succeeded.
       #
-      # So the step SAYS SO instead of failing. A red job on every Dependabot PR
-      # in six repos is noise nobody can act on: the plan is the constraint, not
-      # the configuration.
-      - name: Queue it behind the checks
+      # Runs rather than check runs, because a run exists from the moment its
+      # event fires, while the jobs of a matrix appear only once the job that
+      # computes the matrix has finished. Runs of this workflow are neither
+      # waited on nor counted: this job is one of them. A commit no other
+      # workflow ran on is not merged, because nothing has checked it.
+      # `--match-head-commit` refuses the merge when the pull request moved past
+      # the commit that was checked, and `--auto` still queues it behind any
+      # required check a repository has.
+      - name: Wait for this commit's other runs, then merge
         if: >-
           steps.meta.outputs.update-type == 'version-update:semver-patch' ||
           steps.meta.outputs.update-type == 'version-update:semver-minor'
         run: |
           set -uo pipefail
-          if gh pr merge --auto --squash "$PR_URL"; then
-            echo "Queued behind the required checks." >> "$GITHUB_STEP_SUMMARY"
+          poll="${CERASE_AUTO_MERGE_POLL_SECONDS:-30}"
+          empty=0
+          while :; do
+            if ! runs="$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100" \
+                --jq '.workflow_runs[] | select(.name != env.WORKFLOW) | [.name, .status, (.conclusion // "")] | @tsv')"; then
+              echo "the runs on ${HEAD_SHA} could not be read; reading again"
+              sleep "$poll"
+              continue
+            fi
+            if [ -z "$runs" ]; then
+              empty=$((empty + 1))
+              if [ "$empty" -ge 3 ]; then
+                {
+                  echo "## Not merged"
+                  echo
+                  echo "No other workflow ran on ${HEAD_SHA}, so nothing has checked this update."
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              sleep "$poll"
+              continue
+            fi
+            empty=0
+            if awk -F'\t' '$2 != "completed" { waiting = 1 } END { exit !waiting }' <<< "$runs"; then
+              sleep "$poll"
+              continue
+            fi
+            failed="$(awk -F'\t' '$3 != "success" && $3 != "skipped" && $3 != "neutral" { printf "%s%s (%s)", sep, $1, $3; sep = ", " }' <<< "$runs")"
+            if [ -n "$failed" ]; then
+              gh pr comment "$PR_URL" --body \
+                "Left open deliberately: on ${HEAD_SHA}, ${failed} did not succeed, and an update merges only after every run on its commit has. See \`.github/workflows/dependabot-auto-merge.yml\`."
+              {
+                echo "## Not merged"
+                echo
+                echo "Did not succeed on ${HEAD_SHA}: ${failed}"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            break
+          done
+          if gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"; then
+            echo "Merged after every other run on ${HEAD_SHA} succeeded." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           {
-            echo "## Not queued, and this is not a failure"
+            echo "## Not merged, and this is not a failure"
             echo
-            echo "Auto-merge was refused. On a free organisation it can only be"
-            echo "enabled for a public repository, and this one is private — so"
-            echo "nothing here can own the queue and the PR stays open for a"
-            echo "person to look at."
+            echo "Every run on the commit succeeded and the merge was refused: the"
+            echo "pull request moved past that commit, or it cannot be merged as it"
+            echo "stands. Auto-merge itself can only be enabled for a public"
+            echo "repository on a free organisation. The PR stays open for a person."
           } >> "$GITHUB_STEP_SUMMARY"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Everything the allow-list did not take. A major says so; a group says
