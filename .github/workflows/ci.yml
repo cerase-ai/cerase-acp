@@ -51,7 +51,7 @@ jobs:
       - name: Vendored tooling matches the sha it recorded
         id: tooling_pin
         continue-on-error: true
-        run: sha256sum --check scripts/TOOLING.sha256
+        run: sha256sum --check scripts/TOOLING.sha256 scripts/TOOLING.seal
 
       - name: Docs parity
         id: docs_parity
