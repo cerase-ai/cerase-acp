@@ -117,6 +117,89 @@ describe("the runtime stage and the scan that holds it", () => {
   });
 });
 
+// The user a container starts as is the last USER of the stage the image is
+// built from, which is the last stage when the build names no target. A stage
+// that sets none has the user of the stage it is built FROM, and one built from
+// an outside image has that image's, which no Dockerfile here states, so it is
+// not taken as non-root. Comment lines are dropped wherever they sit, a
+// continuation joins its lines, and instructions match in any case, as the
+// builder reads them. Returns the defect, or undefined for a final stage that
+// runs as a named user other than root.
+function finalStageUserDefect(text: string): string | undefined {
+  const instructions: string[] = [];
+  let pending = "";
+  for (const line of text.split("\n")) {
+    if (/^\s*#/.test(line)) continue;
+    if (line.endsWith("\\")) {
+      pending += `${line.slice(0, -1)} `;
+      continue;
+    }
+    instructions.push(pending + line);
+    pending = "";
+  }
+  if (pending) instructions.push(pending);
+
+  const stages: { base: string; name: string; user?: string }[] = [];
+  for (const instruction of instructions) {
+    const from = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$/i.exec(instruction);
+    if (from) {
+      stages.push({ base: from[1]!.toLowerCase(), name: (from[2] ?? "").toLowerCase() });
+      continue;
+    }
+    const user = /^\s*USER\s+(\S+)/i.exec(instruction);
+    if (user && stages.length > 0) stages.at(-1)!.user = user[1];
+  }
+  if (stages.length === 0) return "the Dockerfile has no FROM";
+
+  let stage = stages.length - 1;
+  while (stages[stage]!.user === undefined) {
+    const base = stages[stage]!.base;
+    const earlier = stages.slice(0, stage).findLastIndex((s) => s.name === base);
+    if (earlier < 0) return `the final stage runs as the user of ${base}, which no USER here names`;
+    stage = earlier;
+  }
+  const user = stages[stage]!.user!;
+  const name = user.split(":")[0]!.toLowerCase();
+  return name === "root" || name === "0" ? `the final stage runs as ${user}` : undefined;
+}
+
+describe("the image runs as a non-root user", () => {
+  // The bridge mounts the docker socket; running it as root would hand that
+  // access to every dependency in node_modules as well.
+  it("the Dockerfile's final stage runs as a named user other than root, and the published build targets that stage", () => {
+    expect(finalStageUserDefect(dockerfile)).toBeUndefined();
+    const publish = parse(readFileSync(join(repoRoot, ".github/workflows/docker-publish.yml"), "utf8"));
+    const builds = Object.values(publish.jobs as Record<string, { steps?: { uses?: string; with?: object }[] }>)
+      .flatMap((job) => job.steps ?? [])
+      .filter((s) => String(s.uses ?? "").startsWith("docker/build-push-action"));
+    expect(builds.length).toBeGreaterThan(0);
+    for (const build of builds) expect(build.with ?? {}).not.toHaveProperty("target");
+  });
+
+  it("names a final stage left on its base's user, a USER set only in a stage the image is not built from, and a later USER root", () => {
+    expect(finalStageUserDefect("FROM node:22 AS build\nUSER node\nFROM node:22-slim AS runtime\nRUN true\n")).toBe(
+      "the final stage runs as the user of node:22-slim, which no USER here names",
+    );
+    expect(finalStageUserDefect("FROM node:22-slim\nUSER node\nRUN true \\\n  && true\nuser root\n")).toBe(
+      "the final stage runs as root",
+    );
+    expect(finalStageUserDefect("FROM node:22-slim\nUSER 0:0\n")).toBe("the final stage runs as 0:0");
+    expect(finalStageUserDefect("FROM node:22-slim\n# USER node\nRUN true\n")).toBe(
+      "the final stage runs as the user of node:22-slim, which no USER here names",
+    );
+    expect(finalStageUserDefect("FROM node:22 AS base\nUSER node\nFROM base AS runtime\nRUN true\n")).toBeUndefined();
+    expect(
+      finalStageUserDefect(
+        "FROM node:22 AS base\nUSER root\nFROM base AS tools\nUSER node\nFROM base AS runtime\nRUN true\n",
+      ),
+    ).toBe("the final stage runs as root");
+    expect(
+      finalStageUserDefect("FROM node:22-slim\nUSER node\nRUN true \\\n# a comment inside a continuation\nUSER root\n"),
+    ).toBeUndefined();
+    expect(finalStageUserDefect("# no stage at all\n")).toBe("the Dockerfile has no FROM");
+  });
+});
+
 describe("CI", () => {
   it("installs tini and runs it as PID 1", () => {
     expect(dockerfile).toMatch(/apt-get .*install.* tini/s);
