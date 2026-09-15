@@ -84,7 +84,7 @@ jobs:
             org.opencontainers.image.title=cerase-acp
             org.opencontainers.image.description=Multi-channel DM bridge for Cerase (Discord / Slack / Workspace Chat / Telegram)
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=MIT
 
       # Build the image into the local daemon first, so the image Trivy scans
       # is the one this job pushes. The gate's own scan runs on pull requests
