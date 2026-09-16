@@ -26,7 +26,7 @@
 # a different image tomorrow. cerase-agent pinned by digest under M-SUPPLY-PIN-1;
 # this image was left on the moving tag. Refresh both digests together when the
 # node line moves.
-FROM node:22.22.3@sha256:2d178f2785b96dfbf62a416ca2e40f50e30150b4ff3320d706f0d96e90600eb3 AS build
+FROM node:26.8@sha256:e961046fec20896e8904f2b4a8b4c7e5ca91826d84d8d33d83dbaa61f942069e AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -40,7 +40,7 @@ RUN npm prune --omit=dev
 # OPT-22: bumped from node:20-slim (see build-stage comment).
 # M-ACP-NPM-STRIP-1: digest-pinned, same digest cerase-agent runs — one node
 # across the fleet, and a base that cannot change under either image.
-FROM node:22.22.3-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752 AS runtime
+FROM node:26.8-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS runtime
 # The digest-pinned base lags the debian security feed, so this stage applies
 # the published security upgrades before installing anything. The blocking
 # Trivy scan in the publish workflow holds the image to that, and it can only
