@@ -111,6 +111,23 @@ const AgentSchema = z
 const SessionSchema = z.object({
   idle_timeout_minutes: z.number().int().positive(),
   max_concurrent: z.number().int().positive(),
+  // How long the ACP stream may say NOTHING before the child counts as hung.
+  // This is what the watchdog measures, and it is not the same question as how
+  // long a turn may take: a child emitting thought chunks is alive whatever the
+  // clock says, and a child that has emitted nothing for three minutes is not
+  // going to start.
+  //
+  // Optional because a file written before this existed must keep loading, and
+  // the default belongs in one place (SessionManager) rather than in every
+  // rendered config.
+  turn_silence_seconds: z.number().int().positive().optional(),
+  // The ceiling a turn cannot cross even while it keeps streaming. It exists
+  // for the turn that never stops rather than for the one that is slow, so it
+  // is minutes and not seconds, and reaching it produces a reply that says so.
+  //
+  // A mail assistant and one carrying a project do not want the same value,
+  // which is why this is configuration and not a constant.
+  turn_ceiling_minutes: z.number().int().positive().optional(),
 });
 
 // The organisation's one Google Chat app. Every field is optional here and

@@ -94,15 +94,64 @@ export interface SessionManagerOptions {
    */
   endpointResolver?: (containerName: string) => RestEndpoint | null;
   /**
-   * Per-turn watchdog: a hung opencode child used to block
-   * that user's PromptQueue forever (until the idle kill). When
-   * `connection.prompt()` hasn't resolved within this budget the child
-   * is killed, the turn rejects (the dispatcher sends the localized
-   * error) and the next prompt respawns. Defaults to 10 minutes —
-   * generous for long tool-using turns; override in tests.
+   * Per-turn watchdog: a hung opencode child used to block that user's
+   * PromptQueue forever (until the idle kill). The child is killed, the turn
+   * rejects (the dispatcher sends the localized copy) and the next prompt
+   * respawns.
+   *
+   * ⚠️ **What it measures is SILENCE, not elapsed time.** It used to race the
+   * prompt against a ten-minute wall clock, and a wall clock cannot tell a dead
+   * child from one that is working: for 600 seconds the two look identical, and
+   * killing is the remedy for only the first. Measured on the bench with the
+   * turn limit raised so sessions were not cut short first: on the 41 hardest
+   * tasks the slower flash model ran a median of 177 s, a p90 of 474 s and a
+   * longest of 2 791 s — 11 sessions of 205 past the old watchdog, each one
+   * credits consumed turn by turn and no answer delivered.
+   *
+   * A child emitting thought chunks is alive whatever the clock says, so every
+   * chunk re-arms this; a child silent for this long is not going to start.
    */
-  turnTimeoutMs?: number;
+  turnSilenceMs?: number;
+  /**
+   * The ceiling a turn cannot cross even while it keeps streaming, for the
+   * turn that never stops rather than for the one that is slow. Reaching it
+   * rejects with `reason: "ceiling"`, which the dispatcher renders as a reply
+   * saying the work ran past its limit — never as silence.
+   */
+  turnCeilingMs?: number;
 }
+
+/**
+ * Why a turn was cut. `silent` is the hung child the watchdog has always been
+ * for; `ceiling` is a turn that was alive the whole time and ran too long, and
+ * the two want different copy in front of the user.
+ */
+export type TurnWatchdogReason = "silent" | "ceiling";
+
+/** A turn the watchdog ended, carrying which of the two limits it hit. */
+export class TurnWatchdogError extends Error {
+  constructor(
+    readonly reason: TurnWatchdogReason,
+    readonly ms: number,
+  ) {
+    super(
+      reason === "ceiling"
+        ? `turn watchdog: the turn was still running after ${ms}ms, the configured ceiling — ended and respawning on next prompt`
+        : `turn watchdog: opencode child produced nothing for ${ms}ms — killed and respawning on next prompt`,
+    );
+    this.name = "TurnWatchdogError";
+  }
+}
+
+// How often the watchdog looks, at most. It compares two timestamps, so the
+// cost is a closure every few seconds for the length of a turn.
+//
+// The tick is capped by the SMALLER of the two limits it is checking, because
+// a resolution coarser than the limit is a limit that does not hold: a
+// half-second silence budget checked every five seconds is a five-second one.
+const WATCHDOG_TICK_MAX_MS = 5_000;
+const watchdogTick = (silenceMs: number, ceilingMs: number) =>
+  Math.max(10, Math.min(WATCHDOG_TICK_MAX_MS, silenceMs, ceilingMs));
 
 /**
  * Optional injection point so tests can swap real `child_process.spawn`
@@ -179,10 +228,15 @@ export class SessionManager {
     this.onTelemetry = options?.onTelemetry;
     this.canonicalFetcher = options?.canonicalFetcher ?? defaultFetcher;
     this.endpointResolver = options?.endpointResolver ?? defaultEndpointForAgent;
-    this.turnTimeoutMs = options?.turnTimeoutMs ?? 10 * 60 * 1000;
+    // The file's value, then the default, and options override both because
+    // only tests pass them. A mail assistant and one carrying a project do not
+    // want the same ceiling, which is why the file gets to say.
+    this.turnSilenceMs = options?.turnSilenceMs ?? (config.session.turn_silence_seconds ?? 180) * 1000;
+    this.turnCeilingMs = options?.turnCeilingMs ?? (config.session.turn_ceiling_minutes ?? 45) * 60 * 1000;
   }
 
-  private turnTimeoutMs: number;
+  private turnSilenceMs: number;
+  private turnCeilingMs: number;
 
   activeSessionCount(): number {
     return this.entries.size;
@@ -431,32 +485,51 @@ export class SessionManager {
       let reconciledTextBytes = 0;
       let reconciledReasoningBytes = 0;
       try {
-        // Race the prompt RPC against the watchdog. On
-        // timeout, SIGTERM the child — its exit handler drops the
-        // session from the map, so the next prompt respawns cleanly.
+        // Race the prompt RPC against the watchdog. On a fire, SIGTERM the
+        // child — its exit handler drops the session from the map, so the next
+        // prompt respawns cleanly.
+        //
+        // An interval rather than one timeout, because what decides is
+        // `lastUpdateAt`, which the update handler above moves on every chunk.
+        // A turn that keeps streaming keeps re-arming the silence limit and is
+        // only ever ended by the ceiling.
         let watchdogId: NodeJS.Timeout | undefined;
         const watchdog = new Promise<never>((_, reject) => {
-          watchdogId = setTimeout(() => {
-            logger.error(
-              { agentId: agent.id, userId, timeoutMs: this.turnTimeoutMs },
-              "turn watchdog fired — killing the hung opencode child",
-            );
-            try {
-              entry!.child.kill("SIGTERM");
-            } catch {
-              /* already dead */
-            }
-            // Drop the session NOW (the child's exit handler would do it
-            // asynchronously): a prompt arriving right after the kill must
-            // respawn, not adopt the dying connection.
-            const k = sessionKey(agent.id, userId);
-            if (this.entries.get(k) === entry) this.entries.delete(k);
-            reject(
-              new Error(
-                `turn watchdog: opencode child unresponsive for ${this.turnTimeoutMs}ms — killed and respawning on next prompt`,
-              ),
-            );
-          }, this.turnTimeoutMs);
+          const startedAt = Date.now();
+          watchdogId = setInterval(
+            () => {
+              const ranFor = Date.now() - startedAt;
+              const silentFor = Date.now() - lastUpdateAt;
+              // The ceiling is checked FIRST: a turn that hits both is a turn
+              // that ran too long, and saying "the child produced nothing" about
+              // one that produced output for forty minutes is the wrong sentence
+              // in the log and the wrong copy in front of the user.
+              const reason: TurnWatchdogReason | null =
+                ranFor >= this.turnCeilingMs ? "ceiling" : silentFor >= this.turnSilenceMs ? "silent" : null;
+              if (reason === null) return;
+              logger.error(
+                { agentId: agent.id, userId, reason, ranFor, silentFor, chunksReceived },
+                reason === "ceiling"
+                  ? "turn watchdog fired — the turn passed its ceiling while still running"
+                  : "turn watchdog fired — killing the silent opencode child",
+              );
+              try {
+                entry!.child.kill("SIGTERM");
+              } catch {
+                /* already dead */
+              }
+              // Drop the session NOW (the child's exit handler would do it
+              // asynchronously): a prompt arriving right after the kill must
+              // respawn, not adopt the dying connection.
+              const k = sessionKey(agent.id, userId);
+              if (this.entries.get(k) === entry) this.entries.delete(k);
+              reject(new TurnWatchdogError(reason, reason === "ceiling" ? this.turnCeilingMs : this.turnSilenceMs));
+            },
+            watchdogTick(this.turnSilenceMs, this.turnCeilingMs),
+          );
+          // The interval must not be what keeps the process alive: a bridge
+          // whose last turn is in flight should still be able to exit.
+          watchdogId.unref?.();
         });
         let response: Awaited<ReturnType<NonNullable<typeof entry>["connection"]["prompt"]>>;
         try {
@@ -468,7 +541,10 @@ export class SessionManager {
             watchdog,
           ]);
         } finally {
-          clearTimeout(watchdogId);
+          // clearInterval, not clearTimeout: the watchdog above repeats, and a
+          // timeout cleared with the wrong call would go on ticking for the
+          // life of the process.
+          clearInterval(watchdogId);
         }
         t1 = Date.now();
         // Debug-log the stopReason for forensic visibility into

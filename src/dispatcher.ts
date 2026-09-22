@@ -16,7 +16,7 @@ import type { BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
 import { deliveryFailureNotice } from "./platform-notices.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
-import type { SessionManager } from "./session-manager.js";
+import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import { detectLanguage, type TurnMetaTracker } from "./turn-meta.js";
 
@@ -124,6 +124,38 @@ const TURN_NO_CREDITS: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
 /** Localized "no credits left" copy (see TURN_NO_CREDITS). */
 export function pickNoCreditsMessage(text: string): string {
   return TURN_NO_CREDITS[detectLanguage(text)];
+}
+
+// Dedicated copy for a turn the watchdog ended at its CEILING: the child was
+// alive and streaming the whole time and simply ran past the configured limit.
+// The generic "something went wrong" invites an immediate retry of the same
+// request, which is the one thing that reproduces it — so this names what
+// happened and asks for a smaller piece of work.
+const TURN_TOO_LONG: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "Ci stavo lavorando ma ho superato il tempo massimo per una singola richiesta. Prova a spezzarla in due, oppure chiedimi la parte che ti serve per prima.",
+  en: "I was working on it but went past the maximum time for a single request. Try splitting it in two, or ask me for the part you need first.",
+  es: "Estaba trabajando en ello pero he superado el tiempo máximo para una sola petición. Prueba a dividirla en dos, o pídeme antes la parte que necesitas.",
+  fr: "J'y travaillais mais j'ai dépassé le temps maximum pour une seule demande. Essaie de la couper en deux, ou demande-moi d'abord la partie qu'il te faut.",
+  unknown:
+    "I was working on it but went past the maximum time for a single request. Try splitting it in two, or ask me for the part you need first.",
+};
+
+/** Localized "this turn ran past its ceiling" copy (see TURN_TOO_LONG). */
+export function pickTooLongMessage(text: string): string {
+  return TURN_TOO_LONG[detectLanguage(text)];
+}
+
+/**
+ * Recognise the turn the watchdog ended for passing its ceiling, as opposed to
+ * the one it killed for going silent. The class is the real test; the message
+ * is checked too because a queue or an adapter between here and the manager may
+ * hand the error on wrapped, and the whole point of this branch is that the
+ * user is told what happened rather than given the generic failure.
+ */
+export function isTurnCeilingError(err: unknown): boolean {
+  if (err instanceof TurnWatchdogError) return err.reason === "ceiling";
+  const text = err instanceof Error ? err.message : String(err);
+  return /turn watchdog: the turn was still running/i.test(text);
 }
 
 /**
@@ -261,7 +293,11 @@ export class Dispatcher {
     // delivery outcome, never rethrown.
     let deliveryOk = drainResult.ok;
     if (failed) {
-      const copy = creditExhausted ? pickNoCreditsMessage(text) : pickErrorMessage(text);
+      const copy = creditExhausted
+        ? pickNoCreditsMessage(text)
+        : isTurnCeilingError(turnError)
+          ? pickTooLongMessage(text)
+          : pickErrorMessage(text);
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
       if (!r.ok) deliveryOk = false;
     } else if (!produced) {

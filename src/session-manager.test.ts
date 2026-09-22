@@ -627,7 +627,7 @@ describe("per-turn watchdog (M-ACP-2)", () => {
       ],
       session: { idle_timeout_minutes: 60, max_concurrent: 16 },
     } as unknown as BridgeConfig;
-    const mgr = new SessionManager(cfg, undefined, { turnTimeoutMs: 500 });
+    const mgr = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
     try {
       await expect(mgr.prompt("hung", "1", "ciao")).rejects.toThrow(/watchdog/i);
       // The hung child was killed and the session dropped — a fresh
@@ -636,6 +636,39 @@ describe("per-turn watchdog (M-ACP-2)", () => {
       await expect(mgr.prompt("hung", "1", "ancora")).rejects.toThrow(/watchdog/i);
     } finally {
       await mgr.shutdown();
+    }
+  }, 20_000);
+
+  // The two halves of the same rule, and they pull in opposite directions: a
+  // turn that is working must survive a budget the wall clock would have cut,
+  // and a turn that never ends must still be ended.
+  it("does not kill a turn that is still streaming past the silence budget", async () => {
+    // Twelve chunks 80ms apart is roughly a second of work against a silence
+    // budget of 300ms. Under the wall clock this turn was dead three times
+    // over; under liveness every chunk re-arms the budget.
+    const cfg = makeConfig({ chunks: 12, delayMsPerChunk: 80, reply: "abcdefghijkl" }) as unknown as BridgeConfig;
+    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
+    try {
+      // It RESOLVED — the assertion is that no watchdog rejected it, and the
+      // stop reason is the child's own rather than a kill.
+      expect(await m.prompt("doc-qa", "111", "ciao")).toMatchObject({ stopReason: "end_turn" });
+    } finally {
+      await m.shutdown();
+    }
+  }, 20_000);
+
+  it("ends a turn that passes its ceiling, and says which limit it hit", async () => {
+    const cfg = makeConfig({ chunks: 40, delayMsPerChunk: 80, reply: "x".repeat(40) }) as unknown as BridgeConfig;
+    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 60_000, turnCeilingMs: 400 });
+    try {
+      // Never "produced nothing": this child produced output for the whole
+      // run, and the reason is what the dispatcher branches on for its copy.
+      await expect(m.prompt("doc-qa", "111", "ciao")).rejects.toMatchObject({
+        name: "TurnWatchdogError",
+        reason: "ceiling",
+      });
+    } finally {
+      await m.shutdown();
     }
   }, 20_000);
 });
