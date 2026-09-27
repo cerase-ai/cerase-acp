@@ -168,6 +168,9 @@ const BridgeConfigSchema = z
     agents: z.array(AgentSchema),
     session: SessionSchema,
     workspace_chat: WorkspaceChatAppSchema.optional(),
+    // The organisation's language, for the notices the bridge writes by itself
+    // when a person's own messages have not said which language they use.
+    locale: z.enum(["it", "en", "es", "fr"]).optional(),
   })
   .superRefine((cfg, ctx) => {
     const seen = new Set<string>();

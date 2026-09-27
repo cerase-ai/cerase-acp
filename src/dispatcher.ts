@@ -18,7 +18,7 @@ import { deliveryFailureNotice } from "./platform-notices.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
 import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
-import { detectLanguage, type TurnMetaTracker } from "./turn-meta.js";
+import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
 
@@ -181,6 +181,20 @@ export class Dispatcher {
    * Returns the delivery outcome so the caller (the inject
    * endpoint) can report a truthful status instead of a blind 202.
    */
+  /**
+   * The language a notice the bridge writes by itself is in. The message's own
+   * detection first; on a message too short to say («vedi contatti?»), the
+   * last language this person wrote in; before anybody has, the organisation's.
+   * English only when none of the three answers.
+   */
+  private noticeLang(agentId: string, userId: string, text: string): SupportedLang {
+    const detected = detectLanguage(text);
+    if (detected !== "unknown") return detected;
+    const last = this.deps.turnMeta.languageFor(agentId, userId);
+    if (last !== "unknown") return last;
+    return this.deps.config.locale ?? "unknown";
+  }
+
   async sendSystemMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
     const send = this.deps.resolveSendTarget(agentId, userId);
     return send(text);
@@ -201,7 +215,7 @@ export class Dispatcher {
       logger.info({ agentId, userId }, "rejected DM: user not in allowlist");
       const send = this.deps.resolveSendTarget(agentId, userId);
       // The refusal is the whole response — its delivery outcome IS the result.
-      return this.safeSend(send, pickRefusalMessage(text), agentId, userId, "refusal message");
+      return this.safeSend(send, REFUSAL[this.noticeLang(agentId, userId, text)], agentId, userId, "refusal message");
     }
 
     const send = this.deps.resolveSendTarget(agentId, userId);
@@ -222,14 +236,20 @@ export class Dispatcher {
         const { exhausted } = await this.deps.creditCheck(agentId);
         if (exhausted) {
           logger.info({ agentId, userId }, "credit gate: tenant exhausted — replying no-credits, not spawning");
-          return this.safeSend(send, pickNoCreditsMessage(text), agentId, userId, "no-credits message");
+          return this.safeSend(
+            send,
+            TURN_NO_CREDITS[this.noticeLang(agentId, userId, text)],
+            agentId,
+            userId,
+            "no-credits message",
+          );
         }
       } catch (err) {
         logger.warn({ err, agentId, userId }, "credit gate: pre-check failed — proceeding (fail-open)");
       }
     }
 
-    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(detectLanguage(text)) });
+    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
     const buffer = new StreamBuffer({
       onFlush: (chunk) => queue.enqueue(chunk),
     });
@@ -293,15 +313,22 @@ export class Dispatcher {
     // delivery outcome, never rethrown.
     let deliveryOk = drainResult.ok;
     if (failed) {
+      const lang = this.noticeLang(agentId, userId, text);
       const copy = creditExhausted
-        ? pickNoCreditsMessage(text)
+        ? TURN_NO_CREDITS[lang]
         : isTurnCeilingError(turnError)
-          ? pickTooLongMessage(text)
-          : pickErrorMessage(text);
+          ? TURN_TOO_LONG[lang]
+          : TURN_ERROR[lang];
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
       if (!r.ok) deliveryOk = false;
     } else if (!produced) {
-      const r = await this.safeSend(send, pickEmptyMessage(text), agentId, userId, "empty-reply message");
+      const r = await this.safeSend(
+        send,
+        TURN_EMPTY[this.noticeLang(agentId, userId, text)],
+        agentId,
+        userId,
+        "empty-reply message",
+      );
       if (!r.ok) deliveryOk = false;
     }
 
@@ -341,7 +368,7 @@ export class Dispatcher {
     text: string,
     failures: AttachFailure[],
   ): Promise<void> {
-    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(detectLanguage(text)) });
+    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
     const buffer = new StreamBuffer({ onFlush: (chunk) => queue.enqueue(chunk) });
     try {
       await this.deps.sessionManager.prompt(agentId, userId, attachFailurePrompt(failures), (update) => {
