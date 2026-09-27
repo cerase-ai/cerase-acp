@@ -1,6 +1,6 @@
-// The Workspace Chat webhook, driven the way Google drives it: one Chat app for
-// the whole organisation, one route, a signed event per message, and the reply
-// posted afterwards with the app's own credentials.
+// The Workspace Chat webhook, driven the way Google drives it: one Chat app per
+// assistant, one route for all of them, a signed event per message naming the
+// app it was sent to, and the reply posted afterwards with that app's key.
 //
 // The dispatcher is the real one. Only the assistant is replaced, by a session
 // manager whose turns end when the test says so, which is how a turn longer
@@ -32,16 +32,13 @@ import { Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { directMessagesOnlyNotice } from "./platform-notices.js";
 import type { SessionManager } from "./session-manager.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
-import {
-  serveWorkspaceChatApp,
-  WORKSPACE_CHAT_EVENT_PATH,
-  workspaceChatListenerPort,
-} from "./workspace-chat-adapter.js";
+import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 import { EMITTENTE, svuotaCache, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
 process.env.WORKSPACE_CHAT_PORT = "0";
 
 const PROJECT = "111111111111";
+const PROJECT_2 = "222222222222";
 const KID = "chat-signing-key";
 const signer = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const SIGNER_PEM = signer.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -120,10 +117,13 @@ interface HeldTurn {
   end(reply: string): void;
 }
 
-describe("workspace-chat: one Chat app for the organisation", () => {
+describe("workspace-chat: one Chat app per assistant", () => {
   let google: FakeGoogle;
   let dir: string;
   let app: NonNullable<AgentConfig["workspace_chat"]>;
+  let app2: NonNullable<AgentConfig["workspace_chat"]>;
+  let account: ReturnType<typeof makeServiceAccount>;
+  let account2: ReturnType<typeof makeServiceAccount>;
   let config: BridgeConfig;
   let dispatcher: Dispatcher;
   const adapters = new Map<string, ChatAdapter>();
@@ -154,20 +154,23 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     postWaiters = [];
     google = await startFakeGoogle();
     google.publishCertificates({ [KID]: SIGNER_PEM });
-    const account = makeServiceAccount();
+    account = makeServiceAccount("guido@project-one.iam.gserviceaccount.com");
+    account2 = makeServiceAccount("enrico@project-two.iam.gserviceaccount.com");
     google.trust(account);
+    google.trust(account2);
     google.onPost = () => {
       for (const w of postWaiters.splice(0)) w();
     };
     dir = mkdtempSync(join(tmpdir(), "wc-listener-"));
     app = {
       project_number: PROJECT,
-      credentials_path: join(dir, "service-account.json"),
-      allowed_domains: ["example.com"],
+      credentials_path: join(dir, "agent-1.json"),
       certificates_url: google.certificatesUrl,
       api_root: google.apiRoot,
     };
+    app2 = { ...app, project_number: PROJECT_2, credentials_path: join(dir, "agent-2.json") };
     writeKeyFile(app.credentials_path!, account, google.tokenUri);
+    writeKeyFile(app2.credentials_path!, account2, google.tokenUri);
     svuotaCache();
 
     config = { agents: [], session: { idle_timeout_minutes: 60, max_concurrent: 16 } };
@@ -194,8 +197,7 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     });
 
     await startAgent(agent("agent-1", "mario.rossi@example.com", app));
-    await startAgent(agent("agent-2", "Anna.Bianchi@example.com", app));
-    await startAgent(agent("agent-3", "luca.verdi@partner.example", app));
+    await startAgent(agent("agent-2", "Anna.Bianchi@example.com", app2));
   });
 
   afterEach(async () => {
@@ -222,10 +224,12 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     expect(WORKSPACE_CHAT_EVENT_PATH).toBe("/chat/event");
   });
 
-  it("a direct message reaches the assistant of the sender whose verified email it carries", async () => {
+  it("a direct message to an assistant's app reaches that assistant, for its owner", async () => {
     expect(await post(chatEvent())).toEqual({ status: 200, body: {} });
     await turnCount(1);
-    expect(await post(chatEvent({ email: "anna.bianchi@example.com", space: "spaces/DM-ANNA" }))).toEqual({
+    expect(
+      await post(chatEvent({ email: "anna.bianchi@example.com", space: "spaces/DM-ANNA" }), chatJwt(PROJECT_2)),
+    ).toEqual({
       status: 200,
       body: {},
     });
@@ -277,12 +281,16 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     expect(google.posts).toEqual([]);
   });
 
-  // Every address on the bridge came from the console, where anybody can be
-  // typed. The domain is the organisation's, and a personal or partner
-  // address listed by mistake must not open an assistant to its owner.
-  it("a sender outside the organisation's domains is refused even when an assistant lists their address", async () => {
-    const event = chatEvent({ email: "luca.verdi@partner.example", space: "spaces/DM-LUCA" });
+  // Each app is visible to its owner, but Google signs an event for anybody who
+  // reaches it, and the body says who is writing. An assistant answers its owner
+  // only: a colleague writing to it is refused, not handed its memory.
+  it("a sender who is not the assistant's owner is refused, even when they own another assistant", async () => {
+    const event = chatEvent({ email: "anna.bianchi@example.com", space: "spaces/DM-ANNA" });
     expect(await post(event)).toEqual({ status: 200, body: { text: pickRefusalMessage(event.message.text) } });
+    expect(await post(chatEvent(), chatJwt(PROJECT_2))).toEqual({
+      status: 200,
+      body: { text: pickRefusalMessage(chatEvent().message.text) },
+    });
     expect(reached()).toEqual([]);
   });
 
@@ -308,7 +316,9 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     expect(reached()).toEqual([]);
   });
 
-  it("an address listed by two assistants is refused rather than guessed", async () => {
+  // Two assistants given the same app by mistake, for the same person: the
+  // event cannot say which one was meant.
+  it("an app shared by two assistants of one person is refused rather than guessed", async () => {
     await startAgent(agent("agent-4", "MARIO.ROSSI@example.com", app));
     const event = chatEvent();
     expect(await post(event)).toEqual({ status: 200, body: { text: pickRefusalMessage(event.message.text) } });
@@ -384,6 +394,27 @@ describe("workspace-chat: one Chat app for the organisation", () => {
     ]);
   });
 
+  // Each app authenticates as its own service account: a reply signed with
+  // another assistant's key would be posted by that assistant's app.
+  it("each assistant's reply is posted with its own app's key", async () => {
+    await post(chatEvent());
+    await turnCount(1);
+    await post(chatEvent({ email: "anna.bianchi@example.com", space: "spaces/DM-ANNA" }), chatJwt(PROJECT_2));
+    await turnCount(2);
+    turns[0]!.end("Da Guido.");
+    await postCount(1);
+    turns[1]!.end("Da Enrico.");
+    await postCount(2);
+    const signer = (authorization: string | undefined) => {
+      const n = Number(/access-token-(\d+)$/.exec(authorization ?? "")?.[1]);
+      return google.assertions[n - 1]?.iss;
+    };
+    expect(google.posts.map((p) => [p.space, p.text, signer(p.authorization)])).toEqual([
+      ["spaces/DM-MARIO", "Da Guido.", account.clientEmail],
+      ["spaces/DM-ANNA", "Da Enrico.", account2.clientEmail],
+    ]);
+  });
+
   it("a reply Google refuses is logged with the space, the thread and Google's answer, and reported undelivered", async () => {
     await post(chatEvent({ thread: "spaces/DM-MARIO/threads/T9", threadReply: true }));
     await turnCount(1);
@@ -436,15 +467,13 @@ describe("workspace-chat: one Chat app for the organisation", () => {
   });
 });
 
-// The appliance's proxy forwards /chat/ to the bridge whether or not anybody
-// has an assistant on this channel. With the port closed Google meets a 502 and
-// shows the person an error about the app; with the organisation's app served,
-// the same person is told they have no assistant here.
-describe("workspace-chat: the organisation's app with no assistant registered", () => {
+// Nothing listens once no assistant is on the channel: no app points at the
+// machine then, so nothing Google sends can be meant for it.
+describe("workspace-chat: the listener follows the assistants", () => {
   let google: FakeGoogle;
   let dir: string;
   let app: NonNullable<AgentConfig["workspace_chat"]>;
-  let adapter: ChatAdapter | undefined;
+  let adapters: ChatAdapter[];
 
   async function post(body: unknown, authorization: string | null = chatJwt(PROJECT)) {
     const resp = await fetch(`http://127.0.0.1:${workspaceChatListenerPort()}${WORKSPACE_CHAT_EVENT_PATH}`, {
@@ -456,15 +485,22 @@ describe("workspace-chat: the organisation's app with no assistant registered", 
     return { status: resp.status, body: text === "" ? undefined : (JSON.parse(text) as unknown) };
   }
 
+  async function start(a: AgentConfig) {
+    const adapter = await createChatAdapter(a, {} as unknown as Dispatcher);
+    await adapter.start();
+    adapters.push(adapter);
+    return adapter;
+  }
+
   beforeEach(async () => {
     logs.length = 0;
+    adapters = [];
     google = await startFakeGoogle();
     google.publishCertificates({ [KID]: SIGNER_PEM });
-    dir = mkdtempSync(join(tmpdir(), "wc-no-assistant-"));
+    dir = mkdtempSync(join(tmpdir(), "wc-lifecycle-"));
     app = {
       project_number: PROJECT,
-      credentials_path: join(dir, "service-account.json"),
-      allowed_domains: ["example.com"],
+      credentials_path: join(dir, "agent-1.json"),
       certificates_url: google.certificatesUrl,
     };
     writeKeyFile(app.credentials_path!, makeServiceAccount(), "https://oauth2.googleapis.com/token");
@@ -473,55 +509,18 @@ describe("workspace-chat: the organisation's app with no assistant registered", 
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await adapter?.stop();
-    adapter = undefined;
-    await serveWorkspaceChatApp(undefined);
+    for (const a of adapters) await a.stop();
     await google.close();
     svuotaCache();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("a verified message is answered with the refusal", async () => {
-    await serveWorkspaceChatApp(app);
-    const event = chatEvent({ text: "ciao, mi aiuti con il budget?" });
-    expect(await post(event)).toEqual({
-      status: 200,
-      body: { text: pickRefusalMessage("ciao, mi aiuti con il budget?") },
-    });
-    // A message-only pino call puts the message where the mock keeps fields.
-    const said = logs.map((l) => (typeof l.fields === "string" ? l.fields : l.msg));
-    expect(said.filter((m) => m.startsWith("workspace-chat event refused"))).toEqual([
-      "workspace-chat event refused: no assistant is registered for this Chat app",
-    ]);
-  });
-
-  it("an event without Google's signature still gets a bare 401", async () => {
-    await serveWorkspaceChatApp(app);
-    expect(await post(chatEvent(), null)).toEqual({ status: 401, body: undefined });
-    expect(await post(chatEvent(), chatJwt("999999999999"))).toEqual({ status: 401, body: undefined });
-  });
-
-  it("when the last assistant stops, the listener stays open and refuses", async () => {
-    await serveWorkspaceChatApp(app);
-    const dispatcher = {} as unknown as Dispatcher;
-    adapter = await createChatAdapter(agent("agent-1", "mario.rossi@example.com", app), dispatcher);
-    await adapter.start();
-    await adapter.stop();
-    adapter = undefined;
-
-    const event = chatEvent();
-    expect(await post(event)).toEqual({ status: 200, body: { text: pickRefusalMessage(event.message.text) } });
-  });
-
-  it("withdrawing the organisation's app closes the listener when no assistant is registered", async () => {
-    await serveWorkspaceChatApp(app);
-    expect(workspaceChatListenerPort()).toBeGreaterThan(0);
-    await serveWorkspaceChatApp(undefined);
+  it("the listener opens with the first assistant and closes with the last", async () => {
     expect(workspaceChatListenerPort()).toBeUndefined();
-  });
-
-  it("an app without a usable project number opens nothing, since no event could be verified", async () => {
-    await serveWorkspaceChatApp({ ...app, project_number: undefined });
+    const adapter = await start(agent("agent-1", "mario.rossi@example.com", app));
+    expect(workspaceChatListenerPort()).toBeGreaterThan(0);
+    await adapter.stop();
+    adapters = [];
     expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
@@ -534,9 +533,9 @@ describe("workspace-chat: the organisation's app with no assistant registered", 
       return Response.json({ [KID]: SIGNER_PEM }, { headers: { "cache-control": "public, max-age=3600" } });
     });
     const { certificates_url: _, ...withoutAddress } = app;
-    await serveWorkspaceChatApp(withoutAddress);
+    await start(agent("agent-1", "mario.rossi@example.com", withoutAddress));
 
-    const event = chatEvent({ text: "ciao, mi aiuti con il budget?" });
+    const event = chatEvent({ email: "giulia.neri@example.com", text: "ciao, mi aiuti con il budget?" });
     expect(await post(event)).toEqual({ status: 200, body: { text: pickRefusalMessage(event.message.text) } });
     expect(asked).toEqual([URL_CERTIFICATI]);
     expect(URL_CERTIFICATI).toBe(
@@ -544,38 +543,21 @@ describe("workspace-chat: the organisation's app with no assistant registered", 
     );
   });
 
-  // An address that let a dropped letter send the certificate fetch over
-  // plaintext to a public name would leave the signature check to whoever
-  // answers it. The app is not served, and the reason reaches the log.
-  it("an app whose certificates_url the endpoint rule refuses opens nothing and says why", async () => {
-    await expect(
-      serveWorkspaceChatApp({
-        ...app,
-        certificates_url: "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat",
-      }),
-    ).rejects.toThrow(
-      'the organisation\'s Workspace Chat app is not served: workspace_chat.certificates_url must be an https URL, or an http URL to a host name without a dot or to a loopback address, and "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat" is neither',
-    );
-    expect(workspaceChatListenerPort()).toBeUndefined();
-  });
-
-  // Mid-reload the organisation's app and an assistant's copy of it can name
-  // different addresses. A token counts only against the certificates of the
-  // app whose project it was issued for.
-  it("two apps served with different certificate addresses each accept only tokens their own certificates verify", async () => {
+  // Mid-reload two assistants' apps can name different addresses. A token
+  // counts only against the certificates of the app whose project it was
+  // issued for.
+  it("two apps with different certificate addresses each accept only tokens their own certificates verify", async () => {
     const other = await startFakeGoogle();
     try {
       other.publishCertificates({ [KID]: OTHER_SIGNER_PEM });
-      await serveWorkspaceChatApp(app);
-      adapter = await createChatAdapter(
-        agent("agent-1", "mario.rossi@example.com", {
+      await start(agent("agent-1", "mario.rossi@example.com", app));
+      await start(
+        agent("agent-2", "anna.bianchi@example.com", {
           ...app,
           project_number: "222222222222",
           certificates_url: other.certificatesUrl,
         }),
-        {} as unknown as Dispatcher,
       );
-      await adapter.start();
 
       const event = chatEvent({ email: "giulia.neri@example.com" });
       const refusal = { status: 200, body: { text: pickRefusalMessage(event.message.text) } };

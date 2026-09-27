@@ -32,7 +32,7 @@ describe("a Google Chat assistant's readiness", () => {
       cwd: "/home/agent/cerase/workspace",
       mode: "cerase",
       spawn: { command: "docker", args: [] },
-      workspace_chat: { project_number: "123456789012", credentials_path: keyPath, allowed_domains: ["example.com"] },
+      workspace_chat: { project_number: "123456789012", credentials_path: keyPath },
     };
     return createChatAdapter(agent, {} as unknown as Dispatcher);
   }

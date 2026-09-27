@@ -80,7 +80,7 @@ function classifyMutation(prev: AgentConfig, next: AgentConfig): ModifiedClassif
     prev.mode !== next.mode ||
     prev.spawn.command !== next.spawn.command ||
     !arraysEqual(prev.spawn.args, next.spawn.args) ||
-    // The organisation's Chat app. An adapter verifies events against its
+    // The agent's own Chat app. An adapter verifies events against its
     // project number and certificates and posts with its key to its API from
     // start() on, so any of them changing has to reach the adapter by
     // restarting it.
@@ -98,8 +98,7 @@ function sameWorkspaceChatApp(a: AgentConfig["workspace_chat"], b: AgentConfig["
     a.project_number === b.project_number &&
     a.credentials_path === b.credentials_path &&
     a.certificates_url === b.certificates_url &&
-    a.api_root === b.api_root &&
-    setsEqual(a.allowed_domains ?? [], b.allowed_domains ?? [])
+    a.api_root === b.api_root
   );
 }
 

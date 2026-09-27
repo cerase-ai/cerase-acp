@@ -1,9 +1,8 @@
 // What the Workspace Chat adapter needs before it opens the webhook, and what
 // it says when something is missing.
 //
-// The listener verifies every event against the organisation's project number
-// and answers with the organisation's key, so it refuses to come up without
-// either, and names what is missing: a channel that stays down for a reason no
+// The listener verifies every event against the assistant's own project number
+// and answers with that app's key, so it refuses to come up without either, and names what is missing: a channel that stays down for a reason no
 // screen shows is the failure this adapter has already had. Discord, Slack,
 // Telegram and web adapters are unaffected by any of it.
 
@@ -51,21 +50,21 @@ describe("workspace-chat adapter: what start() requires", () => {
     };
   }
 
-  it("refuses without the organisation's Chat app, naming every setting it lacks", async () => {
+  it("refuses without its own Chat app, naming every setting it lacks", async () => {
     adapter = await createChatAdapter(wcAgent(undefined), DISPATCHER);
     await expect(adapter.start()).rejects.toThrow(
-      "agent \"agent-1\" channel='workspace_chat' refuses to start: workspace_chat.project_number, workspace_chat.credentials_path, workspace_chat.allowed_domains missing from agents.yaml",
+      "agent \"agent-1\" channel='workspace_chat' refuses to start: workspace_chat.project_number, workspace_chat.credentials_path missing from agents.yaml",
     );
     expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
-  it("refuses a project number that is not one, and a domain that is an address", async () => {
+  it("refuses a project number that is not one", async () => {
     adapter = await createChatAdapter(
-      wcAgent({ project_number: "tenant-project", credentials_path: keyPath, allowed_domains: ["@example.com"] }),
+      wcAgent({ project_number: "tenant-project", credentials_path: keyPath }),
       DISPATCHER,
     );
     await expect(adapter.start()).rejects.toThrow(
-      "agent \"agent-1\" channel='workspace_chat' refuses to start: workspace_chat.project_number must be the Google Cloud project number (digits only); workspace_chat.allowed_domains has an entry that is not a domain: @example.com",
+      "agent \"agent-1\" channel='workspace_chat' refuses to start: workspace_chat.project_number must be the Google Cloud project number (digits only)",
     );
     expect(workspaceChatListenerPort()).toBeUndefined();
   });
@@ -75,7 +74,6 @@ describe("workspace-chat adapter: what start() requires", () => {
       wcAgent({
         project_number: "123456789012",
         credentials_path: keyPath,
-        allowed_domains: ["example.com"],
         certificates_url: "http://www.googleapis.com/service_accounts/v1/metadata/x509/chat",
         api_root: "chat.googleapis.com",
       }),
@@ -90,7 +88,7 @@ describe("workspace-chat adapter: what start() requires", () => {
   it("refuses when the key cannot be read, naming the path and the reason", async () => {
     const absent = join(dir, "absent.json");
     adapter = await createChatAdapter(
-      wcAgent({ project_number: "123456789012", credentials_path: absent, allowed_domains: ["example.com"] }),
+      wcAgent({ project_number: "123456789012", credentials_path: absent }),
       DISPATCHER,
     );
     await expect(adapter.start()).rejects.toThrow(
@@ -102,7 +100,7 @@ describe("workspace-chat adapter: what start() requires", () => {
   it("refuses a key whose token_uri would send the signed assertion in plaintext, naming the path and the field", async () => {
     writeKeyFile(keyPath, makeServiceAccount(), "http://oauth2.googleapis.com/token");
     adapter = await createChatAdapter(
-      wcAgent({ project_number: "123456789012", credentials_path: keyPath, allowed_domains: ["example.com"] }),
+      wcAgent({ project_number: "123456789012", credentials_path: keyPath }),
       DISPATCHER,
     );
     const err = await adapter.start().catch((e: unknown) => e);
@@ -114,7 +112,7 @@ describe("workspace-chat adapter: what start() requires", () => {
 
   it("opens the webhook with a complete app and a readable key, and closes it with the last adapter", async () => {
     adapter = await createChatAdapter(
-      wcAgent({ project_number: "123456789012", credentials_path: keyPath, allowed_domains: ["example.com"] }),
+      wcAgent({ project_number: "123456789012", credentials_path: keyPath }),
       DISPATCHER,
     );
     await adapter.start();

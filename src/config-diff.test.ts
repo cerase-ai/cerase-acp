@@ -134,22 +134,20 @@ describe("diffConfigs", () => {
     expect(d.modified[0]!.classification).toBe("bot_token_or_spawn");
   });
 
-  // The key and project number belong to the organisation's one Chat app and
-  // reach each agent as a copy. An adapter holds them from start(), so a
-  // change that did not respawn would leave it verifying against the old
-  // project and posting with the old key until something else restarted it.
-  it("classifies a change to the organisation's workspace_chat block as `bot_token_or_spawn`", () => {
+  // The key and project number are the assistant's own Chat app. An adapter
+  // holds them from start(), so a change that did not respawn would leave it
+  // verifying against the old project and posting with the old key until
+  // something else restarted it.
+  it("classifies a change to an assistant's workspace_chat block as `bot_token_or_spawn`", () => {
     const app: NonNullable<AgentConfig["workspace_chat"]> = {
       project_number: "111111111111",
-      credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
-      allowed_domains: ["example.com"],
+      credentials_path: "/var/cerase/workspace-chat-creds/a-1a2b3c4d.json",
     };
     const wc = (overrides: Partial<typeof app>) =>
       baseAgent("a", { channel: "workspace_chat", workspace_chat: { ...app, ...overrides } });
     for (const change of [
       { project_number: "222222222222" },
-      { credentials_path: "/var/cerase/workspace-chat-creds/rotated.json" },
-      { allowed_domains: ["example.com", "example.org"] },
+      { credentials_path: "/var/cerase/workspace-chat-creds/a-5e6f7a8b.json" },
       { certificates_url: "http://fake-google:8080/certs" },
       { api_root: "http://fake-google:8080" },
     ]) {

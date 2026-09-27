@@ -242,7 +242,7 @@ session:
 
   // CHANNEL-1 schema cases (OPT-21 D3). Verifies the per-channel
   // superRefine matrix in config.ts: discord/telegram need bot_token,
-  // slack additionally needs slack_app_token, workspace_chat needs nothing
+  // slack additionally needs slack_app_token; workspace_chat's own app is checked when it starts
   // per agent. Legacy YAMLs without `channel` default to 'discord' for
   // back-compat.
 
@@ -302,27 +302,27 @@ session:
     expect(() => loadConfig(path, {})).toThrow(/slack_app_token/i);
   });
 
-  // One Chat app serves the whole organisation, so its key, project number and
-  // domains are written once at the top of the file. Each workspace_chat agent
-  // carries a copy after loading, which is what lets a rotated key or a changed
-  // project number reach the adapters through the same per-agent diff that
-  // already respawns an agent whose token changed.
-  it("the organisation's workspace_chat block reaches every workspace_chat agent and no other", () => {
+  // Every assistant is its own Chat app (DEC-37 in cerase-core), so its key and
+  // project number are written on the assistant, like a Discord token. A block on
+  // one assistant reaches that assistant and no other.
+  it("an assistant's workspace_chat block loads on that assistant only", () => {
     writeFileSync(
       path,
       `
-workspace_chat:
-  project_number: "123456789012"
-  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
-  allowed_domains: [example.com]
 agents:
   - id: agent-1
     channel: workspace_chat
     allowed_users: ["mario.rossi@example.com"]
+    workspace_chat:
+      project_number: "123456789012"
+      credentials_path: /var/cerase/workspace-chat-creds/agent-1.json
     spawn: { command: docker, args: [] }
   - id: agent-2
     channel: workspace_chat
     allowed_users: ["anna.bianchi@example.com"]
+    workspace_chat:
+      project_number: "210987654321"
+      credentials_path: /var/cerase/workspace-chat-creds/agent-2.json
     spawn: { command: docker, args: [] }
   - id: maintainer-1
     channel: web
@@ -334,37 +334,36 @@ session:
 `,
     );
     const cfg = loadConfig(path, {});
-    const app = {
-      project_number: "123456789012",
-      credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
-      allowed_domains: ["example.com"],
-    };
     expect(cfg.agents.map((a) => [a.id, a.workspace_chat])).toEqual([
-      ["agent-1", app],
-      ["agent-2", app],
+      [
+        "agent-1",
+        { project_number: "123456789012", credentials_path: "/var/cerase/workspace-chat-creds/agent-1.json" },
+      ],
+      [
+        "agent-2",
+        { project_number: "210987654321", credentials_path: "/var/cerase/workspace-chat-creds/agent-2.json" },
+      ],
       ["maintainer-1", undefined],
     ]);
-    expect(cfg.workspace_chat).toEqual(app);
   });
 
   // Where the bridge reaches Google can be written in the block, so a test can
   // serve those endpoints itself. The load keeps what is written, a malformed
-  // address included: the workspace_chat agents refuse it when they start,
-  // and the other channels in the file keep running.
-  it("the addresses of Google's endpoints in the block load as written and reach the workspace_chat agents", () => {
+  // address included: the assistant refuses it when it starts, and the other
+  // channels in the file keep running.
+  it("the addresses of Google's endpoints in an assistant's block load as written", () => {
     writeFileSync(
       path,
       `
-workspace_chat:
-  project_number: "123456789012"
-  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
-  allowed_domains: [example.com]
-  certificates_url: http://fake-google:8080/certs
-  api_root: htps://chat.googleapis.com
 agents:
   - id: agent-1
     channel: workspace_chat
     allowed_users: ["mario.rossi@example.com"]
+    workspace_chat:
+      project_number: "123456789012"
+      credentials_path: /var/cerase/workspace-chat-creds/agent-1.json
+      certificates_url: http://fake-google:8080/certs
+      api_root: htps://chat.googleapis.com
     spawn: { command: docker, args: [] }
   - id: doc-qa
     channel: discord
@@ -389,14 +388,13 @@ session:
     writeFileSync(
       path,
       `
-workspace_chat:
-  project_number: 123456789012
-  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
-  allowed_domains: [example.com]
 agents:
   - id: agent-1
     channel: workspace_chat
     allowed_users: ["mario.rossi@example.com"]
+    workspace_chat:
+      project_number: 123456789012
+      credentials_path: /var/cerase/workspace-chat-creds/agent-1.json
     spawn: { command: docker, args: [] }
 session:
   idle_timeout_minutes: 60
@@ -408,7 +406,7 @@ session:
 
   // A missing block is the adapter's to refuse, not the loader's: failing the
   // whole file would take the panel-only maintainer down with the channel.
-  it("a workspace_chat agent without the organisation's block still loads", () => {
+  it("a workspace_chat agent without its block still loads", () => {
     writeFileSync(
       path,
       `
@@ -434,11 +432,10 @@ session:
     expect(Object.keys(cfg)).toEqual(["agents", "session"]);
   });
 
-  // The webhook belongs to the app, not to an assistant: Google calls it for
-  // every user of the organisation's domain, including one nobody has given an
-  // assistant yet. The block therefore stays at the top level for the listener,
-  // even when no agent is on the channel to carry a copy.
-  it("the organisation's workspace_chat block stays at the top level with no workspace_chat agent", () => {
+  // The organisation's one app is gone. A file written before the change still
+  // loads, and its top-level block and domains reach nobody: an assistant is
+  // reached through its own app or not at all.
+  it("the organisation-wide block and its domains from the old design are dropped on load", () => {
     writeFileSync(
       path,
       `
@@ -447,9 +444,13 @@ workspace_chat:
   credentials_path: /var/cerase/workspace-chat-creds/service-account.json
   allowed_domains: [example.com]
 agents:
-  - id: maintainer-1
-    channel: web
-    allowed_users: ["maintainer:org-1"]
+  - id: agent-1
+    channel: workspace_chat
+    allowed_users: ["mario.rossi@example.com"]
+    workspace_chat:
+      project_number: "210987654321"
+      credentials_path: /var/cerase/workspace-chat-creds/agent-1.json
+      allowed_domains: [example.com]
     spawn: { command: docker, args: [] }
 session:
   idle_timeout_minutes: 60
@@ -457,12 +458,11 @@ session:
 `,
     );
     const cfg = loadConfig(path, {});
-    expect(cfg.workspace_chat).toEqual({
-      project_number: "123456789012",
-      credentials_path: "/var/cerase/workspace-chat-creds/service-account.json",
-      allowed_domains: ["example.com"],
+    expect(Object.keys(cfg)).toEqual(["agents", "session"]);
+    expect(cfg.agents[0]!.workspace_chat).toEqual({
+      project_number: "210987654321",
+      credentials_path: "/var/cerase/workspace-chat-creds/agent-1.json",
     });
-    expect(cfg.agents.map((a) => [a.id, a.workspace_chat])).toEqual([["maintainer-1", undefined]]);
   });
 
   // The per-assistant fields belong to the design where every assistant was

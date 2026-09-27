@@ -1,21 +1,20 @@
 // Google Workspace Chat adapter.
 //
-// One Chat app serves the whole organisation. Google POSTs every interaction
-// event for that app to a single route, WORKSPACE_CHAT_EVENT_PATH, which the
-// appliance's Traefik forwards unchanged to this listener. Every workspace_chat
-// agent registers its user's address on the one listener, and the verified
-// sender's email decides which assistant an event reaches. The listener is
-// open while the configuration names the organisation's app or any assistant is
-// registered, so a person with no assistant is refused instead of meeting a
-// closed port.
+// Every assistant on the channel is its own Chat app, in its own Google Cloud
+// project, as every assistant on Discord is its own bot (DEC-37 in cerase-core).
+// Google POSTs every event for every app to one route, WORKSPACE_CHAT_EVENT_PATH,
+// which the appliance's Traefik forwards unchanged to this listener. The
+// project number the event's token was issued for names the app, and so the
+// assistant; the verified sender's email must be that assistant's owner. The
+// listener is open while at least one assistant is registered: with none, no
+// app points at this machine.
 //
 // What the listener checks, in order, before any assistant is involved:
 //   1. the Bearer JWT Google signs, against the project numbers served here;
 //      nothing in the body is read before this passes
 //   2. that the event is a message in a direct message
-//   3. that the sender's email belongs to one of the organisation's domains
-//   4. that exactly one assistant lists that address
-// A request failing 1 gets a bare 401. An event failing 2 to 4 gets a short
+//   3. that exactly one assistant of that app lists the sender's address
+// A request failing 1 gets a bare 401. An event failing 2 or 3 gets a short
 // synchronous answer and reaches no assistant.
 //
 // An accepted message is acknowledged at once with an empty body and the turn
@@ -31,7 +30,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
-import type { AgentConfig, WorkspaceChatAppConfig } from "./config.js";
+import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
@@ -52,8 +51,6 @@ const logger = makeLogger("cerase-acp.workspace-chat");
 
 /** The one path Google calls: https://<appliance domain>/chat/event. */
 export const WORKSPACE_CHAT_EVENT_PATH = "/chat/event";
-
-const DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 interface ChatSpace {
   name?: string;
@@ -79,11 +76,10 @@ interface ChatEvent {
   };
 }
 
-/** The organisation's Chat app, as checked by start(). */
+/** The assistant's own Chat app, as checked by start(). */
 interface ChatApp {
   projectNumber: string;
   credentialsPath: string;
-  allowedDomains: string[];
   /** Where the certificates Chat signs events with are fetched. */
   certificatesUrl: string;
   /** The Chat API's base URL, without a trailing slash. */
@@ -110,13 +106,6 @@ type Outcome = { kind: "ignore" } | { kind: "answer"; text: string } | { kind: "
 const ROUTES = new Map<string, Route>();
 const APIS = new Map<string, WorkspaceChatApi>();
 let sharedServer: Server | undefined;
-// The organisation's Chat app as the bridge configuration states it: its
-// project number and where its signing certificates are fetched. While it is
-// set the listener stays open with no route at all, and a verified event
-// nobody's assistant can take is answered with the refusal: the appliance's
-// proxy forwards the route regardless, and a closed port is a 502 that Google
-// shows the person as a broken app.
-let organisation: { projectNumber: string; certificatesUrl: string } | undefined;
 
 /** The port the webhook listener is bound to, or undefined while it is closed. */
 export function workspaceChatListenerPort(): number | undefined {
@@ -173,10 +162,6 @@ function decide(event: ChatEvent, candidates: Route[]): Outcome {
     return refusal;
   }
   const domain = email.slice(at + 1);
-  if (!candidates.some((r) => r.app.allowedDomains.includes(domain))) {
-    logger.warn({ domain }, "workspace-chat event refused: the sender is outside the organisation's domains");
-    return refusal;
-  }
 
   const matches = candidates.flatMap((route) => {
     const userId = route.agent.allowed_users.find((u) => u.trim().toLowerCase() === email);
@@ -191,7 +176,10 @@ function decide(event: ChatEvent, candidates: Route[]): Outcome {
   }
   const match = matches[0];
   if (!match) {
-    logger.info({ domain }, "workspace-chat event refused: no assistant belongs to the sender");
+    logger.info(
+      { domain, agentIds: candidates.map((r) => r.agent.id) },
+      "workspace-chat event refused: the sender does not own the assistant this app belongs to",
+    );
     return refusal;
   }
   return { kind: "accept", route: match.route, userId: match.userId };
@@ -203,7 +191,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // checked with. All of them name the same address unless a reload that moved
   // it is still being applied.
   const served = new Map<string, string[]>();
-  for (const app of [...[...ROUTES.values()].map((r) => r.app), ...(organisation ? [organisation] : [])]) {
+  for (const app of [...ROUTES.values()].map((r) => r.app)) {
     const projects = served.get(app.certificatesUrl) ?? [];
     if (!projects.includes(app.projectNumber)) projects.push(app.projectNumber);
     served.set(app.certificatesUrl, projects);
@@ -265,56 +253,24 @@ async function ensureServerStarted(): Promise<void> {
   );
 }
 
-/** Closes the listener once nothing is served on it: no route and no organisation app. */
+/** Closes the listener once no assistant is served on it. */
 async function closeServerIfUnused(): Promise<void> {
-  if (ROUTES.size > 0 || organisation !== undefined || !sharedServer) return;
+  if (ROUTES.size > 0 || !sharedServer) return;
   const server = sharedServer;
   sharedServer = undefined;
   APIS.clear();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
-/**
- * Serves the organisation's Chat app on the webhook listener independently of
- * any assistant, or stops serving it with `undefined`. The bridge calls it at
- * boot and on every reload with the configuration's top-level block. An app
- * with no usable project number serves nothing, since no event could be
- * verified against it. Throws when the listener cannot be opened, and when
- * the app names a certificates address the endpoint rule refuses, after
- * withdrawing it.
- */
-export async function serveWorkspaceChatApp(app: WorkspaceChatAppConfig | undefined): Promise<void> {
-  const projectNumber = app?.project_number && /^\d+$/.test(app.project_number) ? app.project_number : undefined;
-  const certificatesUrl = app?.certificates_url ?? URL_CERTIFICATI;
-  const problem =
-    projectNumber === undefined ? undefined : googleEndpointProblem("workspace_chat.certificates_url", certificatesUrl);
-  // Set before any await, so an adapter stopping meanwhile sees it and leaves
-  // the listener open.
-  organisation = projectNumber === undefined || problem ? undefined : { projectNumber, certificatesUrl };
-  if (organisation === undefined) {
-    await closeServerIfUnused();
-    if (problem) throw new Error(`the organisation's Workspace Chat app is not served: ${problem}`);
-    return;
-  }
-  await ensureServerStarted();
-}
-
-function organisationApp(agent: AgentConfig): ChatApp {
+function assistantApp(agent: AgentConfig): ChatApp {
   const wc = agent.workspace_chat;
   const missing = [
     wc?.project_number ? undefined : "workspace_chat.project_number",
     wc?.credentials_path ? undefined : "workspace_chat.credentials_path",
-    wc?.allowed_domains?.length ? undefined : "workspace_chat.allowed_domains",
   ].filter((m) => m !== undefined);
   const problems = missing.length > 0 ? [`${missing.join(", ")} missing from agents.yaml`] : [];
   if (wc?.project_number && !/^\d+$/.test(wc.project_number)) {
     problems.push("workspace_chat.project_number must be the Google Cloud project number (digits only)");
-  }
-  const notDomains = (wc?.allowed_domains ?? []).filter((d) => !DOMAIN.test(d.trim().toLowerCase()));
-  if (notDomains.length > 0) {
-    problems.push(
-      `workspace_chat.allowed_domains has ${notDomains.length === 1 ? "an entry that is not a domain" : "entries that are not domains"}: ${notDomains.join(", ")}`,
-    );
   }
   for (const [key, value] of [
     ["workspace_chat.certificates_url", wc?.certificates_url],
@@ -329,7 +285,6 @@ function organisationApp(agent: AgentConfig): ChatApp {
   return {
     projectNumber: wc.project_number,
     credentialsPath: wc.credentials_path,
-    allowedDomains: (wc.allowed_domains ?? []).map((d) => d.trim().toLowerCase()),
     certificatesUrl: wc.certificates_url ?? URL_CERTIFICATI,
     apiRoot: (wc.api_root ?? GOOGLE_CHAT_API_ROOT).replace(/\/+$/, ""),
   };
@@ -395,7 +350,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       return ROUTES.has(agent.id) && api !== undefined && sharedServer?.listening === true;
     },
     async start() {
-      const app = organisationApp(agent);
+      const app = assistantApp(agent);
       // Read once here so a key the process cannot read downs this channel at
       // start, with the path and the reason, instead of at the first reply.
       readServiceAccountKey(app.credentialsPath);

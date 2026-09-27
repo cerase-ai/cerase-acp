@@ -17,8 +17,8 @@ For each configured agent template:
   `agents.yaml` — `discord` (default; `discord.js` Client, DM intent
   only — no guild channels, no slash commands, no buttons), `telegram`
   (`telegraf`), `slack` (`@slack/bolt`), `workspace_chat` (Google
-  Workspace Chat: one Chat app for the organisation, webhook events,
-  replies through the Chat REST API), or `web` — with the bot
+  Workspace Chat: one Chat app per agent, webhook events, replies
+  through the Chat REST API), or `web` — with the bot
   token / credentials bound to that template.
 - On an inbound DM: checks the per-agent `user_id` allowlist;
   authorised → routes to a long-lived ACP session for the
@@ -117,7 +117,7 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `discord` (default) | `bot_token` | `discord.js` Client, DM-only | Gateway Intents must be enabled in Developer Portal |
 | `telegram` | `bot_token` | `telegraf` | BotFather token; DMs only |
 | `slack` | `bot_token` + `slack_app_token` | `@slack/bolt` Socket Mode | `xoxb-…` bot token + `xapp-…` app-level token |
-| `workspace_chat` | *none per agent* — the organisation's `workspace_chat` block | Webhook listener + Chat REST API | One Chat app for the organisation; see below |
+| `workspace_chat` | the agent's own `workspace_chat` block | Webhook listener + Chat REST API | One Chat app per agent; see below |
 | `web` | *none* | Null-sink adapter | For local dev, CLI testing, and panel-only agents |
 
 ### Agent fields
@@ -132,28 +132,27 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `spawn.args` | yes | — | Args passed to `spawn.command`. Container: `[exec, -i, cerase-agent-<id>, opencode, acp]`. Local: `[acp]`. |
 | `cwd` | no | `/root/cerase/workspace` | Working directory passed to the ACP child via `session/new`. For local installs, point this at a real project directory. |
 
-### Workspace Chat: one app for the organisation
+### Workspace Chat: one app per agent
 
-Every `workspace_chat` agent is reached through the same Google Chat app, so
-the app's settings are written once, at the top level of `agents.yaml`:
+Every `workspace_chat` agent is its own Google Chat app, in its own Google Cloud
+project, the way every Discord agent is its own bot. The app's settings sit on
+the agent:
 
 ```yaml
-workspace_chat:
-  project_number: "123456789012"        # Google Cloud project number of the Chat app
-  credentials_path: /var/cerase/workspace-chat-creds/service-account.json
-  allowed_domains: [example.com]        # the organisation's email domains
 agents:
   - id: agent-1
     channel: workspace_chat
     allowed_users: ["mario.rossi@example.com"]
+    workspace_chat:
+      project_number: "123456789012"    # Google Cloud project number of this agent's Chat app
+      credentials_path: /var/cerase/workspace-chat-creds/agent-1.json
     spawn: { command: docker, args: [exec, -i, cerase-agent-1, opencode, acp] }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `project_number` | string of digits (a YAML integer is accepted) | The audience Google puts in the JWT on every event. The app's *Authentication Audience* must be set to *Project Number*. |
+| `project_number` | string of digits (a YAML integer is accepted) | The audience Google puts in the JWT on every event for this app. The app's *Authentication Audience* must be set to *Project Number*. |
 | `credentials_path` | string | Path inside the container of the app's service-account JSON key. Read again whenever an access token is renewed, so a replaced key is used without a restart. |
-| `allowed_domains` | list of domains, at least one | A sender whose email is outside these is refused even when an agent lists the address. |
 | `certificates_url` | URL, optional | Where the certificates Chat signs events with are fetched. Absent, Google's: `https://www.googleapis.com/service_accounts/v1/metadata/x509/chat%40system.gserviceaccount.com`. Every event is verified against them whatever the value. |
 | `api_root` | URL, optional | Base URL of the Chat API replies are posted to. Absent, `https://chat.googleapis.com`. |
 
@@ -161,33 +160,31 @@ agents:
 itself; an appliance's configuration leaves them out. Each must be an `https`
 URL, or an `http` URL to a host name without a dot (a container on the same
 network) or to a loopback address, so a dropped letter in Google's own address
-cannot move the certificate fetch to plaintext. A `certificates_url` outside
-that rule keeps the organisation's app from being served, either key outside it
-keeps every `workspace_chat` agent from starting, and the log names the key and
-the value. The token endpoint is the `token_uri` the service-account key names,
-held to the same rule: a key whose `token_uri` is outside it keeps every
-`workspace_chat` agent from starting, a key replaced with one is refused before
-anything is signed or sent, and the log names the key's path and the field
-without repeating anything the file holds.
+cannot move the certificate fetch to plaintext. Either key outside that rule
+keeps the agent from starting, and the log names the key and the value. The
+token endpoint is the `token_uri` the service-account key names, held to the
+same rule: a key whose `token_uri` is outside it keeps the agent from starting,
+a key replaced with one is refused before anything is signed or sent, and the
+log names the key's path and the field without repeating anything the file
+holds.
 
-A missing or malformed block does not fail the load: each `workspace_chat`
-agent refuses to start and names what is wrong, and every other channel keeps
-running. A change to the block respawns the `workspace_chat` agents.
+A missing or malformed block does not fail the load: the agent refuses to start
+and names what is wrong, and every other agent keeps running. A change to the
+block respawns that agent. A top-level `workspace_chat` block, from when one app
+served the whole organisation, is ignored.
 
-Google calls **`POST /chat/event`** on the listener (`WORKSPACE_CHAT_PORT`). The
-listener verifies the JWT against `project_number` before reading the body,
-accepts only messages in a direct message from a human in `allowed_domains`,
-and routes by the sender's email to the one agent listing it. Anything else
-gets a short refusal and reaches no agent. An accepted message is acknowledged
-with an empty body at once; the reply is posted afterwards with
-`spaces.messages.create` under app authentication (`chat.bot` scope), into the
-event's space, and into its thread when the message was written in one.
+Google calls **`POST /chat/event`** on the listener (`WORKSPACE_CHAT_PORT`) for
+every app. The listener verifies the JWT against the project numbers served
+before reading the body; the project the token was issued for names the app,
+and so the agent. It accepts only messages in a direct message from a human
+listed in that agent's `allowed_users`: anybody else, a colleague who owns
+another agent included, gets a short refusal and reaches no agent. An accepted
+message is acknowledged with an empty body at once; the reply is posted
+afterwards with `spaces.messages.create` under that app's authentication
+(`chat.bot` scope), into the event's space, and into its thread when the
+message was written in one.
 
-The listener is open whenever the block carries a `project_number`, even with no
-`workspace_chat` agent in the file, and it follows the block across reloads. A
-verified message from somebody with no agent is answered with the refusal; with
-the port closed, the appliance's proxy would answer Google with a 502 and the
-person would see the app as broken.
+The listener is open while at least one `workspace_chat` agent is registered.
 
 The bridge runs as `node` (uid 1000, gid 1000). It needs read permission on the
 key file and search permission on its directory, through its uid or one of its

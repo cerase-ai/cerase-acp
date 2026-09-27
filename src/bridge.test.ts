@@ -988,11 +988,10 @@ describe("a client that believes a dead socket is alive", () => {
   });
 });
 
-// Google calls one route for the organisation's Chat app, and the appliance's
-// proxy forwards it to the bridge whether or not any assistant is on that
-// channel. The bridge serves the app from the configuration, so the port is
-// open, and verifying, from boot and across reloads that change no assistant.
-describe("the organisation's Workspace Chat app with no workspace_chat assistant", () => {
+// Google calls the webhook for an assistant's own Chat app. The block that
+// named one app for the whole organisation is no longer read, so a file that
+// still carries it opens no port nobody's app points at.
+describe("an organisation-wide Workspace Chat block, from before every assistant had its own app", () => {
   let handle: RunBridgeHandle | undefined;
   let dir: string;
   let cfgPath: string;
@@ -1036,28 +1035,15 @@ session:
     vi.unstubAllEnvs();
   });
 
-  it("the webhook is open from boot, and closes with the bridge", async () => {
+  it("opens nothing: only an assistant's own app is served", async () => {
     await boot(true, false);
-    expect(workspaceChatListenerPort()).toBeGreaterThan(0);
-
-    await handle!.shutdown();
-    handle = undefined;
     expect(workspaceChatListenerPort()).toBeUndefined();
   });
 
-  it("without the app nothing listens", async () => {
-    await boot(false, false);
-    expect(workspaceChatListenerPort()).toBeUndefined();
-  });
-
-  it("a reload that adds or removes only the app opens or closes the webhook", async () => {
+  it("a reload that adds only the old block still opens nothing", async () => {
     await boot(false, true);
-    expect(workspaceChatListenerPort()).toBeUndefined();
-
     writeFileSync(cfgPath, yaml(true));
-    await vi.waitFor(() => expect(workspaceChatListenerPort()).toBeGreaterThan(0), { timeout: 8000, interval: 25 });
-
-    writeFileSync(cfgPath, yaml(false));
-    await vi.waitFor(() => expect(workspaceChatListenerPort()).toBeUndefined(), { timeout: 8000, interval: 25 });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(workspaceChatListenerPort()).toBeUndefined();
   });
 });
