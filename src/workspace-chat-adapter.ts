@@ -44,6 +44,7 @@ import {
   readServiceAccountKey,
   WorkspaceChatApi,
 } from "./workspace-chat-api.js";
+import { WorkspaceChatSpaces } from "./workspace-chat-spaces.js";
 import { accettabile, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
 const logger = makeLogger("cerase-acp.workspace-chat");
@@ -346,6 +347,9 @@ function apiFor(app: ChatApp): WorkspaceChatApi {
 export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   let api: WorkspaceChatApi | undefined;
   const conversations = new Map<string, Conversation>();
+  // The space each person last wrote from, kept across restarts: a message no
+  // event opened cannot ask Google for it by email with a service account.
+  const spaces = new WorkspaceChatSpaces(process.env.CERASE_ACP_STATE_DIR);
 
   async function runTurn(event: ChatEvent, userId: string, conversation: Conversation): Promise<void> {
     const text = event.message?.text ?? "";
@@ -377,6 +381,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     // so the conversation set on the line before is the one this reply uses,
     // even when another message from the same person arrives while it runs.
     conversations.set(userId, conversation);
+    spaces.remember(userId, conversation.space);
     await dispatcher.handleMessage(agent.id, userId, outText);
   }
 
@@ -433,10 +438,10 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           if (!api) {
             throw new Error(`workspace-chat adapter for agent "${agent.id}" is not started, refusing to send`);
           }
-          // No event from this person since start: a scheduled message, or a
-          // reply after a restart. Their direct-message space with the app is
-          // asked of Google.
-          space ??= await api.findDirectMessage(userId);
+          // No event from this person in this turn: a scheduled message, or a
+          // reply after a restart. The space they last wrote from is used, and
+          // Google is asked only for someone who never wrote.
+          space ??= spaces.known(userId) ?? (await api.findDirectMessage(userId));
           await api.createMessage(space, chunk, thread);
           return { ok: true };
         } catch (err) {

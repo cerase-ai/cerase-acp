@@ -76,7 +76,11 @@ ENV CERASE_ACP_LOG_LEVEL=info
 # as root in production. Reads agents.yaml read-only via the
 # host-side bind mount; doesn't need root for anything else.
 # Re-take ownership of /app so any future writable subdir works.
-RUN chown -R node:node /app
+# Where the bridge keeps what must outlive a restart (the Chat space each
+# person last wrote from). Created here so a named volume mounted on it starts
+# owned by the user the bridge runs as.
+RUN mkdir -p /var/lib/cerase-acp/state && chown -R node:node /app /var/lib/cerase-acp
+ENV CERASE_ACP_STATE_DIR=/var/lib/cerase-acp/state
 USER node
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
