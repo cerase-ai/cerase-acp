@@ -44,6 +44,7 @@ import {
   readServiceAccountKey,
   WorkspaceChatApi,
 } from "./workspace-chat-api.js";
+import { toChatText } from "./workspace-chat-format.js";
 import { WorkspaceChatSpaces } from "./workspace-chat-spaces.js";
 import { accettabile, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
@@ -442,7 +443,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           // reply after a restart. The space they last wrote from is used, and
           // Google is asked only for someone who never wrote.
           space ??= spaces.known(userId) ?? (await api.findDirectMessage(userId));
-          await api.createMessage(space, chunk, thread);
+          await api.createMessage(space, toChatText(chunk), thread);
           return { ok: true };
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));

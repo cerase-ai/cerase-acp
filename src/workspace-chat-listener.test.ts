@@ -426,6 +426,14 @@ describe("workspace-chat: one Chat app for the organisation", () => {
       ["spaces/dm-Anna-Bianchi-example-com", "Promemoria.", undefined],
     ]);
   });
+
+  it("a reply written in Markdown is posted in Chat's own markup", async () => {
+    const result = await adapters.get("agent-2")!.makeSendTarget("Anna.Bianchi@example.com")(
+      "La nota **non** è stata creata.",
+    );
+    expect(result).toEqual({ ok: true });
+    expect(google.posts.map((p) => p.text)).toEqual(["La nota *non* è stata creata."]);
+  });
 });
 
 // The appliance's proxy forwards /chat/ to the bridge whether or not anybody
