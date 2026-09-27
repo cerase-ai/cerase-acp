@@ -648,6 +648,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       internalSecret: acpInjectSecret,
       port: Number(process.env.CERASE_ACP_INTERNAL_PORT ?? "7476"),
       getAgentStatus,
+      getSessionLimits: () => sessionManager.sessionLimits(),
       // Gate inject on the agent's allowlist (unknown agent → reject).
       isAllowed: (agentId, userId) => {
         try {
@@ -780,6 +781,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // Before the diff, which compares agents only: an app added or removed
       // with no assistant on the channel changes no agent at all.
       void serveChatApp(nextConfig.workspace_chat);
+      // Same reason: a change to the session limits alone changes no agent,
+      // and the early return below would drop it.
+      sessionManager.applySession(nextConfig.session);
       const diff = diffConfigs(currentSnapshot, nextConfig);
       if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
         return;

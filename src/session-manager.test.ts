@@ -657,6 +657,31 @@ describe("per-turn watchdog (M-ACP-2)", () => {
     }
   }, 20_000);
 
+  // A release that leaves the bridge image unchanged never restarts it, so a
+  // limit read only at boot is a limit a reload can never change, and a turn
+  // waiting on an approval dies at the old silence limit.
+  it("applies a reloaded silence limit to a turn already waiting", async () => {
+    const cfg = makeConfig({ chunks: 1, delayMsPerChunk: 1800, reply: "ok" }) as unknown as BridgeConfig;
+    cfg.session = { ...cfg.session, turn_silence_seconds: 1 };
+    const m = new SessionManager(cfg);
+    try {
+      const turn = m.prompt("doc-qa", "111", "ciao");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      m.applySession({ ...cfg.session, turn_silence_seconds: 5 });
+      expect(await turn).toMatchObject({ stopReason: "end_turn" });
+      expect(m.sessionLimits().turn_silence_seconds).toBe(5);
+    } finally {
+      await m.shutdown();
+    }
+  }, 20_000);
+
+  it("keeps a limit a caller passed explicitly when the file is reloaded", () => {
+    const cfg = makeConfig() as unknown as BridgeConfig;
+    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
+    m.applySession({ ...cfg.session, turn_silence_seconds: 5 });
+    expect(m.sessionLimits().turn_silence_seconds).toBe(0.3);
+  });
+
   it("ends a turn that passes its ceiling, and says which limit it hit", async () => {
     const cfg = makeConfig({ chunks: 40, delayMsPerChunk: 80, reply: "x".repeat(40) }) as unknown as BridgeConfig;
     const m = new SessionManager(cfg, undefined, { turnSilenceMs: 60_000, turnCeilingMs: 400 });

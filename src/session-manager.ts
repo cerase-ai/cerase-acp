@@ -231,12 +231,53 @@ export class SessionManager {
     // The file's value, then the default, and options override both because
     // only tests pass them. A mail assistant and one carrying a project do not
     // want the same ceiling, which is why the file gets to say.
+    this.silencePinned = options?.turnSilenceMs !== undefined;
+    this.ceilingPinned = options?.turnCeilingMs !== undefined;
     this.turnSilenceMs = options?.turnSilenceMs ?? (config.session.turn_silence_seconds ?? 180) * 1000;
     this.turnCeilingMs = options?.turnCeilingMs ?? (config.session.turn_ceiling_minutes ?? 45) * 60 * 1000;
   }
 
   private turnSilenceMs: number;
   private turnCeilingMs: number;
+  // A limit a caller passed explicitly is not the file's to change: only
+  // tests pass one, and a reload must not undo the value a test pinned.
+  private readonly silencePinned: boolean;
+  private readonly ceilingPinned: boolean;
+
+  /**
+   * Take a reloaded `session` block without a restart.
+   *
+   * The control-plane rewrites agents.yaml and the bridge reloads it, but a
+   * release that leaves the bridge image unchanged never recreates the
+   * container, so a limit read only at boot is one a reload can never change:
+   * a turn waiting on an approval longer than the boot-time silence limit is
+   * killed before the approval can expire.
+   *
+   * The watchdog of a turn in flight reads these fields on every tick, so a
+   * turn already waiting runs under the new limit from the next tick on.
+   */
+  applySession(session: BridgeConfig["session"]): void {
+    this.config.session = session;
+    this.idleMs = session.idle_timeout_minutes * 60 * 1000;
+    this.maxConcurrent = session.max_concurrent;
+    if (!this.silencePinned) this.turnSilenceMs = (session.turn_silence_seconds ?? 180) * 1000;
+    if (!this.ceilingPinned) this.turnCeilingMs = (session.turn_ceiling_minutes ?? 45) * 60 * 1000;
+  }
+
+  /** The limits the running bridge enforces, as `agents.yaml` spells them. */
+  sessionLimits(): {
+    idle_timeout_minutes: number;
+    max_concurrent: number;
+    turn_silence_seconds: number;
+    turn_ceiling_minutes: number;
+  } {
+    return {
+      idle_timeout_minutes: this.idleMs / 60_000,
+      max_concurrent: this.maxConcurrent,
+      turn_silence_seconds: this.turnSilenceMs / 1000,
+      turn_ceiling_minutes: this.turnCeilingMs / 60_000,
+    };
+  }
 
   activeSessionCount(): number {
     return this.entries.size;

@@ -169,6 +169,13 @@ export interface InternalServerOptions {
    */
   getAgentStatus?: () => AgentLiveness[];
   /**
+   * The session limits the running bridge enforces, served as the additive
+   * `session` block of `GET /internal/status`. What the file says and what the
+   * process runs under came apart once, and nothing could tell them apart
+   * from outside the container.
+   */
+  getSessionLimits?: () => Record<string, number>;
+  /**
    * Gate the inject endpoint on the agent's allowlist.
    * Without it, an internal-secret holder could deliver arbitrary text to
    * ANY user_id on ANY agent's channel (the model-turn path checks the
@@ -334,7 +341,11 @@ async function handleRequest(
     const agents = opts.getAgentStatus ? opts.getAgentStatus() : [];
     // Additive `inject` block — the control-plane's
     // BridgeStatusClient reads only `agents`, so this is back-compatible.
-    sendJson(res, 200, { agents, inject: injects.snapshot() });
+    sendJson(res, 200, {
+      agents,
+      inject: injects.snapshot(),
+      ...(opts.getSessionLimits ? { session: opts.getSessionLimits() } : {}),
+    });
     return;
   }
 

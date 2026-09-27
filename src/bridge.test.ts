@@ -540,6 +540,52 @@ describe("runBridge", () => {
     }
   });
 
+  // The session block reaches the running bridge on a reload, and the status
+  // endpoint says which limits it is running under. Only the session block
+  // changes here, so no agent is added, removed or modified and the agent diff
+  // alone would have applied nothing.
+  it("a reload that changes only the session limits reaches the running bridge", async () => {
+    const SECRET = "session-reload-secret";
+    const yaml = (silence: number) => `
+agents:
+  - id: solo
+    bot_token: tok-1
+    allowed_users: ["111"]
+    spawn:
+      command: "true"
+      args: []
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+  turn_silence_seconds: ${silence}
+`;
+    const dir = mkdtempSync(join(tmpdir(), "bridge-session-reload-"));
+    const cfgPath = join(dir, "agents.yaml");
+    writeFileSync(cfgPath, yaml(180));
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    try {
+      handle = await runBridge({
+        config: loadConfig(cfgPath, process.env),
+        bridgeE2eTest: false,
+        configPath: cfgPath,
+        createAdapter: async (agent, d) => makeFakeAdapter(agent, d, "ok"),
+      });
+      const silence = async () => {
+        const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        const body = (await res.json()) as { session?: { turn_silence_seconds?: number } };
+        return body.session?.turn_silence_seconds;
+      };
+      expect(await silence()).toBe(180);
+      writeFileSync(cfgPath, yaml(360));
+      await vi.waitFor(async () => expect(await silence()).toBe(360), { timeout: 8000, interval: 25 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // A config reload respawns an adapter and starts it. A start() that failed
   // there was logged and then left alone: no retry, and the boot path's
   // supervisor never heard about it. An operator who corrected a token while
