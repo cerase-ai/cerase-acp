@@ -382,6 +382,12 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
 
   return {
     agentId: agent.id,
+    // Ready while the webhook is serving this assistant: its route registered
+    // and the listener bound. Without it the bridge reported nothing, and the
+    // console read nothing as «never ready» and failed the machine's release.
+    ready() {
+      return ROUTES.has(agent.id) && api !== undefined && sharedServer?.listening === true;
+    },
     async start() {
       const app = organisationApp(agent);
       // Read once here so a key the process cannot read downs this channel at
