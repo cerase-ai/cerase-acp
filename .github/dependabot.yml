@@ -19,6 +19,19 @@ updates:
     groups:
       docker:
         patterns: ["*"]
+    # php and python publish their next minor as alpha, beta and rc tags first,
+    # and Dependabot proposes them as a minor bump: php 8.6.0beta3 reached
+    # cerase-dash that way on 2026-09-26 and every machine stopped reading the
+    # console. A runtime's minor or major is an upgrade made on purpose; patches
+    # still arrive. node publishes no pre-release image tags, so only its majors
+    # wait.
+    ignore:
+      - dependency-name: php
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: monthly }

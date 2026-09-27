@@ -79,6 +79,34 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ⚠️ A pre-release is never merged, whatever its update type says. On
+      # 2026-09-26 `cerase-dash` took `php` 8.5.10 → 8.6.0beta3 as a «semver-minor»
+      # and this workflow merged it: PHP 8.6 printed a deprecation into every
+      # response, and no machine in the fleet could read the console for a day.
+      # So the versions themselves are read, every one in a group, and the merge
+      # needs `stable == 'yes'` — the answer this step gives only when every new
+      # version was read and none carries an alpha, beta, rc, dev or preview mark.
+      - name: Is any new version a pre-release
+        id: pre
+        run: |
+          set -uo pipefail
+          versions="$(jq -r '.[]?.newVersion // empty' <<< "${DEPS_JSON:-[]}" 2>/dev/null || true)"
+          [ -n "$versions" ] || versions="${NEW_VERSION:-}"
+          if [ -z "$versions" ]; then
+            echo "stable=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          marked="$(grep -Ei '(alpha|beta|preview|snapshot|[0-9]rc[0-9]*([^a-z]|$)|[.-]rc([^a-z]|$)|[.-]dev[0-9]*([^a-z]|$))' <<< "$versions" | tr '\n' ' ' || true)"
+          if [ -n "$marked" ]; then
+            echo "stable=no" >> "$GITHUB_OUTPUT"
+            echo "prerelease=${marked% }" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=yes" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          DEPS_JSON: ${{ steps.meta.outputs.updated-dependencies-json }}
+          NEW_VERSION: ${{ steps.meta.outputs.new-version }}
+
       # The merge waits for every other workflow run on the pull request's head
       # commit to finish, and merges only when each one succeeded.
       #
@@ -92,8 +120,9 @@ jobs:
       # required check a repository has.
       - name: Wait for this commit's other runs, then merge
         if: >-
+          steps.pre.outputs.stable == 'yes' && (
           steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-          steps.meta.outputs.update-type == 'version-update:semver-minor'
+          steps.meta.outputs.update-type == 'version-update:semver-minor')
         run: |
           set -uo pipefail
           poll="${CERASE_AUTO_MERGE_POLL_SECONDS:-30}"
@@ -161,11 +190,16 @@ jobs:
       # dependencies in it.
       - name: Say why it was left alone
         if: >-
+          steps.pre.outputs.stable != 'yes' || (
           steps.meta.outputs.update-type != 'version-update:semver-patch' &&
-          steps.meta.outputs.update-type != 'version-update:semver-minor'
+          steps.meta.outputs.update-type != 'version-update:semver-minor')
         run: |
           set -uo pipefail
-          if [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
+          if [ "$STABLE" = "no" ]; then
+            motivo="it moves to a pre-release (\`${PRERELEASE}\`). A beta is not a release, and on 2026-09-26 one merged as a minor stopped every machine reading the console."
+          elif [ "$STABLE" != "yes" ]; then
+            motivo="the new versions could not be read, so nothing here can tell whether one is a pre-release."
+          elif [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
             motivo='a major is not auto-merged. A major is an API change wearing a version number, and it belongs to whoever has to fix what it breaks.'
           else
             motivo="this PR reports no single update type (\`${UPDATE_TYPE:-empty}\`, group \`${GROUP:-none}\`), so nothing here can tell whether it contains a major. On 2026-09-08 a group in exactly this shape carried two majors, was auto-merged, and stopped this repo publishing any image for a day."
@@ -176,4 +210,6 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           GROUP: ${{ steps.meta.outputs.dependency-group }}
+          STABLE: ${{ steps.pre.outputs.stable }}
+          PRERELEASE: ${{ steps.pre.outputs.prerelease }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
