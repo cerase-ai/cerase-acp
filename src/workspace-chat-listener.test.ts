@@ -8,7 +8,7 @@
 // Google's certificates, token endpoint and Chat API are fakes on loopback.
 
 import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -568,5 +568,212 @@ describe("workspace-chat: the listener follows the assistants", () => {
     } finally {
       await other.close();
     }
+  });
+});
+
+// One person with two assistants: two Chat apps, each with its own direct
+// message with them. The space an out-of-turn message goes to has to be the one
+// of the app that posts it; the other app's is refused as not a member.
+describe("workspace-chat: one person, two assistants, two direct-message spaces", () => {
+  const MARIO = "mario.rossi@example.com";
+  let google: FakeGoogle;
+  let dir: string;
+  let stateDir: string;
+  let accountA: ReturnType<typeof makeServiceAccount>;
+  let accountB: ReturnType<typeof makeServiceAccount>;
+  let agents: AgentConfig[];
+  let dispatcher: Dispatcher;
+  const adapters = new Map<string, ChatAdapter>();
+  const previousStateDir = process.env.CERASE_ACP_STATE_DIR;
+
+  async function startAll() {
+    for (const a of agents) {
+      const adapter = await createChatAdapter(a, dispatcher);
+      await adapter.start();
+      adapters.set(a.id, adapter);
+    }
+  }
+
+  /** What the bridge's restart does to the adapters: everything in memory is gone. */
+  async function restart() {
+    for (const a of adapters.values()) await a.stop();
+    adapters.clear();
+    await startAll();
+  }
+
+  const send = (agentId: string, text: string) => adapters.get(agentId)!.makeSendTarget(MARIO)(text);
+
+  /** Which service account's token a post was made with. */
+  const signer = (authorization: string | undefined) => {
+    const n = Number(/access-token-(\d+)$/.exec(authorization ?? "")?.[1]);
+    return google.assertions[n - 1]?.iss;
+  };
+
+  const stateFile = () => join(stateDir, "workspace-chat-spaces.json");
+
+  beforeEach(async () => {
+    logs.length = 0;
+    google = await startFakeGoogle();
+    google.publishCertificates({ [KID]: SIGNER_PEM });
+    accountA = makeServiceAccount("guido@project-one.iam.gserviceaccount.com");
+    accountB = makeServiceAccount("enrico@project-two.iam.gserviceaccount.com");
+    google.trust(accountA);
+    google.trust(accountB);
+    dir = mkdtempSync(join(tmpdir(), "wc-two-apps-"));
+    stateDir = join(dir, "state");
+    process.env.CERASE_ACP_STATE_DIR = stateDir;
+    const appA = {
+      project_number: PROJECT,
+      credentials_path: join(dir, "agent-1.json"),
+      certificates_url: google.certificatesUrl,
+      api_root: google.apiRoot,
+    };
+    const appB = { ...appA, project_number: PROJECT_2, credentials_path: join(dir, "agent-2.json") };
+    writeKeyFile(appA.credentials_path, accountA, google.tokenUri);
+    writeKeyFile(appB.credentials_path, accountB, google.tokenUri);
+    svuotaCache();
+
+    agents = [agent("agent-1", MARIO, appA), agent("agent-2", MARIO, appB)];
+    const config: BridgeConfig = { agents, session: { idle_timeout_minutes: 60, max_concurrent: 16 } };
+    const sessionManager = {
+      prompt: async (_agentId: string, _userId: string, _text: string, onUpdate?: (u: unknown) => void) => {
+        onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Ricevuto." } });
+        return { stopReason: "end_turn" };
+      },
+    } as unknown as SessionManager;
+    dispatcher = new Dispatcher({
+      config,
+      sessionManager,
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: (agentId, userId) => adapters.get(agentId)!.makeSendTarget(userId),
+    });
+    await startAll();
+  });
+
+  afterEach(async () => {
+    for (const a of adapters.values()) await a.stop();
+    adapters.clear();
+    await google.close();
+    svuotaCache();
+    rmSync(dir, { recursive: true, force: true });
+    if (previousStateDir === undefined) delete process.env.CERASE_ACP_STATE_DIR;
+    else process.env.CERASE_ACP_STATE_DIR = previousStateDir;
+  });
+
+  async function writeTo(project: string, space: string) {
+    const resp = await fetch(`http://127.0.0.1:${workspaceChatListenerPort()}/chat/event`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: chatJwt(project) },
+      body: JSON.stringify(chatEvent({ space })),
+    });
+    expect(resp.status).toBe(200);
+  }
+
+  // The defect as it was met: both apps recorded their space under the person
+  // alone, the file kept the second, and after a restart the first app's
+  // every out-of-turn message was refused in the second app's space.
+  it("each app posts in its own space after a restart", async () => {
+    google.directMessages(accountA, ["spaces/DM-A"]);
+    google.directMessages(accountB, ["spaces/DM-B"]);
+    await writeTo(PROJECT, "spaces/DM-A");
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    await writeTo(PROJECT_2, "spaces/DM-B");
+    await vi.waitFor(() => expect(google.posts).toHaveLength(2));
+
+    await restart();
+    expect(await send("agent-1", "Promemoria uno.")).toEqual({ ok: true });
+    expect(await send("agent-2", "Promemoria due.")).toEqual({ ok: true });
+
+    expect(google.posts.slice(2).map((p) => [p.space, p.text, signer(p.authorization)])).toEqual([
+      ["spaces/DM-A", "Promemoria uno.", accountA.clientEmail],
+      ["spaces/DM-B", "Promemoria due.", accountB.clientEmail],
+    ]);
+    expect(google.refusedPosts).toEqual([]);
+    // Both were known from the file: nothing had to be looked up.
+    expect(google.spaceLists).toEqual([]);
+    expect(google.dmLookups).toEqual([]);
+  });
+
+  it("does not use a file in the earlier per-person shape", async () => {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(stateFile(), JSON.stringify({ [MARIO]: "spaces/DM-B" }));
+    google.directMessages(accountA, ["spaces/DM-A"]);
+    google.directMessages(accountB, ["spaces/DM-B"]);
+    await restart();
+
+    expect(await send("agent-1", "Promemoria.")).toEqual({ ok: true });
+    expect(google.attemptedPosts.map((p) => p.space)).toEqual(["spaces/DM-A"]);
+    expect(JSON.parse(readFileSync(stateFile(), "utf8"))).toEqual({
+      by_app: { [PROJECT]: { [MARIO]: "spaces/DM-A" } },
+    });
+  });
+
+  // An app that belongs to one person is normally in one direct message, the
+  // one with that person, and listing it is allowed with app authentication.
+  it("uses and remembers the only direct-message space the app is in", async () => {
+    google.directMessages(accountA, ["spaces/DM-A"]);
+    expect(await send("agent-1", "Promemoria.")).toEqual({ ok: true });
+    expect(google.posts.map((p) => [p.space, signer(p.authorization)])).toEqual([
+      ["spaces/DM-A", accountA.clientEmail],
+    ]);
+    expect(google.spaceLists).toEqual([accountA.clientEmail]);
+    expect(google.dmLookups).toEqual([]);
+
+    await restart();
+    expect(await send("agent-1", "Ancora.")).toEqual({ ok: true });
+    expect(google.posts.map((p) => p.space)).toEqual(["spaces/DM-A", "spaces/DM-A"]);
+    expect(google.spaceLists).toHaveLength(1);
+  });
+
+  // Several direct messages means people other than the owner have written to
+  // the app too. Picking one could deliver the owner's message to one of them.
+  it("does not choose among several direct-message spaces", async () => {
+    google.directMessages(accountA, ["spaces/DM-A", "spaces/DM-SOMEONE-ELSE"]);
+    await send("agent-1", "Promemoria.");
+    expect(google.attemptedPosts.map((p) => p.space)).not.toContain("spaces/DM-A");
+    expect(google.attemptedPosts.map((p) => p.space)).not.toContain("spaces/DM-SOMEONE-ELSE");
+    // What happened before: the lookup by email, which real Google refuses to
+    // a service account and this fake answers.
+    expect(google.dmLookups).toEqual([`users/${MARIO}`]);
+    await restart();
+    await send("agent-1", "Ancora.");
+    expect(google.spaceLists).toHaveLength(2);
+  });
+
+  it("drops a stored space the app is not in, finds its own, and posts there once more", async () => {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(stateFile(), JSON.stringify({ by_app: { [PROJECT]: { [MARIO]: "spaces/DM-B" } } }));
+    google.directMessages(accountA, ["spaces/DM-A"]);
+    google.directMessages(accountB, ["spaces/DM-B"]);
+    await restart();
+    logs.length = 0;
+
+    expect(await send("agent-1", "Promemoria.")).toEqual({ ok: true });
+    expect(google.attemptedPosts.map((p) => p.space)).toEqual(["spaces/DM-B", "spaces/DM-A"]);
+    expect(google.posts.map((p) => [p.space, p.text])).toEqual([["spaces/DM-A", "Promemoria."]]);
+    expect(JSON.parse(readFileSync(stateFile(), "utf8"))).toEqual({
+      by_app: { [PROJECT]: { [MARIO]: "spaces/DM-A" } },
+    });
+    const warned = logs.filter((l) => l.level === "warn" && l.name === "cerase-acp.workspace-chat");
+    expect(warned).toHaveLength(1);
+    expect(warned[0]!.fields).toMatchObject({ agentId: "agent-1", stored: "spaces/DM-B", replacement: "spaces/DM-A" });
+  });
+
+  it("reports a second refusal instead of trying again", async () => {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(stateFile(), JSON.stringify({ by_app: { [PROJECT]: { [MARIO]: "spaces/DM-B" } } }));
+    google.directMessages(accountA, ["spaces/DM-A"]);
+    await restart();
+    const refused = {
+      error: { code: 403, message: "This Chat app is not a member of this space.", status: "PERMISSION_DENIED" },
+    };
+    google.failNextPost(403, refused);
+    google.failNextPost(403, refused);
+    google.failNextPost(403, refused);
+
+    const result = await send("agent-1", "Promemoria.");
+    expect(result.ok).toBe(false);
+    expect(google.attemptedPosts.map((p) => p.space)).toEqual(["spaces/DM-B", "spaces/DM-A"]);
+    expect(google.posts).toEqual([]);
   });
 });

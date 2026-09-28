@@ -1,6 +1,7 @@
 // The calls the Workspace Chat adapter makes to Google with the tenant's own
 // service account: exchanging the key for an access token, posting a reply,
-// finding a user's direct-message space, downloading an upload.
+// finding a user's direct-message space, listing the app's direct messages,
+// downloading an upload.
 //
 // Everything runs against fake Google endpoints on loopback. The token
 // endpoint verifies the assertion's signature and claims, so a signer that
@@ -181,6 +182,17 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
   it("finds the direct-message space of a user by email", async () => {
     expect(await api().findDirectMessage("mario.rossi@example.com")).toBe("spaces/dm-mario-rossi-example-com");
     expect(google.dmLookups).toEqual(["users/mario.rossi@example.com"]);
+  });
+
+  // Allowed under app authentication, unlike the lookup by email above: the
+  // app lists the direct messages it is in, and says when there are more.
+  it("lists the app's direct-message spaces, a page at a time", async () => {
+    expect(await api().listDirectMessageSpaces()).toEqual({ spaces: [], more: false });
+    google.directMessages(account, ["spaces/AAAA"]);
+    expect(await api().listDirectMessageSpaces()).toEqual({ spaces: ["spaces/AAAA"], more: false });
+    google.directMessages(account, ["spaces/AAAA", "spaces/BBBB", "spaces/CCCC"]);
+    expect(await api().listDirectMessageSpaces()).toEqual({ spaces: ["spaces/AAAA", "spaces/BBBB"], more: true });
+    expect(google.spaceLists).toEqual([account.clientEmail, account.clientEmail, account.clientEmail]);
   });
 
   it("downloads an uploaded attachment's bytes", async () => {

@@ -74,7 +74,20 @@ export interface FakeGoogle {
   /** Every call to the token endpoint, accepted or not. */
   tokenRequests(): number;
   posts: PostedMessage[];
+  /** Every authorised post, whatever it was answered. */
+  attemptedPosts: PostedMessage[];
+  /** Posts refused because the posting app is not a member of the space. */
+  refusedPosts: PostedMessage[];
   dmLookups: string[];
+  /** The service account behind every spaces.list call, in order. */
+  spaceLists: string[];
+  /**
+   * The direct-message spaces this account's app is a member of. A space given
+   * to any account is one the other apps are not members of: a post into it
+   * from them is refused as Google refuses it. Spaces given to nobody accept
+   * every app.
+   */
+  directMessages(account: ServiceAccount, spaces: string[]): void;
   /** Service accounts whose assertions the token endpoint accepts. */
   trust(account: ServiceAccount): void;
   /** Every access token issued so far stops being accepted by the Chat API. */
@@ -103,6 +116,9 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 export async function startFakeGoogle(): Promise<FakeGoogle> {
   const trusted = new Map<string, KeyObject>();
   const valid = new Set<string>();
+  // Which service account each access token was issued to.
+  const owners = new Map<string, string>();
+  const members = new Map<string, string[]>();
   const failures: { status: number; body: unknown }[] = [];
   let issued = 0;
   let tokenCalls = 0;
@@ -117,7 +133,11 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     assertions: [],
     tokenRequests: () => tokenCalls,
     posts: [],
+    attemptedPosts: [],
+    refusedPosts: [],
     dmLookups: [],
+    spaceLists: [],
+    directMessages: (account, spaces) => members.set(account.clientEmail, spaces),
     trust: (account) => trusted.set(account.clientEmail, account.publicKey),
     revokeIssuedTokens: () => valid.clear(),
     failNextPost: (status, body) => failures.push({ status, body }),
@@ -148,6 +168,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     issued += 1;
     const accessToken = `access-token-${issued}`;
     valid.add(accessToken);
+    owners.set(accessToken, String(payload.iss));
     return json(res, 200, { access_token: accessToken, expires_in: 3599, token_type: "Bearer" });
   };
 
@@ -155,6 +176,8 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? "");
     return m?.[1] !== undefined && valid.has(m[1]);
   };
+
+  const caller = (req: IncomingMessage) => owners.get(/^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "");
 
   const unauthenticated = (res: ServerResponse) =>
     json(res, 401, {
@@ -183,11 +206,34 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
           authorization: req.headers.authorization,
         };
         if (!authorised(req)) return unauthenticated(res);
+        fake.attemptedPosts.push(message);
         const failure = failures.shift();
         if (failure) return json(res, failure.status, failure.body);
+        const owned = [...members.values()].some((spaces) => spaces.includes(message.space));
+        if (owned && !(members.get(caller(req) ?? "") ?? []).includes(message.space)) {
+          fake.refusedPosts.push(message);
+          return json(res, 403, {
+            error: { code: 403, message: "This Chat app is not a member of this space.", status: "PERMISSION_DENIED" },
+          });
+        }
         fake.posts.push(message);
         fake.onPost?.(message);
         return json(res, 200, { name: `${post[1]}/messages/${fake.posts.length}` });
+      }
+
+      if (req.method === "GET" && url.pathname === "/v1/spaces") {
+        if (!authorised(req)) return unauthenticated(res);
+        if (url.searchParams.get("filter") !== 'spaceType = "DIRECT_MESSAGE"') {
+          return json(res, 400, { error: { code: 400, message: "invalid filter", status: "INVALID_ARGUMENT" } });
+        }
+        const who = caller(req) ?? "";
+        fake.spaceLists.push(who);
+        const all = members.get(who) ?? [];
+        const size = Number(url.searchParams.get("pageSize") ?? "100");
+        return json(res, 200, {
+          spaces: all.slice(0, size).map((name) => ({ name, spaceType: "DIRECT_MESSAGE", singleUserBotDm: true })),
+          ...(all.length > size ? { nextPageToken: "next" } : {}),
+        });
       }
 
       if (req.method === "GET" && url.pathname === "/v1/spaces:findDirectMessage") {

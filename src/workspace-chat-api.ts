@@ -1,6 +1,7 @@
 // The Google Chat REST calls the Workspace Chat adapter makes as the tenant's
-// Chat app: posting a reply, finding a user's direct-message space and
-// downloading an upload, each authorised with app authentication.
+// Chat app: posting a reply, finding a user's direct-message space, listing
+// the app's direct-message spaces and downloading an upload, each authorised
+// with app authentication.
 //
 // App authentication is the OAuth 2.0 service-account flow: a JWT naming the
 // service account, the chat.bot scope and the token endpoint, signed with the
@@ -173,6 +174,19 @@ export class WorkspaceChatApi {
       throw new ChatApiError(`spaces.findDirectMessage on ${user} returned no space name`, resp.status, undefined);
     }
     return space;
+  }
+
+  /**
+   * `spaces.list` filtered to direct messages: the direct-message spaces this
+   * app is a member of, at most `pageSize` of them, and whether Google has
+   * more. Allowed under app authentication, unlike findDirectMessage by email.
+   */
+  async listDirectMessageSpaces(pageSize = 2): Promise<{ spaces: string[]; more: boolean }> {
+    const query = new URLSearchParams({ filter: 'spaceType = "DIRECT_MESSAGE"', pageSize: String(pageSize) });
+    const resp = await this.call("spaces.list", "direct messages", `/v1/spaces?${query}`, { method: "GET" });
+    const body = (await resp.json()) as { spaces?: { name?: string }[]; nextPageToken?: string };
+    const spaces = (body.spaces ?? []).map((s) => s.name).filter((n): n is string => typeof n === "string" && n !== "");
+    return { spaces, more: typeof body.nextPageToken === "string" && body.nextPageToken !== "" };
   }
 
   /** `media.download`: the bytes of an uploaded attachment. */

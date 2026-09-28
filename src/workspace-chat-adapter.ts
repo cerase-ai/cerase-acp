@@ -300,12 +300,56 @@ function apiFor(app: ChatApp): WorkspaceChatApi {
   return api;
 }
 
+/**
+ * Whether a post was refused because the space is not this app's to post in:
+ * the app is not a member of it, or it does not exist. Any other refusal says
+ * nothing about the space.
+ */
+function wrongSpace(err: unknown): boolean {
+  if (!(err instanceof ChatApiError)) return false;
+  return err.httpStatus === 404 || (err.httpStatus === 403 && err.googleStatus === "PERMISSION_DENIED");
+}
+
 export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   let api: WorkspaceChatApi | undefined;
   const conversations = new Map<string, Conversation>();
-  // The space each person last wrote from, kept across restarts: a message no
-  // event opened cannot ask Google for it by email with a service account.
-  const spaces = new WorkspaceChatSpaces(process.env.CERASE_ACP_STATE_DIR);
+  // The space each person last wrote to this assistant's app from, kept across
+  // restarts: a message no event opened cannot ask Google for it by email with
+  // a service account. Made at start(), where the app is known.
+  let spaces: WorkspaceChatSpaces | undefined;
+
+  /**
+   * The person's direct-message space with this app, when no event and no
+   * stored entry says. Listing the app's direct messages is allowed under app
+   * authentication, and an app that belongs to one person usually has exactly
+   * one: that one is used and remembered. With none or several the lookup by
+   * email is tried as before, which Google refuses to a service account and
+   * the caller logs; a space picked among several could be somebody else's.
+   */
+  async function resolveSpace(chat: WorkspaceChatApi, store: WorkspaceChatSpaces, userId: string): Promise<string> {
+    try {
+      const listed = await chat.listDirectMessageSpaces();
+      const only = listed.spaces[0];
+      if (listed.spaces.length === 1 && !listed.more && only) {
+        store.remember(userId, only);
+        logger.info(
+          { agentId: agent.id, userId, space: only },
+          "workspace-chat direct-message space found as the only one this app is in",
+        );
+        return only;
+      }
+      logger.info(
+        { agentId: agent.id, userId, listed: listed.spaces.length, more: listed.more },
+        "workspace-chat app is not in exactly one direct-message space; not choosing among them",
+      );
+    } catch (err) {
+      logger.warn(
+        { agentId: agent.id, userId, reason: (err as Error).message },
+        "workspace-chat direct-message spaces could not be listed",
+      );
+    }
+    return chat.findDirectMessage(userId);
+  }
 
   async function runTurn(event: ChatEvent, userId: string, conversation: Conversation): Promise<void> {
     const text = event.message?.text ?? "";
@@ -337,7 +381,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     // so the conversation set on the line before is the one this reply uses,
     // even when another message from the same person arrives while it runs.
     conversations.set(userId, conversation);
-    spaces.remember(userId, conversation.space);
+    spaces?.remember(userId, conversation.space);
     await dispatcher.handleMessage(agent.id, userId, outText);
   }
 
@@ -355,6 +399,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       // start, with the path and the reason, instead of at the first reply.
       readServiceAccountKey(app.credentialsPath);
       api = apiFor(app);
+      spaces = new WorkspaceChatSpaces(process.env.CERASE_ACP_STATE_DIR, app.projectNumber);
       ROUTES.set(agent.id, {
         agent,
         app,
@@ -391,14 +436,38 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
         let space = conversation?.space;
         const thread = conversation?.thread;
         try {
-          if (!api) {
+          if (!api || !spaces) {
             throw new Error(`workspace-chat adapter for agent "${agent.id}" is not started, refusing to send`);
           }
+          const text = toChatText(chunk);
           // No event from this person in this turn: a scheduled message, or a
           // reply after a restart. The space they last wrote from is used, and
-          // Google is asked only for someone who never wrote.
-          space ??= spaces.known(userId) ?? (await api.findDirectMessage(userId));
-          await api.createMessage(space, toChatText(chunk), thread);
+          // one is looked for only for someone who never wrote.
+          if (space === undefined) {
+            const stored = spaces.known(userId);
+            if (stored === undefined) {
+              space = await resolveSpace(api, spaces, userId);
+            } else {
+              space = stored;
+              try {
+                await api.createMessage(stored, text, thread);
+                return { ok: true };
+              } catch (err) {
+                if (!wrongSpace(err)) throw err;
+                // A stored space this app cannot post in was recorded for
+                // another app, or has gone. It is dropped and looked for once
+                // more, and the message is posted once more below; a second
+                // refusal is reported, not retried.
+                spaces.forget(userId, stored);
+                space = await resolveSpace(api, spaces, userId);
+                logger.warn(
+                  { agentId: agent.id, userId, stored, replacement: space, reason: (err as Error).message },
+                  "workspace-chat stored direct-message space was wrong for this app; replaced and retried once",
+                );
+              }
+            }
+          }
+          await api.createMessage(space, text, thread);
           return { ok: true };
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
