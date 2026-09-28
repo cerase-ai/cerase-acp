@@ -11,8 +11,8 @@ cerase-core repo.
 
 Every milestone below is **code-complete with green suites** (vitest, tsc,
 biome). The only work that ever remained on the most recent milestones is
-operator-gated **LIVE verification** — that checklist lives in
-**[`v0.1.md`](v0.1.md)**, the active remainder file. Full prose detail for
+operator-gated **LIVE verification** — that checklist is closed and kept
+below, moved from **[`v0.1.md`](v0.1.md)** on 2026-09-28. Full prose detail for
 each milestone (design, scope, task lists, exit gates, disposability stances)
 is retained in git history.
 
@@ -50,6 +50,143 @@ is retained in git history.
 (There is no M20 — the numbering skips from M19 to M21.)
 
 Full prose detail for every milestone above is retained in git history.
+
+---
+
+## Operator-gated LIVE verification — moved from `v0.1.md`, 2026-09-28
+
+- [x] **M18 — Discord "is typing…" indicator. Observed by the operator 2026-08-21, and it is three of four.**
+  A DM to an assistant showed the indicator promptly and it persisted through the turn, so the appearance
+  and the 7-second refresh are confirmed on a real client — the half no suite can answer.
+  ⚠️ **The fourth point did not hold: it kept running for a few moments AFTER the reply had landed.**
+  The operator's words: *"ha quasi funzionato… in realtà ha aspettato qualche istante dopo che è arrivata
+  la risposta."* Clearing on reply is asserted in the suite, so the assertion and the client disagree —
+  which means the suite is asserting the call and not the effect, or the clear is issued after the send
+  rather than before it. Carried on as its own box below rather than left inside a ticked one.
+
+- [x] **M18b — the typing indicator outlives the reply.** Discord keeps the indicator up for ~10 s unless
+  it is cancelled, so "stop refreshing" and "clear" are not the same act and the suite may only be
+  covering the first. Find which of the two the bridge does, make it clear on the send rather than after
+  it, and assert the ORDER against the message send — an assertion that the clear eventually happens is
+  satisfied by the timeout that made this visible.
+
+  **The bridge did the first.** `stopTyping()` was `clearInterval`, called from the MessageCreate
+  `finally` — after `handleMessage` had returned, and therefore after the send. Discord has no call that
+  takes the indicator down, so the clear is the message itself and a refresh reaching Discord afterwards
+  puts it back up for another ~10 s.
+
+  **Decision.** The keepalive is ended by the turn's FIRST delivery: `TypingSessions.end(userId)` is
+  awaited immediately before `channel.send`, so a refresh already on the wire lands before the message
+  rather than after it, and it is not raised again for the rest of that turn — the send path cannot know
+  whether another chunk follows, and a refresh issued after what turns out to be the last one is the same
+  ghost by another route. The `finally` stays as the leak guard for a turn that delivers nothing. The
+  oversize-attachment notice moved ahead of the keepalive for the same reason: it is a message, and
+  raising the indicator in front of one we are about to send spends it immediately.
+
+  **Asserted as an order, not as an eventuality.** `typing-keepalive.test.ts` drives a fake DM channel
+  whose `sendTyping` and `send` write to one log: no refresh appears after the send even 60 s later, and a
+  refresh held on the wire is shown to land BEFORE the message — the case an unawaited stop gets wrong.
+  Both fail when the fix is removed. The adapter's use of that order is pinned by index in
+  `discord-adapter.test.ts`.
+
+- [x] **M21 — README onboarding & Discord setup guide.** **Audited 2026-08-10 by extracting from both
+  sides and comparing**, rather than by reading it through:
+
+  - **Commands and flags: correct.** Every `npm run` script the README names exists
+    (`build dev test test:watch lint lint:biome format start`), and every flag it shows is real.
+    `--remote` looked wrong at first — it is not in `src/cli.ts` — and it is right: it belongs to
+    `scripts/cerase-acp-cli`, the shell wrapper the README is invoking on that line. Measured before
+    reporting it, which is why it is not in the list below.
+  - **Environment variables: six were missing, now documented.** The code reads 13; the README named 7.
+    `CERASE_CONTROL_PLANE_URL` · `CERASE_INTERNAL_SECRET` · `CERASE_AGENT_WORKSPACE_ROOT` ·
+    `CERASE_MAX_ATTACHMENT_MB` · `WORKSPACE_CHAT_PORT` · `OPENCODE_SERVER_PASSWORD` were read with
+    defaults compiled in and explained nowhere. Added with their real defaults, read out of the source
+    lines that use them.
+  - ⚠️ **The one worth its own line: `CERASE_INTERNAL_SECRET` vs `CERASE_ACP_INTERNAL_SECRET`.** One is
+    the bearer the bridge PRESENTS to the control-plane, the other is the bearer it DEMANDS. Two
+    directions, two secrets, names one token apart — and only the second was documented. The table now
+    says which is which.
+  - `BRIDGE_E2E_TEST` is named as what it is: not an operational knob, and the daemon says *"never enable
+    in production"* when it is set.
+
+- [x] **M22 — Production bridge resilient to a single adapter start failure.**
+  **Verified live on guidance 2026-08-10.** The bridge has been up since 2026-08-04 — six days —
+  with `RestartCount=0`, so nothing is crash-looping. `/internal/status` answers with all three
+  adapters `attached:true`. And the half that had never been exercised: a **real inject** to the web
+  Manutentore returned **HTTP 202**, `inject.succeeded` went 0 → 1 with `failed:0`, and the assistant
+  replied — *"Ricevuto, Manutentore. Verifica M22 del 10 agosto … sono operativo."*
+
+  ⚠️ **The scenario in the original box no longer exists, and that is why it is worth writing down.** It
+  said *"with agent-1's Discord token still invalid"*; agent-1 is now a **web** channel, so it reports
+  `ready:null` — web adapters have no readiness — and the two Discord agents are both `ready:true`. There
+  is no failed adapter on the box to observe. The property itself is asserted where it can be:
+  `adapter-supervisor.test.ts` → *"isolates retries per adapter — one agent's failure does not touch
+  another"*, plus retry-after-backoff, exponential backoff, and cap-with-jitter.
+
+  ⚠️ **`/healthz` counts `ready`, and a web adapter is never `ready`.** It answered
+  `{"status":"ok","adapters":3,"ready":2}` on a completely healthy bridge, which reads as "one is down".
+  Nothing consumes that number today; it is a trap for whoever wires an alert to it first.
+
+- [x] **M23 — Auto-heal a failed adapter. Proven live on the local stack 2026-08-21.**
+  ⚠️ **Its gate was false.** The box said it needed *"the network to Discord cut and restored on a
+  production bridge two colleagues are using"* — nobody is using these machines, and it never needed
+  production: the local stack runs the same three adapters, two Discord and one web, which is the shape
+  guidance has. It was a laptop measurement all along.
+
+  **The measurement, and the first cut proved nothing.** Disconnecting `cerase_default` left the bridge
+  reaching Discord anyway — the container is on **two** networks and `cerase_slots` is not `internal`, so
+  egress survived. Six minutes of that were worthless until `fetch` to Discord from inside the container
+  was checked and answered 200. With both networks removed Discord was genuinely unreachable
+  (`TypeError`), and after five minutes the networks were restored.
+
+  **It healed, and the proof is not a flag.** All sockets die with the interfaces, so a connection that is
+  ESTABLISHED afterwards can only have been rebuilt: `/proc/net/tcp` in the container showed exactly one
+  outbound TLS connection, to `162.159.135.234:443`, which is one of `gateway.discord.gg`'s A records.
+  `RestartCount` was 0 before and after, so nothing restarted it. One connection for two Discord adapters
+  is the right number — `agent-10`'s token is terminal.
+
+  The retry-on-start path is separately confirmed on the same bridge: `agent-10` reports
+  `credential_rejected / TokenInvalid / bot_token` through `/internal/status`, naming the credential and
+  never its value, instead of the endless retry the previous image was running at attempt 26.
+
+- [x] **M23b — the bridge reported a healthy Discord adapter for five minutes while it had no network.**
+  Through the whole outage `/healthz` answered `ready:1` and `/internal/status` showed `agent-1`
+  `attached:true, ready:true`, and not one line was logged. The adapter recovered, so nothing was broken —
+  but an alert wired to `ready` would not have fired, and an operator reading either surface during the
+  outage would have been told the bridge was fine. `ready` is the client's cached state and not a probe.
+  Either it reflects reachability, or the surfaces stop presenting it as health. Same family as the
+  `readyOf` trap fixed above: what these endpoints mean has to survive somebody wiring an alert to them.
+
+  **Decision: the first branch — `ready` now means reachable.** Removing it from the surfaces would leave
+  the operator with less than M22 gave them, and `readyOf` set the shape: fix the number the alert is
+  wired to rather than add a field beside it that nobody reads. So a Discord adapter reports ready only
+  when discord.js says its socket is live AND Discord has answered inside the tolerance. The measurement
+  is `ReachabilityMonitor`: an unauthenticated `GET /gateway` every 60 s (`CERASE_ACP_REACHABILITY_INTERVAL_MS`),
+  plus every message the adapter sends or receives, and `ready` goes false once nothing has answered for
+  180 s (`CERASE_ACP_REACHABILITY_STALE_MS` — three missed probes, so one blip cannot flip it). The
+  measured outage would have been reported with two minutes still to run.
+
+  **Two things beside it, both from the same measurement.** The probe is unauthenticated on purpose: a
+  refused token is already reported as `credential_rejected` naming the value to fix, and letting it also
+  read as an outage would put one failure under two names. And `lastContactAgeMs` is published on
+  `/internal/status`, because "the client knows it dropped" and "the client believes a dead socket is
+  alive" need different answers from an operator — the second is the network's problem, not the library's.
+  The transition is logged in both directions, which is the other half of the defect: the outage produced
+  no line at all.
+
+  **Tests.** `reachability.test.ts` drives a provider that answers, refuses, or goes silent without ever
+  answering — the shape of the measured outage — and asserts the flip, the single announcement of each
+  transition, that a probe hanging for ever counts as silence, and that real traffic keeps a busy adapter
+  fresh. `bridge.test.ts` holds the client flag `true` and shows `/internal/status` going `ready:false`
+  with the age published and `/healthz` going 503, plus the non-vacuity case: an adapter that measures
+  nothing keeps the older meaning and a null age.
+
+- [x] **M24 — Truthful container healthcheck (`/healthz`).** **Measured on guidance 2026-08-10:**
+  `docker inspect cerase-acp` → `healthy`, `FailingStreak=0`, `RestartCount=0`, and the test it runs is
+  `node -e "fetch('http://localhost:'+PORT+'/healthz').then(r=>process.exit(r.ok?0:1))"` — it tracks the
+  internal server actually answering, not the process existing. The cerase-core half
+  (`M-ACP-HEALTHCHECK-1` compose `test:` rewire) is deployed: that command IS what the running container
+  carries.
 
 ---
 
