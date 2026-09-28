@@ -131,6 +131,7 @@ CLI). Env vars in the config use `${env:VAR_NAME}` substitution.
 | `spawn.command` | yes | — | Command to start one ACP child. Container: `docker`. Local: `opencode` or path to binary. |
 | `spawn.args` | yes | — | Args passed to `spawn.command`. Container: `[exec, -i, cerase-agent-<id>, opencode, acp]`. Local: `[acp]`. |
 | `cwd` | no | `/root/cerase/workspace` | Working directory passed to the ACP child via `session/new`. For local installs, point this at a real project directory. |
+| `model` | no | — | The `provider/model` pair the assistant runs on, e.g. `cerase-litellm/core`. A resumed session that comes back on any other model is set to this one before its first prompt; if the agent refuses, a new session is started instead. Absent, a resumed session keeps the model the agent restored. |
 
 ### Workspace Chat: one app per agent
 

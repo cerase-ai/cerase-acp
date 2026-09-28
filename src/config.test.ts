@@ -137,6 +137,56 @@ session:
     expect(cfg.agents[0]!.mode).toBe("probe");
   });
 
+  // The model a resumed session is set back to. Written by the control-plane,
+  // and optional: a file from before the key existed must go on loading, and
+  // it then leaves a resumed session on the model opencode restored.
+  it("leaves agent.model unset when absent", () => {
+    writeFileSync(path, VALID_YAML);
+    const cfg = loadConfig(path, {
+      DISCORD_BOT_TOKEN_DOC_QA: "tok-doc",
+      DISCORD_BOT_TOKEN_POLICY_QA: "tok-pol",
+    });
+    expect(cfg.agents[0]!.model).toBeUndefined();
+    expect(cfg.agents[1]!.model).toBeUndefined();
+  });
+
+  it("parses agent.model as the provider/model pair it names", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: doc-qa
+    bot_token: tok
+    allowed_users: []
+    model: cerase-litellm/core
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    const cfg = loadConfig(path, {});
+    expect(cfg.agents[0]!.model).toBe("cerase-litellm/core");
+  });
+
+  it("rejects an empty agent.model rather than setting a session to nothing", () => {
+    writeFileSync(
+      path,
+      `
+agents:
+  - id: doc-qa
+    bot_token: tok
+    allowed_users: []
+    model: ""
+    spawn: { command: docker, args: [] }
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`,
+    );
+    expect(() => loadConfig(path, {})).toThrow(/agents\.0\.model/);
+  });
+
   it("C2-0: accepts channel 'web' with NO credential fields (panel-only agent)", () => {
     writeFileSync(
       path,

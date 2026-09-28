@@ -26,6 +26,11 @@ function makeConfig(overrides?: {
   modesShape?: "config" | "modes";
   echoMode?: boolean;
   mode?: string;
+  model?: string;
+  defaultModel?: string;
+  loadedModel?: string;
+  setModelFails?: boolean;
+  echoModel?: boolean;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -41,6 +46,10 @@ function makeConfig(overrides?: {
   if (overrides?.modes !== undefined) env.push(`FAKE_MODES=${overrides.modes}`);
   if (overrides?.modesShape !== undefined) env.push(`FAKE_MODES_SHAPE=${overrides.modesShape}`);
   if (overrides?.echoMode) env.push("FAKE_ECHO_MODE=1");
+  if (overrides?.defaultModel !== undefined) env.push(`FAKE_MODEL=${overrides.defaultModel}`);
+  if (overrides?.loadedModel !== undefined) env.push(`FAKE_LOADED_MODEL=${overrides.loadedModel}`);
+  if (overrides?.setModelFails) env.push("FAKE_SET_MODEL_FAILS=1");
+  if (overrides?.echoModel) env.push("FAKE_ECHO_MODEL=1");
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -52,6 +61,7 @@ function makeConfig(overrides?: {
         allowed_users: ["111"],
         cwd: overrides?.cwd ?? "/home/agent/cerase/workspace",
         mode: overrides?.mode ?? CERASE_SESSION_MODE,
+        ...(overrides?.model !== undefined ? { model: overrides.model } : {}),
         spawn: { command: "env", args },
       },
     ],
@@ -607,6 +617,184 @@ describe("session mode", () => {
     expect(result.stopReason).toBe("end_turn");
     expect(chunks.join("")).toBe("senza modi");
     expect(mgr.sessionModeFailure("doc-qa")).toBeUndefined();
+  });
+});
+
+describe("the model a resumed session runs on", () => {
+  let mgr: SessionManager;
+  let spy: ReturnType<typeof vi.spyOn> | undefined;
+
+  afterEach(async () => {
+    spy?.mockRestore();
+    spy = undefined;
+    if (mgr) await mgr.shutdown();
+  });
+
+  const ASSISTANT_MODEL = "cerase-litellm/core";
+  const COMPACTION_MODEL = "cerase-litellm-compaction/core";
+
+  /** Record every config option the bridge sets, and let the call through. */
+  function recordConfigOptions(): acp.SetSessionConfigOptionRequest[] {
+    const asked: acp.SetSessionConfigOptionRequest[] = [];
+    const original = acp.ClientSideConnection.prototype.setSessionConfigOption;
+    spy = vi.spyOn(acp.ClientSideConnection.prototype, "setSessionConfigOption").mockImplementation(async function (
+      this: acp.ClientSideConnection,
+      params: acp.SetSessionConfigOptionRequest,
+    ) {
+      asked.push(params);
+      return original.call(this, params);
+    });
+    return asked;
+  }
+
+  /** One turn, answered with the model the fixture was on when it arrived. */
+  async function modelOfTurn(text: string): Promise<string> {
+    const chunks: string[] = [];
+    await mgr.prompt("doc-qa", "user-A", text, (update) => {
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        chunks.push(update.content.text);
+      }
+    });
+    return chunks.join("");
+  }
+
+  /** What the AGENTS.md watcher does to the slot, then wait for the exit. */
+  async function restartSlot(): Promise<void> {
+    mgr.killAgentSessions("doc-qa");
+    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+  }
+
+  // The defect as it was met: a compaction had stamped the session's last user
+  // message with its own route, so the load restored that route and every turn
+  // after the restart ran on it. The fixture answers with the model the turn
+  // ran on, so this asserts where the prompt went, not only that a call was
+  // made.
+  it("sets a resumed session back to the configured model before the first prompt", async () => {
+    mgr = new SessionManager(
+      makeConfig({
+        loadSession: true,
+        model: ASSISTANT_MODEL,
+        defaultModel: ASSISTANT_MODEL,
+        loadedModel: COMPACTION_MODEL,
+        echoModel: true,
+      }),
+    );
+    const asked = recordConfigOptions();
+    expect(await modelOfTurn("first")).toBe(ASSISTANT_MODEL);
+    // A new session starts on the slot's default and is left alone.
+    expect(asked).toEqual([]);
+    const before = mgr.currentSessionId("doc-qa", "user-A");
+
+    await restartSlot();
+
+    expect(await modelOfTurn("second")).toBe(ASSISTANT_MODEL);
+    expect(mgr.currentSessionId("doc-qa", "user-A")).toBe(before);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ sessionId: before, configId: "model", value: ASSISTANT_MODEL });
+  });
+
+  it("leaves a resumed session alone when it came back on the configured model", async () => {
+    mgr = new SessionManager(
+      makeConfig({ loadSession: true, model: ASSISTANT_MODEL, defaultModel: ASSISTANT_MODEL, echoModel: true }),
+    );
+    const asked = recordConfigOptions();
+    await modelOfTurn("first");
+    await restartSlot();
+
+    expect(await modelOfTurn("second")).toBe(ASSISTANT_MODEL);
+    expect(asked).toEqual([]);
+  });
+
+  // A load that says nothing about the model cannot be trusted to be on the
+  // right one, so the bridge sets it rather than assuming.
+  it("sets the model when the load does not report one", async () => {
+    mgr = new SessionManager(makeConfig({ loadSession: true, model: ASSISTANT_MODEL, echoModel: true }));
+    const asked = recordConfigOptions();
+    await modelOfTurn("first");
+    await restartSlot();
+
+    expect(await modelOfTurn("second")).toBe(ASSISTANT_MODEL);
+    expect(asked.map((a) => a.configId)).toEqual(["model"]);
+  });
+
+  // Running on the wrong model is the defect, so a session that refuses to be
+  // put back is not resumed at all: the conversation starts over on a new
+  // session, which starts on the slot's default.
+  it("starts a new session when the resumed one refuses the model", async () => {
+    mgr = new SessionManager(
+      makeConfig({
+        loadSession: true,
+        model: ASSISTANT_MODEL,
+        defaultModel: ASSISTANT_MODEL,
+        loadedModel: COMPACTION_MODEL,
+        setModelFails: true,
+        echoModel: true,
+      }),
+    );
+    const asked = recordConfigOptions();
+    await modelOfTurn("first");
+    const before = mgr.currentSessionId("doc-qa", "user-A");
+    await restartSlot();
+
+    expect(await modelOfTurn("second")).toBe(ASSISTANT_MODEL);
+    expect(asked.map((a) => a.configId)).toEqual(["model"]);
+    const after = mgr.currentSessionId("doc-qa", "user-A");
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+
+    // The refused id is forgotten, not retried: the next restart loads the
+    // new session rather than the one that would not move.
+    const loaded: string[] = [];
+    const originalLoad = acp.ClientSideConnection.prototype.loadSession;
+    const loadSpy = vi.spyOn(acp.ClientSideConnection.prototype, "loadSession").mockImplementation(async function (
+      this: acp.ClientSideConnection,
+      params: acp.LoadSessionRequest,
+    ) {
+      loaded.push(params.sessionId);
+      return originalLoad.call(this, params);
+    });
+    try {
+      await restartSlot();
+      await modelOfTurn("third");
+      expect(loaded).toEqual([after]);
+    } finally {
+      loadSpy.mockRestore();
+    }
+  });
+
+  // An agents.yaml written before the field existed. The bridge has nothing
+  // to set the session back to, and it asks for nothing.
+  it("does not touch the model when the configuration names none", async () => {
+    mgr = new SessionManager(
+      makeConfig({ loadSession: true, defaultModel: ASSISTANT_MODEL, loadedModel: COMPACTION_MODEL, echoModel: true }),
+    );
+    const asked = recordConfigOptions();
+    await modelOfTurn("first");
+    await restartSlot();
+
+    expect(await modelOfTurn("second")).toBe(COMPACTION_MODEL);
+    expect(asked).toEqual([]);
+  });
+
+  // The model is set before the mode, and neither undoes the other: the turn
+  // runs on the configured model under the Cerase profile.
+  it("keeps selecting the session mode after setting the model", async () => {
+    mgr = new SessionManager(
+      makeConfig({
+        loadSession: true,
+        model: ASSISTANT_MODEL,
+        defaultModel: ASSISTANT_MODEL,
+        loadedModel: COMPACTION_MODEL,
+        modes: `build,${CERASE_SESSION_MODE}`,
+        echoMode: true,
+      }),
+    );
+    const asked = recordConfigOptions();
+    expect(await modelOfTurn("first")).toBe(CERASE_SESSION_MODE);
+    await restartSlot();
+
+    expect(await modelOfTurn("second")).toBe(CERASE_SESSION_MODE);
+    expect(asked.map((a) => a.configId)).toEqual(["model"]);
   });
 });
 

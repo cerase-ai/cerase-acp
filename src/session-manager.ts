@@ -178,6 +178,23 @@ interface SessionEntry {
 
 const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
 
+/**
+ * The model a `session/new` or `session/load` response says the session is on:
+ * the current value of its `model` config option, which opencode formats as
+ * `providerID/modelID`. `undefined` when the response carries no such option.
+ */
+function currentModelOf(res: { configOptions?: unknown } | undefined): string | undefined {
+  const options = res?.configOptions;
+  if (!Array.isArray(options)) return undefined;
+  for (const option of options) {
+    if (typeof option !== "object" || option === null) continue;
+    const { id, currentValue } = option as { id?: unknown; currentValue?: unknown };
+    if (id !== "model") continue;
+    return typeof currentValue === "string" && currentValue.length > 0 ? currentValue : undefined;
+  }
+  return undefined;
+}
+
 // How many dead sessions stay resumable. One short string per (agent,user)
 // that has ever talked, so the map would otherwise grow for the life of the
 // process; the oldest are dropped first and the only cost of dropping one is
@@ -832,6 +849,51 @@ export class SessionManager {
             { err: loadErr, agentId: agent.id, userId, sessionId: previousSessionId },
             "previous ACP session could not be loaded — starting a new one",
           );
+        }
+      }
+
+      // A loaded session does not come back on the assistant's model. opencode
+      // restores it from the session's LAST USER MESSAGE, uses it for every
+      // later prompt and stamps each new user message with it, so whatever
+      // route that message carried is the route the conversation runs on from
+      // then on. A background compaction once stamped one with its own route,
+      // reasoning switched off, and every later turn of that conversation ran
+      // there and wrote its reasoning into the answer the person received.
+      //
+      // So the model is set back before the first prompt, whenever the load
+      // reports anything other than the configured one, including nothing at
+      // all. A new session needs none of this: it starts on the slot's
+      // default, which is the assistant's model.
+      //
+      // A refused set means the session cannot be put back on the right model,
+      // and running it on the wrong one is the defect itself. It is forgotten
+      // like a session that failed to load, and the conversation starts over on
+      // a new session.
+      if (resumed && agent.model) {
+        const restored = currentModelOf(advertisement);
+        if (restored !== agent.model) {
+          try {
+            await connection.setSessionConfigOption({ sessionId: resumed, configId: "model", value: agent.model });
+            logger.info(
+              { agentId: agent.id, userId, sessionId: resumed, restored: restored ?? null, model: agent.model },
+              `the resumed session's model ${restored ?? "(not reported)"} was set back to ${agent.model}`,
+            );
+          } catch (modelErr) {
+            this.resumableSessions.delete(resumeKey);
+            logger.warn(
+              {
+                err: modelErr,
+                agentId: agent.id,
+                userId,
+                sessionId: resumed,
+                restored: restored ?? null,
+                model: agent.model,
+              },
+              "the resumed session's model could not be set back — starting a new session on the slot's default",
+            );
+            resumed = undefined;
+            advertisement = undefined;
+          }
         }
       }
 

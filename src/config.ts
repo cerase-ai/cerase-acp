@@ -102,6 +102,20 @@ const AgentSchema = z
     // the slot does offer in the message, exactly as an absent `cerase` already
     // was.
     mode: z.string().min(1).default(CERASE_SESSION_MODE),
+    // The model this assistant runs on, as the `provider/model` pair opencode
+    // names it (for example `cerase-litellm/core`), written by the
+    // control-plane.
+    //
+    // A new session starts on the slot's configured default and needs nothing
+    // from here. A RESUMED one does not: opencode restores a loaded session's
+    // model from its last user message and keeps it for every later prompt, and
+    // each new user message is stamped with it again. A session whose last user
+    // message carries some other route therefore stays on that route for good,
+    // and this is the value the bridge sets it back to after the load.
+    //
+    // Optional, so a file written without it keeps loading; without it a
+    // resumed session keeps the model opencode restored.
+    model: z.string().min(1).optional(),
     workspace_chat: WorkspaceChatAppSchema.optional(),
     spawn: z.object({
       command: z.string().min(1),

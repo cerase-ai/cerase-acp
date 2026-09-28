@@ -93,6 +93,19 @@ describe("diffConfigs", () => {
     expect(d.modified[0]!.classification).toBe("bot_token_or_spawn");
   });
 
+  // A live session keeps the model it had; only a resumed one is set to the
+  // configured model. Ending the sessions is what makes a changed model reach
+  // the next message, including the reload that first adds the key.
+  it("classifies a model change as `bot_token_or_spawn` (respawn-required)", () => {
+    const prev = cfg([baseAgent("a")]);
+    const next = cfg([baseAgent("a", { model: "cerase-litellm/core" })]);
+    const d = diffConfigs(prev, next);
+    expect(d.modified).toHaveLength(1);
+    expect(d.modified[0]!.classification).toBe("bot_token_or_spawn");
+    const changed = diffConfigs(next, cfg([baseAgent("a", { model: "cerase-litellm/pro" })]));
+    expect(changed.modified[0]!.classification).toBe("bot_token_or_spawn");
+  });
+
   it("classifies a mixed mutation (allowed_users + bot_token) as `mixed`", () => {
     const prev = cfg([baseAgent("a", { bot_token: "old", allowed_users: ["u-1"] })]);
     const next = cfg([baseAgent("a", { bot_token: "new", allowed_users: ["u-1", "u-2"] })]);

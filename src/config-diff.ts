@@ -9,8 +9,8 @@ import type { AgentConfig, BridgeConfig } from "./config.js";
  *                            in-place without restarting the Discord
  *                            adapter or killing ACP child processes.
  *  - `bot_token_or_spawn`  — bot_token, spawn.command, spawn.args, cwd,
- *                            mode or the organisation's Workspace Chat
- *                            app changed; the Discord adapter must be
+ *                            mode, model or the organisation's Workspace
+ *                            Chat app changed; the Discord adapter must be
  *                            torn down + recreated and the agent's
  *                            ACP children must be killed (workspace +
  *                            transcripts persist in named volumes, so
@@ -78,6 +78,11 @@ function classifyMutation(prev: AgentConfig, next: AgentConfig): ModifiedClassif
     // that did not respawn would take effect at some unpredictable later
     // moment — whenever that session happened to end.
     prev.mode !== next.mode ||
+    // The model is set when a session is resumed, and at no other moment: a
+    // live session goes on running on the model it had. Ending the sessions is
+    // what makes a changed model reach the next message rather than whichever
+    // one follows the session's eventual death.
+    prev.model !== next.model ||
     prev.spawn.command !== next.spawn.command ||
     !arraysEqual(prev.spawn.args, next.spawn.args) ||
     // The agent's own Chat app. An adapter verifies events against its

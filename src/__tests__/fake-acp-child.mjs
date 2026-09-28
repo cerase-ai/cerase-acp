@@ -49,6 +49,21 @@
 //                              test can see which profile the session ended
 //                              up under, which is the whole question a silent
 //                              downgrade hides.
+//   FAKE_MODEL              — the provider/model pair a NEW session starts
+//                              on, the slot's default. When set, session/new
+//                              and session/load carry a model select option
+//                              in configOptions, the way opencode does.
+//   FAKE_LOADED_MODEL       — the pair session/load restores. opencode takes
+//                              it from the session's last user message, so it
+//                              can differ from the default; unset means the
+//                              same as FAKE_MODEL.
+//   FAKE_SET_MODEL_FAILS    — set to "1" to answer session/set_config_option
+//                              for the model with an error, as opencode does
+//                              for a model its config does not define.
+//   FAKE_ECHO_MODEL         — set to "1" to reply with the model the session
+//                              is on when the prompt arrives. The only way a
+//                              test can see which model a turn ran on, rather
+//                              than which calls were made before it.
 
 import readline from "node:readline";
 
@@ -81,34 +96,52 @@ const MODES = (process.env.FAKE_MODES ?? "")
   .filter((m) => m.length > 0);
 const MODES_SHAPE = process.env.FAKE_MODES_SHAPE ?? "config";
 const ECHO_MODE = process.env.FAKE_ECHO_MODE === "1";
+const DEFAULT_MODEL = process.env.FAKE_MODEL;
+const LOADED_MODEL = process.env.FAKE_LOADED_MODEL ?? DEFAULT_MODEL;
+const SET_MODEL_FAILS = process.env.FAKE_SET_MODEL_FAILS === "1";
+const ECHO_MODEL = process.env.FAKE_ECHO_MODEL === "1";
 
 // The mode this fixture is in. Starts at the first advertised one, the way a
 // real agent starts at its default rather than at nothing.
 let currentMode = MODES[0];
+// The model this fixture's session is on. Set by session/new and session/load
+// and moved by session/set_config_option, as in opencode.
+let currentModel;
 
 /** The advertisement carried by session/new and session/load. */
 function modeAdvertisement() {
-  if (MODES.length === 0) return {};
-  if (MODES_SHAPE === "modes") {
-    return {
-      modes: {
-        currentModeId: currentMode,
-        availableModes: MODES.map((id) => ({ id, name: id })),
-      },
-    };
+  const configOptions = [];
+  if (currentModel !== undefined) {
+    // opencode lists the model option first and formats its value as
+    // providerID/modelID.
+    const known = [...new Set([DEFAULT_MODEL, LOADED_MODEL, currentModel].filter((m) => m !== undefined))];
+    configOptions.push({
+      id: "model",
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: currentModel,
+      options: known.map((value) => ({ value, name: value })),
+    });
   }
-  return {
-    configOptions: [
-      {
-        id: "mode",
-        name: "Session Mode",
-        category: "mode",
-        type: "select",
-        currentValue: currentMode,
-        options: MODES.map((id) => ({ value: id, name: id })),
-      },
-    ],
-  };
+  const out = {};
+  if (MODES.length > 0 && MODES_SHAPE === "modes") {
+    out.modes = {
+      currentModeId: currentMode,
+      availableModes: MODES.map((id) => ({ id, name: id })),
+    };
+  } else if (MODES.length > 0) {
+    configOptions.push({
+      id: "mode",
+      name: "Session Mode",
+      category: "mode",
+      type: "select",
+      currentValue: currentMode,
+      options: MODES.map((id) => ({ value: id, name: id })),
+    });
+  }
+  if (configOptions.length > 0) out.configOptions = configOptions;
+  return out;
 }
 
 const send = (msg) => {
@@ -161,6 +194,7 @@ rl.on("line", async (line) => {
     // makes each fresh session distinguishable from every other, which is
     // what lets a test tell a resumed session from a re-created one.
     const cwd = msg.params?.cwd ?? "<none>";
+    currentModel = DEFAULT_MODEL;
     send({
       jsonrpc: "2.0",
       id: msg.id,
@@ -180,6 +214,29 @@ rl.on("line", async (line) => {
       });
       return;
     }
+    currentModel = LOADED_MODEL;
+    send({ jsonrpc: "2.0", id: msg.id, result: modeAdvertisement() });
+    return;
+  }
+
+  if (msg.method === "session/set_config_option") {
+    if (msg.params?.configId !== "model") {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32602, message: `Invalid params: unknown config option: ${msg.params?.configId}` },
+      });
+      return;
+    }
+    if (SET_MODEL_FAILS) {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32602, message: `Invalid params: model not found: ${msg.params?.value}` },
+      });
+      return;
+    }
+    currentModel = msg.params?.value;
     send({ jsonrpc: "2.0", id: msg.id, result: modeAdvertisement() });
     return;
   }
@@ -224,11 +281,13 @@ rl.on("line", async (line) => {
     const sessionId = msg.params?.sessionId;
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.
-    const reply = ECHO_MODE
-      ? (currentMode ?? "<no-mode>")
-      : ECHO_PROMPT
-        ? (msg.params?.prompt?.[0]?.text ?? "")
-        : REPLY;
+    const reply = ECHO_MODEL
+      ? (currentModel ?? "<no-model>")
+      : ECHO_MODE
+        ? (currentMode ?? "<no-mode>")
+        : ECHO_PROMPT
+          ? (msg.params?.prompt?.[0]?.text ?? "")
+          : REPLY;
     const pieces = [];
     const chunkLen = Math.max(1, Math.ceil(reply.length / CHUNKS));
     for (let i = 0; i < reply.length; i += chunkLen) {
