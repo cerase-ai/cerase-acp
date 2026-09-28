@@ -242,6 +242,26 @@ export function stripToolCallArtifacts(text: string): string {
   return out;
 }
 
+// OURS. The appliance replaces the engine's section list with its own in
+// SlotWriter::compactionPrompt(), and the marker set was left on the engine's —
+// so the one shape the product actually asks the model to produce was the
+// one shape the detector could not see. An assistant answered a request to
+// join a meeting with its whole working-memory block, in a customer's chat.
+//
+// The note on SUMMARY_SECTION_MARKERS says to review these on an OpenCode
+// bump. The drift came from our side instead: the prompt naming the sections
+// is in cerase-core and this list is here, with nothing holding them equal.
+//
+// Each one matches a whole markdown heading line, which is also what makes
+// them usable on a fragment: see summaryHeadingStart below.
+const SUMMARY_HEADING_LINES: ReadonlyArray<RegExp> = [
+  /^\s*#{1,4}\s*objective\s*$/im,
+  /^\s*#{1,4}\s*important\s+details\s*$/im,
+  /^\s*#{1,4}\s*work\s+state\s*$/im,
+  /^\s*#{1,4}\s*next\s+move\s*$/im,
+  /^\s*#{1,4}\s*relevant\s+files\s*$/im,
+];
+
 /**
  * The engine's internal context-compaction summary.
  *
@@ -267,20 +287,7 @@ const SUMMARY_SECTION_MARKERS: ReadonlyArray<RegExp> = [
   /\bnext\s+actions\b/i,
   /\btechnical\s+notes\b/i,
   /\bworkspace\s+paths?\s*(?:&|and)?\s*files\b/i,
-  // OURS. The appliance replaces the engine's section list with its own in
-  // SlotWriter::compactionPrompt(), and this set was left on the engine's —
-  // so the one shape the product actually asks the model to produce was the
-  // one shape the detector could not see. An assistant answered a request to
-  // join a meeting with its whole working-memory block, in a customer's chat.
-  //
-  // The note above says to review these on an OpenCode bump. The drift came
-  // from our side instead: the prompt naming the sections is in cerase-core
-  // and this list is here, with nothing holding them equal.
-  /^\s*#{1,4}\s*objective\s*$/im,
-  /^\s*#{1,4}\s*important\s+details\s*$/im,
-  /^\s*#{1,4}\s*work\s+state\s*$/im,
-  /^\s*#{1,4}\s*next\s+move\s*$/im,
-  /^\s*#{1,4}\s*relevant\s+files\s*$/im,
+  ...SUMMARY_HEADING_LINES,
 ];
 // "Anchored Summary" is the block's title — on its own a strong signal.
 const STRONG_SUMMARY_MARKER = /\banchored\s+summary\b/i;
@@ -300,4 +307,26 @@ export function isInternalSummaryBlock(text: string): boolean {
     if (re.test(text)) hits += 1;
   }
   return hits >= SUMMARY_HEADER_THRESHOLD;
+}
+
+/**
+ * Where the first line that is one of the summary's own section headings
+ * starts in `text`, or -1 when there is none.
+ *
+ * Not a verdict, and deliberately weaker than isInternalSummaryBlock: one
+ * heading is ordinary in an answer, which is why a whole reply needs three
+ * before it is withheld. It answers a different question — from which point
+ * the text has to be judged as a whole before any of it is sent. A summary
+ * that streams into the chat inside a turn arrives in pieces, and a piece
+ * holding two of its headings passes the whole-reply check that the complete
+ * block fails; its first heading is the point to stop sending at.
+ */
+export function summaryHeadingStart(text: string): number {
+  if (!text) return -1;
+  let first = -1;
+  for (const re of SUMMARY_HEADING_LINES) {
+    const m = re.exec(text);
+    if (m && (first < 0 || m.index < first)) first = m.index;
+  }
+  return first;
 }

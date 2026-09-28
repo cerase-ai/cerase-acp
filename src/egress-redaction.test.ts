@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
+import {
+  isInternalSummaryBlock,
+  redactEngineIdentifiers,
+  stripToolCallArtifacts,
+  summaryHeadingStart,
+} from "./egress-redaction.js";
 
 describe("M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: DSML tool-call leak scrub", () => {
   it("strips a spelled-out DSML tool_calls block, keeping the surrounding prose", () => {
@@ -335,5 +340,28 @@ describe("the appliance's own summary sections", () => {
         "Ho partecipato alla riunione e ti ho mandato il riassunto per email. Fammi sapere se vuoi che aggiunga altro.",
       ),
     ).toBe(false);
+  });
+});
+
+// Where a streamed reply stops being sent piece by piece: at the first of the
+// summary's own section headings, as a whole line.
+describe("summaryHeadingStart", () => {
+  it("finds the first heading line, wherever it sits in the text", () => {
+    const text = "Ecco il punto.\n## Work State\n- fatto\n## Objective\n- altro";
+    expect(summaryHeadingStart(text)).toBe(text.indexOf("## Work State"));
+    expect(summaryHeadingStart("## Objective\n- x")).toBe(0);
+  });
+
+  it("reads every level and case the detector does", () => {
+    for (const heading of ["# objective", "### Important Details", "#### NEXT MOVE", "##   Relevant Files  "]) {
+      expect(summaryHeadingStart(`prima\n${heading}\ndopo`)).toBeGreaterThan(0);
+    }
+  });
+
+  it("is -1 for the words in prose, or in a heading that only begins with them", () => {
+    expect(summaryHeadingStart("The objective is to send the offer by Friday.")).toBe(-1);
+    expect(summaryHeadingStart("## Objectives for the quarter\n- grow")).toBe(-1);
+    expect(summaryHeadingStart("Il prossimo passo: ## Next Move in linea")).toBe(-1);
+    expect(summaryHeadingStart("")).toBe(-1);
   });
 });

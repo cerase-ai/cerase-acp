@@ -1,4 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -905,6 +907,121 @@ describe("an attach that never arrives cannot close as a delivered turn", () => 
     // arrive. What it is told is asserted on the prompt itself in the
     // dispatcher suite; here the point is that the second turn happens at all.
     expect(chat.filter((c) => c.includes("Tre slide sul progetto Falco")).length).toBe(2);
+  });
+});
+
+// The production send path, end to end: the agent streams a summary inside a
+// turn, the bridge's own per-piece filter sees it in fragments, and the
+// dispatcher is what keeps it out of the chat. What is withheld is still
+// captured as the assistant's rolling summary, as the send path does for one it
+// withholds whole.
+describe("a summary the agent streams inside a turn", () => {
+  let handle: RunBridgeHandle | undefined;
+  let controlPlane: Server | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    await new Promise<void>((resolve) => (controlPlane ? controlPlane.close(() => resolve()) : resolve()));
+    controlPlane = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  const SUMMARY = [
+    "## Objective",
+    "- Preparare il riepilogo delle offerte ricevute e inviarlo al responsabile acquisti.",
+    "",
+    "## Important Details",
+    "- Le offerte arrivate sono tre; la scadenza per rispondere è venerdì.",
+    "- Il responsabile vuole il confronto in una tabella.",
+    "",
+    "## Work State",
+    "### Completed",
+    "- Lette le tre offerte dalla casella condivisa.",
+    "### Active",
+    "- Stesura della tabella di confronto con prezzi, tempi e condizioni di pagamento dei tre.",
+    "### Blocked",
+    "- Manca il listino del terzo fornitore.",
+  ].join("\n");
+
+  it("never reaches the chat, and is captured whole", async () => {
+    // Stands in for the control-plane: records the summary capture and
+    // answers everything else with a 404, which the bridge treats as the
+    // control-plane being unavailable and proceeds without.
+    const captured: { agent_id: string; summary: string }[] = [];
+    controlPlane = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        if (req.method === "POST" && req.url === "/api/internal/session-summary") {
+          captured.push(JSON.parse(body));
+          res.writeHead(200).end("{}");
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+    await new Promise<void>((resolve) => controlPlane?.listen(0, "127.0.0.1", () => resolve()));
+    const cpPort = (controlPlane.address() as AddressInfo).port;
+
+    const SECRET = "summary-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    vi.stubEnv("CERASE_INTERNAL_SECRET", "control-plane-secret");
+    vi.stubEnv("CERASE_CONTROL_PLANE_URL", `http://127.0.0.1:${cpPort}`);
+
+    // Ten chunks of about fifty characters, the shape it streamed in.
+    const cfg: BridgeConfig = {
+      agents: [
+        {
+          id: "summary-probe",
+          bot_token: "irrelevant",
+          allowed_users: ["111"],
+          spawn: {
+            command: "env",
+            args: ["--", `FAKE_REPLY=${SUMMARY}`, "FAKE_CHUNKS=10", "node", FAKE_CHILD],
+          },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    };
+
+    const chat: string[] = [];
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        return a;
+      },
+    });
+
+    const res = await fetch(`${handle.internalUrl}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify({ agent_id: "summary-probe", user_id: "111", text: "ciao", surface_in_chat: false }),
+    });
+    expect(res.status).toBe(202);
+
+    await vi.waitFor(
+      async () => {
+        const st = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        const body = (await st.json()) as { inject: { in_flight: number; succeeded: number } };
+        expect(body.inject.in_flight).toBe(0);
+        expect(body.inject.succeeded).toBe(1);
+      },
+      { timeout: 8000, interval: 100 },
+    );
+    await vi.waitFor(() => expect(captured).toHaveLength(1), { timeout: 2000, interval: 50 });
+
+    expect(chat).toEqual([]);
+    expect(captured[0]).toEqual({ agent_id: "summary-probe", summary: SUMMARY });
   });
 });
 

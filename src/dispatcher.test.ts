@@ -9,7 +9,9 @@ import {
   pickErrorMessage,
   pickNoCreditsMessage,
 } from "./dispatcher.js";
-import { SessionManager } from "./session-manager.js";
+import { isInternalSummaryBlock } from "./egress-redaction.js";
+import { SessionManager, type SessionUpdateHandler } from "./session-manager.js";
+import { StreamBuffer } from "./stream-buffer.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -478,5 +480,200 @@ describe("a failed attach denies the turn its success", () => {
     // Exactly one correction: the turn ends rather than looping on itself.
     expect(sent.filter((s) => s.includes("[attach_result: failed]")).length).toBe(1);
     expect(outcomes.take("doc-qa", "111")).toEqual([]);
+  });
+});
+
+// A summary that streams INSIDE a turn. opencode compacts on overflow in the
+// middle of a turn and the compaction agent's text arrives as ordinary message
+// chunks, so it goes through the stream buffer like an answer and is flushed in
+// pieces. The internal-summary filter needs three of the block's section
+// headings to withhold anything, and each piece carries fewer.
+describe("a summary streamed inside a turn", () => {
+  const SUMMARY = [
+    "## Objective",
+    "- Preparare il riepilogo delle offerte ricevute e inviarlo al responsabile acquisti.",
+    "",
+    "## Important Details",
+    "- Le offerte arrivate sono tre; la scadenza per rispondere è venerdì.",
+    "- Il responsabile vuole il confronto in una tabella.",
+    "",
+    "## Work State",
+    "### Completed",
+    "- Lette le tre offerte dalla casella condivisa.",
+    "### Active",
+    "- Stesura della tabella di confronto con prezzi, tempi e condizioni di pagamento dei tre.",
+    "### Blocked",
+    "- Manca il listino del terzo fornitore.",
+  ].join("\n");
+
+  const LEAD =
+    "Ho confrontato le tre offerte che mi hai inoltrato. La più conveniente sul prezzo è quella del secondo " +
+    "fornitore, ma i tempi di consegna sono più lunghi di due settimane rispetto alle altre due proposte.\n\n";
+
+  type Update = Parameters<SessionUpdateHandler>[0];
+
+  /** The reply as the agent streams it: pieces of about fifty characters. */
+  function chunked(text: string, messageId?: string, size = 50): Update[] {
+    const out: Update[] = [];
+    for (let i = 0; i < text.length; i += size) {
+      out.push({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: text.slice(i, i + size) },
+        ...(messageId ? { messageId } : {}),
+      } as Update);
+    }
+    return out;
+  }
+
+  /**
+   * A session manager that streams `updates` one event-loop turn apart, then
+   * runs `after` while the turn is still open, and ends it — by throwing
+   * `fail` when one is given. Before `after` it waits long enough for the send
+   * queue, which spaces its sends, to deliver everything already handed to it:
+   * what `after` sees is what the person had read before the turn ended.
+   */
+  function streamingMgr(updates: Update[], after: () => void, fail?: Error): SessionManager {
+    return {
+      async prompt(_agentId: string, _userId: string, _text: string, onUpdate?: SessionUpdateHandler) {
+        for (const u of updates) {
+          onUpdate?.(u);
+          await new Promise((r) => setImmediate(r));
+        }
+        await new Promise((r) => setTimeout(r, 400));
+        after();
+        if (fail) throw fail;
+        return { stopReason: "end_turn" };
+      },
+    } as unknown as SessionManager;
+  }
+
+  /**
+   * What reached the chat. The send target applies the same per-piece summary
+   * filter the bridge's send path does, so what lands in `delivered` is what a
+   * person would have read.
+   */
+  function harness(updates: Update[], fail?: Error) {
+    const delivered: string[] = [];
+    const withheld: string[] = [];
+    let duringTurn: string[] = [];
+    const d = new Dispatcher({
+      config: makeConfig("unused"),
+      sessionManager: streamingMgr(updates, () => (duringTurn = [...delivered]), fail),
+      turnMeta: new TurnMetaTracker(),
+      onSummaryWithheld: (_agentId, summary) => withheld.push(summary),
+      resolveSendTarget: () => async (chunk) => {
+        if (!isInternalSummaryBlock(chunk)) delivered.push(chunk);
+        return { ok: true };
+      },
+    });
+    return { d, delivered, withheld, duringTurn: () => duringTurn };
+  }
+
+  const squash = (s: string) => s.replace(/\s+/g, "");
+
+  it("streams in pieces each of which the whole-reply filter lets through", () => {
+    // The defect, stated on the unchanged buffer: the complete block is a
+    // summary, and not one of the pieces it is flushed in is.
+    expect(SUMMARY.length).toBe(472);
+    expect(isInternalSummaryBlock(SUMMARY)).toBe(true);
+    const pieces: string[] = [];
+    const buffer = new StreamBuffer({ onFlush: (p) => pieces.push(p) });
+    for (const u of chunked(SUMMARY)) {
+      if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text") buffer.push(u.content.text);
+    }
+    buffer.end();
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(pieces.filter((p) => isInternalSummaryBlock(p))).toEqual([]);
+  });
+
+  it("is not delivered at all, and is handed over for capture", async () => {
+    const h = harness(chunked(SUMMARY));
+    await expect(h.d.handleMessage("doc-qa", "111", "ciao")).resolves.toEqual({ ok: true });
+    expect(h.delivered).toEqual([]);
+    expect(h.withheld).toEqual([SUMMARY]);
+  });
+
+  it("does not hold back what was sent before its first heading", async () => {
+    const h = harness(chunked(LEAD + SUMMARY));
+    await h.d.handleMessage("doc-qa", "111", "ciao");
+    // The paragraph before the summary reached the chat while the turn was
+    // still running, and it is all that did.
+    expect(squash(h.duringTurn().join(""))).toBe(squash(LEAD));
+    expect(h.delivered).toEqual(h.duringTurn());
+    expect(h.withheld).toHaveLength(1);
+    expect(h.withheld[0]).toContain("## Objective");
+  });
+
+  // One of those headings is ordinary in an answer. It holds the reply back
+  // from the heading on until the end of the turn, and costs nothing else:
+  // judged whole, it is not a summary, and all of it is delivered.
+  it("delivers a real answer that uses one of its headings, in full, at the end of the turn", async () => {
+    const ANSWER = [
+      "Certo, ecco come la imposterei.",
+      "",
+      "## Objective",
+      "Chiudere il confronto tra i tre fornitori entro venerdì, così il responsabile acquisti può decidere",
+      "prima della riunione di lunedì. Ti preparo una tabella con prezzo, tempi di consegna e condizioni di",
+      "pagamento, e ti segnalo le voci in cui le offerte non sono confrontabili tra loro.",
+      "",
+      "Se mi mandi anche il listino del terzo fornitore, lo aggiungo subito.",
+    ].join("\n");
+    const h = harness(chunked(ANSWER));
+    await expect(h.d.handleMessage("doc-qa", "111", "come imposteresti il confronto?")).resolves.toEqual({ ok: true });
+    const fromHeading = ANSWER.slice(ANSWER.indexOf("## Objective"));
+    // While the turn ran, only the sentence before the heading went out.
+    expect(h.duringTurn()).toEqual(["Certo, ecco come la imposterei."]);
+    // At its end, the rest, whole and in one piece.
+    expect(h.delivered).toEqual(["Certo, ecco come la imposterei.", fromHeading]);
+    expect(h.withheld).toEqual([]);
+  });
+
+  it("leaves an ordinary answer streaming as it always did", async () => {
+    const ANSWER =
+      "Ho letto le tre offerte. La prima ha il prezzo più alto ma consegna in una settimana, ed è l'unica che " +
+      "include l'installazione. La seconda costa il dodici per cento in meno e consegna in tre settimane. " +
+      "La terza è la più economica, ma chiede il pagamento anticipato dell'intero importo. " +
+      "Se la scadenza di venerdì è rigida, la prima è l'unica che la rispetta con margine; altrimenti " +
+      "la seconda è il compromesso migliore tra prezzo e condizioni. Vuoi che prepari la tabella?";
+    const h = harness(chunked(ANSWER));
+    await h.d.handleMessage("doc-qa", "111", "quale conviene?");
+    // Some of it reached the chat before the turn ended: no hold.
+    expect(h.duringTurn().length).toBeGreaterThan(0);
+    expect(squash(h.delivered.join(""))).toBe(squash(ANSWER));
+    expect(h.withheld).toEqual([]);
+  });
+
+  // After an overflow compaction opencode goes on with the same turn and
+  // answers in a new assistant message. The summary is its own message, and
+  // judging the answer together with it would withhold the answer too.
+  it("delivers the answer that follows it in the same turn as a new message", async () => {
+    const ANSWER =
+      "Ecco il confronto che mi avevi chiesto: la seconda offerta è la più conveniente, la prima la più veloce.";
+    const h = harness([...chunked(SUMMARY, "msg_compaction"), ...chunked(ANSWER, "msg_answer")]);
+    await expect(h.d.handleMessage("doc-qa", "111", "ciao")).resolves.toEqual({ ok: true });
+    expect(squash(h.delivered.join(""))).toBe(squash(ANSWER));
+    expect(h.withheld).toEqual([SUMMARY]);
+  });
+
+  // A turn that fails ends the hold as well. What was held is judged by the
+  // same rule: an answer is delivered ahead of the failure notice, a summary
+  // is withheld, and nothing is carried into the next turn.
+  it("judges held text when the turn fails, and delivers it when it is an answer", async () => {
+    const ANSWER = "Ci sto lavorando.\n\n## Objective\nPreparare il confronto tra i tre fornitori entro venerdì.";
+    const h = harness(chunked(ANSWER), new Error("opencode child crashed"));
+    const result = await h.d.handleMessage("doc-qa", "111", "ciao");
+    expect(result.ok).toBe(false);
+    expect(h.delivered).toEqual([
+      "Ci sto lavorando.",
+      "## Objective\nPreparare il confronto tra i tre fornitori entro venerdì.",
+      pickErrorMessage("ciao"),
+    ]);
+  });
+
+  it("judges held text when the turn fails, and withholds it when it is a summary", async () => {
+    const h = harness(chunked(SUMMARY), new Error("opencode child crashed"));
+    await h.d.handleMessage("doc-qa", "111", "ciao");
+    expect(h.delivered).toEqual([pickErrorMessage("ciao")]);
+    expect(h.withheld).toEqual([SUMMARY]);
   });
 });

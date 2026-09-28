@@ -290,6 +290,21 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   const controlPlaneSecret = process.env.CERASE_INTERNAL_SECRET ?? "";
   const acpInjectSecret = process.env.CERASE_ACP_INTERNAL_SECRET ?? "";
 
+  // A withheld internal summary is kept rather than discarded: posted over the
+  // internal channel as the assistant's rolling summary. Fire-and-forget; a
+  // capture failure must not affect the turn. Called from the send path below
+  // for a summary withheld whole, and by the dispatcher for one it held back
+  // while it streamed in pieces.
+  const captureSummary = (agentId: string, summary: string): void => {
+    if (!controlPlaneSecret) return;
+    void postSessionSummary(agentId, summary, {
+      controlPlaneUrl,
+      internalSecret: controlPlaneSecret,
+    }).catch((err) => {
+      logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
+    });
+  };
+
   const productionDispatcher = new Dispatcher({
     config,
     sessionManager,
@@ -325,6 +340,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           return { clock: formatWallClock(Date.now(), ctx.timezone), lastTurnAt: ctx.lastTurnAt };
         }
       : undefined,
+    onSummaryWithheld: captureSummary,
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {
@@ -433,17 +449,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         // withhold it entirely — it is not an answer.
         if (isInternalSummaryBlock(text)) {
           logger.warn({ agentId }, "egress: suppressed an internal engine summary/compaction block");
-          // Capture it instead of discarding — persist as the assistant's
-          // rolling summary over the internal channel. Fire-and-forget; a
-          // capture failure must not affect the turn.
-          if (controlPlaneSecret) {
-            void postSessionSummary(agentId, text, {
-              controlPlaneUrl,
-              internalSecret: controlPlaneSecret,
-            }).catch((err) => {
-              logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
-            });
-          }
+          // Capture it instead of discarding it.
+          captureSummary(agentId, text);
           await deliverAttachments();
 
           return { ok: true };

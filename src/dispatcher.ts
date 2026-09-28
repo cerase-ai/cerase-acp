@@ -13,10 +13,11 @@ import {
 } from "./attach-outcome.js";
 import type { DeliveryResult } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
+import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { makeLogger } from "./logger.js";
 import { deliveryFailureNotice } from "./platform-notices.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
-import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
+import { type SessionManager, type SessionUpdateHandler, TurnWatchdogError } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
 
@@ -58,6 +59,14 @@ export interface DispatcherDeps {
    * did — when it is wired, a failed upload denies the turn its success.
    */
   attachOutcomes?: AttachOutcomeTracker;
+  /**
+   * Receives an internal summary this dispatcher withheld from the chat, so it
+   * can be kept rather than lost: the bridge posts it to the control-plane as
+   * the assistant's rolling summary, the same capture its send path makes for
+   * a summary it withholds there. Optional for the same reason as the three
+   * above: the CLI and test ingresses have nowhere to keep it.
+   */
+  onSummaryWithheld?: (agentId: string, summary: string) => void;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -250,9 +259,7 @@ export class Dispatcher {
     }
 
     const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
-    const buffer = new StreamBuffer({
-      onFlush: (chunk) => queue.enqueue(chunk),
-    });
+    const reply = this.replyStream(queue, agentId, userId);
 
     // One call, two facts, and neither is worth failing a turn over. The
     // resolver inside is consulted only when this process has no memory of the
@@ -290,10 +297,7 @@ export class Dispatcher {
     this.deps.attachOutcomes?.begin(agentId, userId);
     try {
       await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
-        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
-          produced = true;
-          buffer.push(update.content.text);
-        }
+        if (reply.push(update)) produced = true;
       });
     } catch (err) {
       failed = true;
@@ -301,7 +305,10 @@ export class Dispatcher {
       creditExhausted = isCreditExhaustedError(err);
       logger.error({ err, agentId, userId, creditExhausted }, "agent turn failed");
     } finally {
-      buffer.end();
+      // A failed or aborted turn ends here too, so text held back in it is
+      // judged the same way and either delivered or withheld, never dropped
+      // unread and never carried into the next turn.
+      reply.end();
       drainResult = await queue.drain();
     }
     // Read once, here, whatever the turn did: an outcome left in the tracker
@@ -369,20 +376,81 @@ export class Dispatcher {
     failures: AttachFailure[],
   ): Promise<void> {
     const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
-    const buffer = new StreamBuffer({ onFlush: (chunk) => queue.enqueue(chunk) });
+    const reply = this.replyStream(queue, agentId, userId);
     try {
       await this.deps.sessionManager.prompt(agentId, userId, attachFailurePrompt(failures), (update) => {
-        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
-          buffer.push(update.content.text);
-        }
+        reply.push(update);
       });
     } catch (err) {
       logger.error({ err, agentId, userId, failures }, "attach: the correction turn itself failed");
     } finally {
-      buffer.end();
+      reply.end();
       await queue.drain();
       this.deps.attachOutcomes?.take(agentId, userId);
     }
+  }
+
+  /**
+   * The path one turn's reply takes from the ACP stream to the send queue.
+   *
+   * Text goes to the queue in pieces as it streams, and every piece meets the
+   * egress filters on its own. That holds for every filter but one. An internal
+   * summary is recognised by its section headings taken together, three of
+   * them, and a summary that streams INSIDE a turn — opencode compacting on
+   * overflow, the compaction agent's text arriving as ordinary message chunks —
+   * is flushed in pieces that each carry fewer. Every piece passes, and so the
+   * whole block reaches the chat.
+   *
+   * So the first of those headings starts a hold: the heading line and
+   * everything after it are kept, and judged whole when the hold ends —
+   * withheld if together they are a summary, delivered through the queue as
+   * usual if not. Text before the heading is sent as it would have been, and a
+   * reply with no such heading streams exactly as it did.
+   *
+   * The hold ends with the turn, or earlier when the agent starts a new
+   * message. The second case is the one the compaction produces: opencode then
+   * continues the same turn and answers the person in a new assistant message,
+   * and judging that answer together with the summary before it would withhold
+   * both. An agent that sends no message ids gets the first case only.
+   *
+   * `push` answers whether the update carried reply text.
+   */
+  private replyStream(
+    queue: SendQueue,
+    agentId: string,
+    userId: string,
+  ): { push: (update: Parameters<SessionUpdateHandler>[0]) => boolean; end: () => void } {
+    const buffer = new StreamBuffer({
+      onFlush: (chunk) => queue.enqueue(chunk),
+      holdFrom: summaryHeadingStart,
+      onHeld: (held) => {
+        if (!isInternalSummaryBlock(held)) {
+          queue.enqueue(held);
+          return;
+        }
+        logger.warn(
+          { agentId, userId, chars: held.length },
+          "egress: suppressed an internal engine summary/compaction block",
+        );
+        try {
+          this.deps.onSummaryWithheld?.(agentId, held);
+        } catch (err) {
+          logger.warn({ err, agentId }, "capturing a withheld summary failed — ignored");
+        }
+      },
+    });
+    let messageId: string | undefined;
+    return {
+      push: (update) => {
+        if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;
+        const next = (update as { messageId?: string }).messageId;
+        if (next && messageId && next !== messageId) buffer.release();
+        if (next) messageId = next;
+        buffer.push(update.content.text);
+        return true;
+      },
+      end: () => buffer.end(),
+    };
   }
 
   /**

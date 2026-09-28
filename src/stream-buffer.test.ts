@@ -107,4 +107,79 @@ describe("StreamBuffer", () => {
       expect(out.length).toBe(1);
     }
   });
+
+  describe("a hold", () => {
+    // Stands in for the caller's rule: hold from the first line reading HOLD.
+    const holdFrom = (piece: string) => {
+      const m = /^HOLD$/m.exec(piece);
+      return m ? m.index : -1;
+    };
+
+    function held() {
+      const out: string[] = [];
+      const kept: string[] = [];
+      const buf = new StreamBuffer({
+        onFlush: (s) => out.push(s),
+        onHeld: (s) => kept.push(s),
+        holdFrom,
+        sentenceMinChars: 20,
+        maxChars: 1800,
+        idleMs: 500,
+      });
+      return { buf, out, kept };
+    }
+
+    it("flushes what comes before it and keeps the rest, pieces joined as they were pushed", () => {
+      const { buf, out, kept } = held();
+      buf.push("this part goes out as usual.\nHOLD\nfirst line.\n");
+      buf.push("\n  second line, indented.\n");
+      expect(out).toEqual(["this part goes out as usual."]);
+      expect(kept).toEqual([]);
+      buf.end();
+      // The blank line and the indent between the two pushes survive: a line
+      // start is what the caller's judgement reads.
+      expect(kept).toEqual(["HOLD\nfirst line.\n\n  second line, indented."]);
+      expect(out).toEqual(["this part goes out as usual."]);
+    });
+
+    it("is not ended by the size cap or the idle timer", () => {
+      const { buf, out, kept } = held();
+      buf.push("HOLD\nsomething to keep.\n");
+      buf.push("x".repeat(2000));
+      vi.advanceTimersByTime(5_000);
+      expect(out).toEqual([]);
+      expect(kept).toEqual([]);
+      buf.end();
+      expect(kept).toHaveLength(1);
+      expect(kept[0]).toMatch(/^HOLD\nsomething to keep\.\nx{2000}$/);
+    });
+
+    it("hands the held text over on release() and then streams as before", () => {
+      const { buf, out, kept } = held();
+      buf.push("HOLD\nkept until released.\n");
+      buf.release();
+      expect(kept).toEqual(["HOLD\nkept until released."]);
+      buf.push("after the release this flushes normally. ");
+      expect(out).toEqual(["after the release this flushes normally."]);
+      buf.end();
+      expect(kept).toHaveLength(1);
+    });
+
+    it("judges the last piece at end() too", () => {
+      const { buf, out, kept } = held();
+      buf.push("short\nHOLD");
+      buf.end();
+      expect(out).toEqual(["short"]);
+      expect(kept).toEqual(["HOLD"]);
+    });
+
+    it("hands held text to onFlush when no onHeld is given", () => {
+      const out: string[] = [];
+      const buf = new StreamBuffer({ onFlush: (s) => out.push(s), holdFrom, sentenceMinChars: 20 });
+      buf.push("HOLD\nall of this is one piece.\n");
+      buf.push("and so is this.\n");
+      buf.end();
+      expect(out).toEqual(["HOLD\nall of this is one piece.\nand so is this."]);
+    });
+  });
 });
