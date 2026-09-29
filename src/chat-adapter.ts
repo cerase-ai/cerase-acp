@@ -95,9 +95,16 @@ export interface ChatAdapter {
    *     nothing, not the normal exit path.
    *
    * Telegram (`sendChatAction('typing')`), Slack (assistant.threads.
-   * setStatus or similar), Workspace Chat (any future "thinking…"
-   * affordance): same shape — keepalive in the message handler, cleared
-   * by the send that precedes it, NO per-chunk re-trigger.
+   * setStatus or similar): same shape — keepalive in the message handler,
+   * cleared by the send that precedes it, NO per-chunk re-trigger.
+   *
+   * Workspace Chat has no indicator to raise, so its handler posts a
+   * placeholder message instead, and the send target deletes it after the
+   * turn's first post rather than before: a delete re-raises nothing, and
+   * waiting on it would hold the answer up. The placeholder is handed to the
+   * one send target made for its turn, not kept per user, because two turns
+   * from one person each have their own; the handler's `finally` is the same
+   * leak guard as above.
    */
   makeSendTarget(userId: string): (chunk: string) => Promise<DeliveryResult>;
 

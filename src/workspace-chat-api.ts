@@ -1,7 +1,7 @@
 // The Google Chat REST calls the Workspace Chat adapter makes as the tenant's
-// Chat app: posting a reply, finding a user's direct-message space, listing
-// the app's direct-message spaces and downloading an upload, each authorised
-// with app authentication.
+// Chat app: posting a reply, deleting a message it posted, finding a user's
+// direct-message space, listing the app's direct-message spaces and
+// downloading an upload, each authorised with app authentication.
 //
 // App authentication is the OAuth 2.0 service-account flow: a JWT naming the
 // service account, the chat.bot scope and the token endpoint, signed with the
@@ -149,15 +149,30 @@ export class WorkspaceChatApi {
     this.now = opts.now ?? Date.now;
   }
 
-  /** `spaces.messages.create`: posts `text` into `space`, inside `thread` when one is given. */
-  async createMessage(space: string, text: string, thread?: string): Promise<void> {
+  /**
+   * `spaces.messages.create`: posts `text` into `space`, inside `thread` when
+   * one is given, and returns the name Google gave the message.
+   */
+  async createMessage(space: string, text: string, thread?: string): Promise<string | undefined> {
     const query = thread ? "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" : "";
     const body = thread ? { text, thread: { name: thread } } : { text };
-    await this.call("spaces.messages.create", space, `/v1/${space}/messages${query}`, {
+    const resp = await this.call("spaces.messages.create", space, `/v1/${space}/messages${query}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    const name = ((await resp.json().catch(() => ({}))) as { name?: unknown }).name;
+    return typeof name === "string" && name !== "" ? name : undefined;
+  }
+
+  /**
+   * `spaces.messages.delete`: removes the message called `name`. Under app
+   * authentication Google deletes only a message this app created, so a name
+   * that is somebody else's message is refused rather than acted on.
+   */
+  async deleteMessage(name: string): Promise<void> {
+    const resp = await this.call("spaces.messages.delete", name, `/v1/${name}`, { method: "DELETE" });
+    await resp.body?.cancel();
   }
 
   /** `spaces.findDirectMessage`: the direct-message space between `email` and this app. */

@@ -1,7 +1,7 @@
 // A stand-in for the three Google endpoints the Workspace Chat adapter talks
 // to: the certificates Chat signs its events with, the OAuth token endpoint
 // that turns a service-account assertion into an access token, and the Chat
-// REST API that the reply is posted to. All are served over real HTTP on
+// REST API that the reply is posted to and a message deleted from. All are served over real HTTP on
 // loopback, so the adapter's own request code runs unchanged and nothing
 // reaches the network.
 //
@@ -94,8 +94,27 @@ export interface FakeGoogle {
   revokeIssuedTokens(): void;
   /** The next post answers with this status and body instead of succeeding. */
   failNextPost(status: number, body: unknown): void;
+  /** The next post is not answered until the returned function is called. */
+  holdNextPost(): () => void;
   /** Called when a post arrives, before it is answered. */
   onPost: ((message: PostedMessage) => void) | undefined;
+  /** Every message deleted, in the order the deletes arrived. */
+  deleted: PostedMessage[];
+  /**
+   * Every delete refused because the name is no message the calling app
+   * posted: unknown, already deleted, or another app's. Google refuses these
+   * under app authentication; here they are also the evidence that the adapter
+   * tried to delete something that was not its own.
+   */
+  refusedDeletes: string[];
+  /** The next delete answers with this status and body instead of succeeding. */
+  failNextDelete(status: number, body: unknown): void;
+  /** The next delete is not answered until the returned function is called. */
+  holdNextDelete(): () => void;
+  /** Called when a delete has been carried out. */
+  onDelete: ((message: PostedMessage) => void) | undefined;
+  /** The posts that have not been deleted, in the order they were posted. */
+  standing(): PostedMessage[];
   close(): Promise<void>;
 }
 
@@ -120,6 +139,16 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   const owners = new Map<string, string>();
   const members = new Map<string, string[]>();
   const failures: { status: number; body: unknown }[] = [];
+  const deleteFailures: { status: number; body: unknown }[] = [];
+  const postHolds: Promise<void>[] = [];
+  const deleteHolds: Promise<void>[] = [];
+  // Every message posted, under the name it was given, with the account that posted it.
+  const messages = new Map<string, { message: PostedMessage; owner: string | undefined; deleted: boolean }>();
+  const hold = (holds: Promise<void>[]) => {
+    let release = () => {};
+    holds.push(new Promise<void>((resolve) => (release = resolve)));
+    return release;
+  };
   let issued = 0;
   let tokenCalls = 0;
   let certificates: Record<string, string> = {};
@@ -141,7 +170,14 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     trust: (account) => trusted.set(account.clientEmail, account.publicKey),
     revokeIssuedTokens: () => valid.clear(),
     failNextPost: (status, body) => failures.push({ status, body }),
+    holdNextPost: () => hold(postHolds),
     onPost: undefined,
+    deleted: [],
+    refusedDeletes: [],
+    failNextDelete: (status, body) => deleteFailures.push({ status, body }),
+    holdNextDelete: () => hold(deleteHolds),
+    onDelete: undefined,
+    standing: () => [...messages.values()].filter((m) => !m.deleted).map((m) => m.message),
   };
 
   let tokenUri = "";
@@ -207,6 +243,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         };
         if (!authorised(req)) return unauthenticated(res);
         fake.attemptedPosts.push(message);
+        await postHolds.shift();
         const failure = failures.shift();
         if (failure) return json(res, failure.status, failure.body);
         const owned = [...members.values()].some((spaces) => spaces.includes(message.space));
@@ -217,8 +254,27 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
           });
         }
         fake.posts.push(message);
+        const name = `${post[1]}/messages/${fake.posts.length}`;
+        messages.set(name, { message, owner: caller(req), deleted: false });
         fake.onPost?.(message);
-        return json(res, 200, { name: `${post[1]}/messages/${fake.posts.length}` });
+        return json(res, 200, { name, text: message.text });
+      }
+
+      const remove = /^\/v1\/(spaces\/[^/]+\/messages\/[^/]+)$/.exec(url.pathname);
+      if (req.method === "DELETE" && remove?.[1]) {
+        if (!authorised(req)) return unauthenticated(res);
+        await deleteHolds.shift();
+        const failure = deleteFailures.shift();
+        if (failure) return json(res, failure.status, failure.body);
+        const found = messages.get(remove[1]);
+        if (!found || found.deleted || found.owner !== caller(req)) {
+          fake.refusedDeletes.push(remove[1]);
+          return json(res, 404, { error: { code: 404, message: "Message not found.", status: "NOT_FOUND" } });
+        }
+        found.deleted = true;
+        fake.deleted.push(found.message);
+        fake.onDelete?.(found.message);
+        return json(res, 200, {});
       }
 
       if (req.method === "GET" && url.pathname === "/v1/spaces") {

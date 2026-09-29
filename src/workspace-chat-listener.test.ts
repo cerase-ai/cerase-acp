@@ -28,14 +28,26 @@ import { type FakeGoogle, makeServiceAccount, startFakeGoogle, writeKeyFile } fr
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
-import { Dispatcher, pickRefusalMessage } from "./dispatcher.js";
-import { directMessagesOnlyNotice } from "./platform-notices.js";
-import type { SessionManager } from "./session-manager.js";
+import {
+  Dispatcher,
+  pickEmptyMessage,
+  pickErrorMessage,
+  pickRefusalMessage,
+  pickTooLongMessage,
+} from "./dispatcher.js";
+import { directMessagesOnlyNotice, writingNotice } from "./platform-notices.js";
+import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
 import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 import { EMITTENTE, svuotaCache, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
 process.env.WORKSPACE_CHAT_PORT = "0";
+
+// Every accepted message is first answered by the line saying the assistant is
+// writing. The tests about where and with which key a reply goes count replies,
+// and leave that line to the tests about it.
+const WRITING = new Set((["it", "en", "es", "fr"] as const).map((lang) => writingNotice(lang)));
+const repliesIn = (google: FakeGoogle) => google.posts.filter((p) => !WRITING.has(p.text));
 
 const PROJECT = "111111111111";
 const PROJECT_2 = "222222222222";
@@ -138,6 +150,8 @@ describe("workspace-chat: one Chat app per assistant", () => {
     });
   const turnCount = (n: number) => waitFor(() => turns.length >= n, turnWaiters);
   const postCount = (n: number) => waitFor(() => google.posts.length >= n, postWaiters);
+  const replies = () => repliesIn(google);
+  const replyCount = (n: number) => waitFor(() => replies().length >= n, postWaiters);
 
   async function startAgent(a: AgentConfig) {
     config.agents.push(a);
@@ -353,11 +367,12 @@ describe("workspace-chat: one Chat app per assistant", () => {
     const event = chatEvent({ thread: "spaces/DM-MARIO/threads/T7", threadReply: true });
     expect(await post(event)).toEqual({ status: 200, body: {} });
     await turnCount(1);
-    expect(google.posts).toEqual([]);
+    await postCount(1);
+    expect(replies()).toEqual([]);
 
     turns[0]!.end("Ecco il riepilogo.");
-    await postCount(1);
-    expect(google.posts).toEqual([
+    await replyCount(1);
+    expect(replies()).toEqual([
       {
         space: "spaces/DM-MARIO",
         text: "Ecco il riepilogo.",
@@ -372,8 +387,8 @@ describe("workspace-chat: one Chat app per assistant", () => {
     await post(chatEvent({ threadReply: false }));
     await turnCount(1);
     turns[0]!.end("Fatto.");
-    await postCount(1);
-    expect(google.posts.map((p) => [p.space, p.text, p.thread])).toEqual([["spaces/DM-MARIO", "Fatto.", undefined]]);
+    await replyCount(1);
+    expect(replies().map((p) => [p.space, p.text, p.thread])).toEqual([["spaces/DM-MARIO", "Fatto.", undefined]]);
   });
 
   // Each turn answers where its own message was written, even when a later
@@ -385,10 +400,10 @@ describe("workspace-chat: one Chat app per assistant", () => {
     await turnCount(2);
 
     turns[1]!.end("Risposta alla seconda.");
-    await postCount(1);
+    await replyCount(1);
     turns[0]!.end("Risposta alla prima.");
-    await postCount(2);
-    expect(google.posts.map((p) => [p.text, p.thread])).toEqual([
+    await replyCount(2);
+    expect(replies().map((p) => [p.text, p.thread])).toEqual([
       ["Risposta alla seconda.", "spaces/DM-MARIO/threads/TB"],
       ["Risposta alla prima.", "spaces/DM-MARIO/threads/TA"],
     ]);
@@ -402,14 +417,14 @@ describe("workspace-chat: one Chat app per assistant", () => {
     await post(chatEvent({ email: "anna.bianchi@example.com", space: "spaces/DM-ANNA" }), chatJwt(PROJECT_2));
     await turnCount(2);
     turns[0]!.end("Da Guido.");
-    await postCount(1);
+    await replyCount(1);
     turns[1]!.end("Da Enrico.");
-    await postCount(2);
+    await replyCount(2);
     const signer = (authorization: string | undefined) => {
       const n = Number(/access-token-(\d+)$/.exec(authorization ?? "")?.[1]);
       return google.assertions[n - 1]?.iss;
     };
-    expect(google.posts.map((p) => [p.space, p.text, signer(p.authorization)])).toEqual([
+    expect(replies().map((p) => [p.space, p.text, signer(p.authorization)])).toEqual([
       ["spaces/DM-MARIO", "Da Guido.", account.clientEmail],
       ["spaces/DM-ANNA", "Da Enrico.", account2.clientEmail],
     ]);
@@ -419,7 +434,8 @@ describe("workspace-chat: one Chat app per assistant", () => {
     await post(chatEvent({ thread: "spaces/DM-MARIO/threads/T9", threadReply: true }));
     await turnCount(1);
     turns[0]!.end("Prima risposta.");
-    await postCount(1);
+    await replyCount(1);
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
     logs.length = 0;
 
     google.failNextPost(403, {
@@ -676,15 +692,19 @@ describe("workspace-chat: one person, two assistants, two direct-message spaces"
     google.directMessages(accountA, ["spaces/DM-A"]);
     google.directMessages(accountB, ["spaces/DM-B"]);
     await writeTo(PROJECT, "spaces/DM-A");
-    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    await vi.waitFor(() => expect(repliesIn(google)).toHaveLength(1));
     await writeTo(PROJECT_2, "spaces/DM-B");
-    await vi.waitFor(() => expect(google.posts).toHaveLength(2));
+    await vi.waitFor(() => expect(repliesIn(google)).toHaveLength(2));
 
     await restart();
     expect(await send("agent-1", "Promemoria uno.")).toEqual({ ok: true });
     expect(await send("agent-2", "Promemoria due.")).toEqual({ ok: true });
 
-    expect(google.posts.slice(2).map((p) => [p.space, p.text, signer(p.authorization)])).toEqual([
+    expect(
+      repliesIn(google)
+        .slice(2)
+        .map((p) => [p.space, p.text, signer(p.authorization)]),
+    ).toEqual([
       ["spaces/DM-A", "Promemoria uno.", accountA.clientEmail],
       ["spaces/DM-B", "Promemoria due.", accountB.clientEmail],
     ]);
@@ -775,5 +795,289 @@ describe("workspace-chat: one person, two assistants, two direct-message spaces"
     expect(result.ok).toBe(false);
     expect(google.attemptedPosts.map((p) => p.space)).toEqual(["spaces/DM-B", "spaces/DM-A"]);
     expect(google.posts).toEqual([]);
+  });
+});
+
+// Chat shows a person neither that an app read their message nor that it is
+// writing, so the app posts a line saying so and deletes it once the answer is
+// on its way. Each case below is a way a turn can end, and in every one of them
+// the line has to go, taken down by the turn that posted it and no other. None
+// of it may cost the answer anything: a line Google refuses to post or to
+// delete, or answers slowly, is logged and the answer goes out regardless.
+describe("workspace-chat: the line that says the assistant is writing", () => {
+  const MARIO = "mario.rossi@example.com";
+  const IT = "ciao, mi prepari il riepilogo della settimana?";
+  const WRITING_IT = writingNotice("it");
+  let google: FakeGoogle;
+  let dir: string;
+  let app: NonNullable<AgentConfig["workspace_chat"]>;
+  let config: BridgeConfig;
+  let dispatcher: Dispatcher;
+  let adapter: ChatAdapter | undefined;
+  let turns: {
+    text: string;
+    say(text: string): void;
+    end(reply?: string): void;
+    fail(err: Error): void;
+    ended: boolean;
+  }[];
+
+  const placeholders = () => google.posts.filter((p) => WRITING.has(p.text));
+  const texts = (messages: { text: string }[]) => messages.map((m) => m.text);
+
+  async function startWith(d: Dispatcher) {
+    await adapter?.stop();
+    adapter = await createChatAdapter(config.agents[0]!, d);
+    await adapter.start();
+  }
+
+  async function write(o: EventOptions = {}) {
+    const resp = await fetch(`http://127.0.0.1:${workspaceChatListenerPort()}${WORKSPACE_CHAT_EVENT_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: chatJwt(PROJECT) },
+      body: JSON.stringify(chatEvent({ text: IT, ...o })),
+    });
+    expect(resp.status).toBe(200);
+  }
+
+  beforeEach(async () => {
+    logs.length = 0;
+    turns = [];
+    google = await startFakeGoogle();
+    google.publishCertificates({ [KID]: SIGNER_PEM });
+    const account = makeServiceAccount("guido@project-one.iam.gserviceaccount.com");
+    google.trust(account);
+    dir = mkdtempSync(join(tmpdir(), "wc-writing-"));
+    app = {
+      project_number: PROJECT,
+      credentials_path: join(dir, "agent-1.json"),
+      certificates_url: google.certificatesUrl,
+      api_root: google.apiRoot,
+    };
+    writeKeyFile(app.credentials_path!, account, google.tokenUri);
+    svuotaCache();
+
+    config = { agents: [agent("agent-1", MARIO, app)], session: { idle_timeout_minutes: 60, max_concurrent: 16 } };
+    const sessionManager = {
+      prompt: (_agentId: string, _userId: string, text: string, onUpdate?: (u: unknown) => void) =>
+        new Promise((resolve, reject) => {
+          const say = (t: string) =>
+            onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } });
+          const turn = {
+            text,
+            ended: false,
+            say,
+            end: (reply?: string) => {
+              if (reply) say(reply);
+              turn.ended = true;
+              resolve({ stopReason: "end_turn" });
+            },
+            fail: (err: Error) => {
+              turn.ended = true;
+              reject(err);
+            },
+          };
+          turns.push(turn);
+        }),
+    } as unknown as SessionManager;
+    dispatcher = new Dispatcher({
+      config,
+      sessionManager,
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: (_agentId, userId) => adapter!.makeSendTarget(userId),
+    });
+    await startWith(dispatcher);
+  });
+
+  afterEach(async () => {
+    await adapter?.stop();
+    adapter = undefined;
+    await google.close();
+    svuotaCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is posted into the message's thread, and deleted once the first part of the answer is posted, while the turn still runs", async () => {
+    await write({ thread: "spaces/DM-MARIO/threads/T7", threadReply: true });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    expect(google.posts.map((p) => [p.text, p.thread])).toEqual([[WRITING_IT, "spaces/DM-MARIO/threads/T7"]]);
+
+    const first = "Ecco la prima parte del riepilogo della settimana. ".repeat(6).trim();
+    turns[0]!.say(first);
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(turns[0]!.ended).toBe(false);
+    expect(texts(google.deleted)).toEqual([WRITING_IT]);
+    expect(texts(google.standing())).toEqual([first]);
+
+    turns[0]!.end("E questo è il resto.");
+    await vi.waitFor(() => expect(google.posts).toHaveLength(3));
+    // The answer is posted as messages of its own, never written over the
+    // placeholder: a new message is what makes the phone show the answer.
+    expect(texts(google.standing())).toEqual([first, "E questo è il resto."]);
+    expect(placeholders()).toHaveLength(1);
+    expect(google.refusedDeletes).toEqual([]);
+  });
+
+  it("is posted once and deleted once for an answer long enough to be sent in several messages, in the person's language", async () => {
+    const english = "hello, can you help me with the difference between these two documents?";
+    await write({ text: english });
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    expect(texts(google.posts)).toEqual([writingNotice("en")]);
+
+    turns[0]!.end("This is one sentence of a long answer. ".repeat(70));
+    await vi.waitFor(() => expect(google.posts.length).toBeGreaterThanOrEqual(3));
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(texts(google.deleted)).toEqual([writingNotice("en")]);
+    expect(placeholders()).toHaveLength(1);
+    expect(google.standing().some((p) => WRITING.has(p.text))).toBe(false);
+    expect(google.refusedDeletes).toEqual([]);
+  });
+
+  it("is deleted when the turn fails, and the failure notice stays", async () => {
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    turns[0]!.fail(new Error("the agent process exited"));
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(texts(google.standing())).toEqual([pickErrorMessage(IT)]);
+  });
+
+  it("is deleted when the turn runs past its time limit, and the notice saying so stays", async () => {
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    turns[0]!.fail(new TurnWatchdogError("ceiling", 600_000));
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(texts(google.standing())).toEqual([pickTooLongMessage(IT)]);
+  });
+
+  it("is deleted when the turn ends with an empty reply, and the notice saying so stays", async () => {
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    turns[0]!.end();
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(texts(google.standing())).toEqual([pickEmptyMessage(IT)]);
+  });
+
+  // The one ending in which nothing at all is posted: all the turn wrote was
+  // the engine's own summary, which never reaches the chat. No send target
+  // runs, so only the turn's own exit can take the line down.
+  it("is deleted when the turn ends with nothing posted at all", async () => {
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    turns[0]!.end("## Objective\nriassumere\n\n## Work state\nin corso\n\n## Next move\nrispondere\n");
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(google.standing()).toEqual([]);
+    expect(google.posts).toHaveLength(1);
+  });
+
+  it("is deleted when the handler throws before the dispatcher made a send target", async () => {
+    await startWith({
+      noticeLang: () => "it",
+      handleMessage: async () => {
+        throw new Error("unknown agent id");
+      },
+    } as unknown as Dispatcher);
+    await write();
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(google.standing()).toEqual([]);
+  });
+
+  // Two messages in quick succession are two turns, each with its own line.
+  // A turn takes down its own and no other, and a message sent to the person
+  // while both run, a scheduled one, takes down neither.
+  it("belongs to its own turn: two turns from one person each delete their own, and a scheduled message deletes none", async () => {
+    await write({ thread: "spaces/DM-MARIO/threads/TA", threadReply: true, text: "prima domanda?" });
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    await write({ thread: "spaces/DM-MARIO/threads/TB", threadReply: true, text: "seconda domanda?" });
+    await vi.waitFor(() => expect(google.posts).toHaveLength(2));
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    expect(google.posts.map((p) => p.thread)).toEqual(["spaces/DM-MARIO/threads/TA", "spaces/DM-MARIO/threads/TB"]);
+
+    expect(await adapter!.makeSendTarget(MARIO)("Promemoria.")).toEqual({ ok: true });
+    const deletedThreads = () => google.deleted.map((p) => p.thread);
+    turns[0]!.end("Risposta alla prima.");
+    await vi.waitFor(() => expect(deletedThreads()).toContain("spaces/DM-MARIO/threads/TA"));
+    expect(deletedThreads()).toEqual(["spaces/DM-MARIO/threads/TA"]);
+    expect(placeholders().filter((p) => google.standing().includes(p))).toEqual([google.posts[1]]);
+
+    turns[1]!.end("Risposta alla seconda.");
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(2));
+    expect(deletedThreads()).toEqual(["spaces/DM-MARIO/threads/TA", "spaces/DM-MARIO/threads/TB"]);
+    expect(texts(google.standing())).toEqual(["Promemoria.", "Risposta alla prima.", "Risposta alla seconda."]);
+    expect(google.refusedDeletes).toEqual([]);
+  });
+
+  it("refused by Google is logged, and the turn and its answer go on without it", async () => {
+    google.failNextPost(500, { error: { code: 500, message: "Internal error.", status: "INTERNAL" } });
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    // The refusal is for the placeholder: the reply is written only once it has arrived.
+    await vi.waitFor(() => expect(google.attemptedPosts).toHaveLength(1));
+    turns[0]!.end("Ecco il riepilogo.");
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    expect(texts(google.posts)).toEqual(["Ecco il riepilogo."]);
+    await vi.waitFor(() =>
+      expect(
+        logs.filter((l) => l.msg === "workspace-chat placeholder not posted; the turn goes on without it"),
+      ).toHaveLength(1),
+    );
+    expect(google.deleted).toEqual([]);
+    expect(google.refusedDeletes).toEqual([]);
+    expect(logs.filter((l) => l.level === "error")).toEqual([]);
+  });
+
+  it("answered slowly by Google does not hold up the turn, and is deleted once it lands after the answer", async () => {
+    const release = google.holdNextPost();
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.attemptedPosts).toHaveLength(1));
+    turns[0]!.end("Ecco il riepilogo.");
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    expect(texts(google.posts)).toEqual(["Ecco il riepilogo."]);
+
+    release();
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(texts(google.deleted)).toEqual([WRITING_IT]);
+    expect(texts(google.standing())).toEqual(["Ecco il riepilogo."]);
+  });
+
+  it("deleted slowly does not hold up any part of the answer", async () => {
+    const release = google.holdNextDelete();
+    await write();
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    turns[0]!.end("This is one sentence of a long answer. ".repeat(70));
+    await vi.waitFor(() => expect(google.posts.length).toBeGreaterThanOrEqual(3));
+    expect(google.deleted).toEqual([]);
+
+    release();
+    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    expect(texts(google.deleted)).toEqual([WRITING_IT]);
+  });
+
+  it("that Google refuses to delete is logged, not thrown, and the answer is delivered", async () => {
+    google.failNextDelete(403, {
+      error: { code: 403, message: "The caller does not have permission", status: "PERMISSION_DENIED" },
+    });
+    await write();
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    turns[0]!.end("Ecco il riepilogo.");
+    await vi.waitFor(() =>
+      expect(
+        logs.filter((l) => l.msg === "workspace-chat placeholder not deleted; it stays in the conversation"),
+      ).toHaveLength(1),
+    );
+    const warned = logs.find((l) => l.msg === "workspace-chat placeholder not deleted; it stays in the conversation")!;
+    expect(warned).toMatchObject({ level: "warn", fields: { agentId: "agent-1", userId: MARIO } });
+    expect(String(warned.fields.reason)).toContain(
+      "spaces.messages.delete on spaces/DM-MARIO/messages/1 failed: HTTP 403",
+    );
+    expect(texts(google.standing())).toEqual([WRITING_IT, "Ecco il riepilogo."]);
+    expect(logs.filter((l) => l.level === "error")).toEqual([]);
   });
 });

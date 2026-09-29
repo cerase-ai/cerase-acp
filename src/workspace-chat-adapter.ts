@@ -24,6 +24,13 @@
 // into the space the message came from and into its thread when it was written
 // in one.
 //
+// Chat shows a person neither that an app read their message nor that it is
+// writing: a reaction needs user authentication and there is no typing call.
+// So the app posts one line saying it is writing as soon as the message is
+// accepted, and deletes it when the turn's first reply is posted, or when the
+// turn ends without one. The answer is a message of its own, so the phone's
+// notification carries the answer and not the placeholder.
+//
 // Direct messages only: no group spaces, no cards.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -34,7 +41,7 @@ import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { directMessagesOnlyNotice } from "./platform-notices.js";
+import { directMessagesOnlyNotice, writingNotice } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
 import {
   ChatApiError,
@@ -300,6 +307,58 @@ function apiFor(app: ChatApp): WorkspaceChatApi {
   return api;
 }
 
+/** Takes down a turn's placeholder. Idempotent, never rejects, and resolves once the delete has been answered. */
+type RemovePlaceholder = () => Promise<void>;
+
+/**
+ * Posts the line saying the assistant is writing, and returns what deletes it.
+ *
+ * Neither half may cost the answer anything. The post is not awaited by the
+ * turn, and a refused one is logged and leaves nothing to delete. The delete
+ * waits for the post it undoes, so a placeholder that lands after the answer is
+ * still taken down, and it is not awaited by the send that asks for it. Both
+ * failures are logged and swallowed: a line left standing is a cosmetic defect,
+ * an answer lost to it is not.
+ */
+function postPlaceholder(
+  api: WorkspaceChatApi,
+  conversation: Conversation & { space: string },
+  text: string,
+  context: { agentId: string; userId: string },
+): RemovePlaceholder {
+  const { space, thread } = conversation;
+  const posted = api.createMessage(space, text, thread).then(
+    (name) => {
+      if (name === undefined) {
+        logger.warn({ ...context, space }, "workspace-chat placeholder posted without a name, so it cannot be deleted");
+      }
+      return name;
+    },
+    (err: unknown) => {
+      logger.warn(
+        { ...context, space, thread, reason: (err as Error).message },
+        "workspace-chat placeholder not posted; the turn goes on without it",
+      );
+      return undefined;
+    },
+  );
+  let removed: Promise<void> | undefined;
+  return () => {
+    removed ??= posted.then(async (name) => {
+      if (name === undefined) return;
+      try {
+        await api.deleteMessage(name);
+      } catch (err) {
+        logger.warn(
+          { ...context, message: name, reason: (err as Error).message },
+          "workspace-chat placeholder not deleted; it stays in the conversation",
+        );
+      }
+    });
+    return removed;
+  };
+}
+
 /**
  * Whether a post was refused because the space is not this app's to post in:
  * the app is not a member of it, or it does not exist. Any other refusal says
@@ -317,6 +376,12 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
   // restarts: a message no event opened cannot ask Google for it by email with
   // a service account. Made at start(), where the app is known.
   let spaces: WorkspaceChatSpaces | undefined;
+  // The placeholder of the turn about to call the dispatcher, until that turn's
+  // send target takes it. Handed over rather than kept per person, because a
+  // turn may delete its own placeholder only: a second message from the same
+  // person has a placeholder of its own, and neither the first turn's reply nor
+  // a scheduled message sent meanwhile may take it down.
+  const placeholders = new Map<string, RemovePlaceholder>();
 
   /**
    * The person's direct-message space with this app, when no event and no
@@ -356,33 +421,52 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     const refs = extractWorkspaceChatAttachments(event.message);
     if (!text && refs.length === 0) return;
 
-    let outText = text;
-    if (refs.length > 0 && api) {
-      const buffers: { name: string; bytes: Buffer }[] = [];
-      for (const att of refs) {
-        try {
-          buffers.push({ name: att.name, bytes: await api.downloadMedia(att.resourceName) });
-        } catch (err) {
-          logger.warn(
-            { agentId: agent.id, name: att.name, reason: (err as Error).message },
-            "workspace-chat media download failed, attachment skipped",
-          );
+    // Posted before the uploads are fetched, which can take longer than the
+    // person should wait to see that the message arrived.
+    const space = conversation.space;
+    const writing = writingNotice(dispatcher.noticeLang(agent.id, userId, text));
+    const removePlaceholder: RemovePlaceholder =
+      api && space !== undefined
+        ? postPlaceholder(api, { ...conversation, space }, writing, { agentId: agent.id, userId })
+        : async () => {};
+    try {
+      let outText = text;
+      if (refs.length > 0 && api) {
+        const buffers: { name: string; bytes: Buffer }[] = [];
+        for (const att of refs) {
+          try {
+            buffers.push({ name: att.name, bytes: await api.downloadMedia(att.resourceName) });
+          } catch (err) {
+            logger.warn(
+              { agentId: agent.id, name: att.name, reason: (err as Error).message },
+              "workspace-chat media download failed, attachment skipped",
+            );
+          }
+        }
+        const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
+        outText = prependUploadMarker(text, stored);
+        const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
+        if (notice) {
+          conversations.set(userId, conversation);
+          await dispatcher.sendSystemMessage(agent.id, userId, notice);
         }
       }
-      const { stored, rejected } = await ingestInboundBuffers(`cerase-${agent.id}`, buffers, "workspace-chat");
-      outText = prependUploadMarker(text, stored);
-      const notice = buildOversizeNotice(rejected, "workspace-chat", detectLanguage(text));
-      if (notice) {
-        conversations.set(userId, conversation);
-        await dispatcher.sendSystemMessage(agent.id, userId, notice);
-      }
+      // The dispatcher asks for this turn's send target before its first
+      // await, so the conversation and the placeholder set on the lines before
+      // are the ones this reply uses, even when another message from the same
+      // person arrives while it runs. The oversize notice above goes out before
+      // the placeholder is handed over, so it leaves the placeholder standing.
+      conversations.set(userId, conversation);
+      placeholders.set(userId, removePlaceholder);
+      spaces?.remember(userId, conversation.space);
+      await dispatcher.handleMessage(agent.id, userId, outText);
+    } finally {
+      // The leak guard for a turn that posted nothing, or that threw before its
+      // send target was made. A turn that answered has already asked for this,
+      // and asking again costs nothing.
+      if (placeholders.get(userId) === removePlaceholder) placeholders.delete(userId);
+      void removePlaceholder();
     }
-    // The dispatcher asks for this turn's send target before its first await,
-    // so the conversation set on the line before is the one this reply uses,
-    // even when another message from the same person arrives while it runs.
-    conversations.set(userId, conversation);
-    spaces?.remember(userId, conversation.space);
-    await dispatcher.handleMessage(agent.id, userId, outText);
   }
 
   return {
@@ -432,6 +516,8 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     makeSendTarget(userId: string) {
       // Taken now, not at send time: see runTurn.
       const conversation = conversations.get(userId);
+      const removePlaceholder = placeholders.get(userId);
+      placeholders.delete(userId);
       return async (chunk: string): Promise<DeliveryResult> => {
         let space = conversation?.space;
         const thread = conversation?.thread;
@@ -484,6 +570,11 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
             "workspace-chat reply not delivered",
           );
           return { ok: false, error };
+        } finally {
+          // After the post rather than before it, and not awaited: the answer
+          // is on screen before the placeholder leaves, and a slow or refused
+          // delete holds up neither this chunk nor the next.
+          void removePlaceholder?.();
         }
       };
     },

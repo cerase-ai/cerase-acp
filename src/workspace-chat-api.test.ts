@@ -65,6 +65,29 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
     ]);
   });
 
+  // The line saying the assistant is writing is deleted with the same key it
+  // was posted with, by the name Google returned for it.
+  it("a post returns the message's name, and the same app deletes the message by it", async () => {
+    const client = api();
+    const name = await client.createMessage("spaces/AAAA", "Sto scrivendo…");
+    expect(name).toBe("spaces/AAAA/messages/1");
+    await client.deleteMessage(name!);
+    expect(google.deleted.map((p) => p.text)).toEqual(["Sto scrivendo…"]);
+    expect(google.standing()).toEqual([]);
+    expect(google.tokenRequests()).toBe(1);
+  });
+
+  it("a refused delete raises an error naming the call, the message and Google's reason", async () => {
+    const client = api();
+    const name = await client.createMessage("spaces/AAAA", "Sto scrivendo…");
+    await client.deleteMessage(name!);
+    const err = await client.deleteMessage(name!).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChatApiError);
+    expect((err as Error).message).toBe(
+      "spaces.messages.delete on spaces/AAAA/messages/1 failed: HTTP 404 NOT_FOUND: Message not found.",
+    );
+  });
+
   it("without a thread the reply goes to the space and asks for no reply option", async () => {
     await api().createMessage("spaces/AAAA", "Fatto.");
     expect(google.posts.map((p) => [p.space, p.thread, p.messageReplyOption])).toEqual([

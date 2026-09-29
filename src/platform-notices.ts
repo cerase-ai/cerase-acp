@@ -132,6 +132,24 @@ export function directMessagesOnlyNotice(lang: SupportedLang): string {
 }
 
 /**
+ * The line a Google Chat conversation shows while its answer is being written.
+ * Chat gives an app neither a read receipt nor a typing indicator, so the app
+ * posts this on receipt and deletes it once the answer is on its way: it has to
+ * read as a status, and it is never the last thing in the conversation.
+ */
+export function writingNotice(lang: SupportedLang): string {
+  return pick(
+    {
+      it: "Sto scrivendo…",
+      en: "I'm writing…",
+      es: "Estoy escribiendo…",
+      fr: "J'écris…",
+    },
+    lang,
+  );
+}
+
+/**
  * The last segment of a workspace-relative path.
  *
  * A notice used to print the path the model had written, which put
