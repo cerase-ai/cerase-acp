@@ -80,17 +80,15 @@ export interface SessionManagerOptions {
   /**
    * Inject a canonical-message fetcher for M16 shadow-channel
    * reconciliation. Tests use this to substitute a canned reply;
-   * production omits it and `defaultFetcher` (hits the opencode
-   * serve REST endpoint) is used.
+   * production omits it and `defaultFetcher` (reads the opencode
+   * serve REST endpoint from inside the slot) is used.
    */
   canonicalFetcher?: CanonicalFetcher;
   /**
    * Inject an endpoint resolver. Tests use a fake endpoint;
    * production passes the agent's container name (derived from
-   * `spawn.args` in agents.yaml) to `defaultEndpointForAgent`
-   * which reads `OPENCODE_SERVER_PASSWORD` from env. Returning
-   * `null` disables reconciliation for that agent (logged once,
-   * then quiet).
+   * `spawn.args` in agents.yaml) to `defaultEndpointForAgent`.
+   * Returning `null` disables reconciliation for that agent.
    */
   endpointResolver?: (containerName: string) => RestEndpoint | null;
   /**

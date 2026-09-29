@@ -369,11 +369,7 @@ describe("SessionManager", () => {
     // "head=tail-from-rest". The reconciler must emit a synthetic
     // agent_message_chunk with "tail-from-rest" so the visible reply
     // is whole.
-    const fakeEndpoint: RestEndpoint = {
-      baseURL: "http://test",
-      username: "opencode",
-      password: "test",
-    };
+    const fakeEndpoint: RestEndpoint = { containerName: "cerase-agent-test" };
     const fakeCanonical: CanonicalMessage = {
       id: "msg_test",
       parts: [{ id: "prt_0", type: "text", text: "head=tail-from-rest" }],
@@ -405,11 +401,7 @@ describe("SessionManager", () => {
     // canned REST fetcher returns a message that's strictly longer
     // than what the ACP stream delivered, so reconcile() returns a
     // single text delta the SessionManager replays via onUpdate.
-    const fakeEndpoint: RestEndpoint = {
-      baseURL: "http://test",
-      username: "opencode",
-      password: "test",
-    };
+    const fakeEndpoint: RestEndpoint = { containerName: "cerase-agent-test" };
     const fakeCanonical: CanonicalMessage = {
       id: "msg_test_42",
       parts: [{ id: "prt_0", type: "text", text: "ciao da fake-acpRECOVERED" }],
@@ -448,11 +440,7 @@ describe("SessionManager", () => {
   });
 
   it("M16: degrades gracefully when fetcher throws", async () => {
-    const fakeEndpoint: RestEndpoint = {
-      baseURL: "http://test",
-      username: "opencode",
-      password: "test",
-    };
+    const fakeEndpoint: RestEndpoint = { containerName: "cerase-agent-test" };
     let captured: TurnTelemetry | undefined;
     mgr = new SessionManager(makeConfig({ reply: "partial", messageId: "msg_test_99" }), undefined, {
       endpointResolver: () => fakeEndpoint,

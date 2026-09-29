@@ -2,27 +2,30 @@
 // shadow-channel reconciliation; expand if other audit-channel features
 // land (M9 message export, session inspection, etc.).
 //
-// opencode serve listens on :3284 inside each cerase-agent-{template}
-// container with HTTP basic auth (username hardcoded to "opencode",
-// password is `OPENCODE_SERVER_PASSWORD` shared between agent and
-// bridge containers via docker-compose env). Within the bridge
-// container the agent is reachable by its compose service name —
-// for template id `doc-qa` the host is `cerase-agent-doc-qa`.
+// opencode serve listens on 127.0.0.1:3284 INSIDE each slot container, so it
+// is reached from inside it: `docker exec <slot> curl http://127.0.0.1:3284/…`
+// through the bridge's scoped docker proxy, the same road every turn already
+// takes (`docker exec -i <slot> opencode acp`). The bridge shares no network
+// with the slots: a network it shared with them was also the network a slot
+// reached the bridge's own :7476 on, and another slot's :3284.
+//
+// The command resolves the password inside the slot, file first and the
+// shared env second, exactly as the slot's entrypoint does when it binds the
+// server, so the bridge holds no slot password at all.
 //
 // See OpenAPI spec at GET /doc for the full schema. The single endpoint
 // we use here is `GET /session/{sessionID}/message/{messageID}` →
 // `{ info: AssistantMessage, parts: Part[] }`.
 
+import { execFile } from "node:child_process";
 import { makeLogger } from "./logger.js";
 import type { CanonicalMessage, CanonicalPart } from "./reconciler.js";
 
 const logger = makeLogger("cerase-acp.opencode-rest");
 
-/** Endpoint coordinates resolved per-agent at startup. */
+/** The slot whose REST surface a fetch reads, resolved per agent. */
 export interface RestEndpoint {
-  baseURL: string;
-  username: string;
-  password: string;
+  containerName: string;
 }
 
 /**
@@ -37,13 +40,22 @@ export type CanonicalFetcher = (
   messageId: string,
 ) => Promise<CanonicalMessage | null>;
 
+/** Runs `docker <args>`; `ok` is false on a non-zero exit or a timeout. */
+export type SlotExec = (args: string[], timeoutMs: number) => Promise<{ stdout: string; ok: boolean }>;
+
 /**
- * Build an endpoint for a known agent container name. Bridge and
- * agent containers live on the same docker network so the service
- * name resolves; password comes from the env var shared via
- * docker-compose. Returns `null` when the password isn't configured
- * (test environments, host shell), in which case M16 reconciliation
- * is skipped quietly.
+ * What runs inside the slot. The path is `$1`, an argument and never part of
+ * the script, so nothing a session id carries can become shell. The status code
+ * is appended on its own last line.
+ */
+export const SLOT_REST_SCRIPT =
+  'PW=$(cat /etc/opencode/server-password 2>/dev/null); [ -n "$PW" ] || PW="$OPENCODE_SERVER_PASSWORD"; ' +
+  'exec curl -sS --max-time 3 -u "opencode:$PW" -H "Accept: application/json" -w "\\n%{http_code}" "http://127.0.0.1:3284$1"';
+
+/**
+ * Build an endpoint for a known agent container name. Returns `null` for a
+ * name docker could not have given a container, in which case M16
+ * reconciliation is skipped quietly.
  *
  * Caller passes the container name directly (e.g. `cerase-agent-1`).
  * Older versions of this function accepted an `agentId` string and
@@ -53,41 +65,57 @@ export type CanonicalFetcher = (
  * derives the container name from `spawn.args[2]` of agents.yaml.
  */
 export function defaultEndpointForAgent(containerName: string): RestEndpoint | null {
-  const password = process.env.OPENCODE_SERVER_PASSWORD;
-  if (!password) return null;
-  return {
-    baseURL: `http://${containerName}:3284`,
-    username: "opencode",
-    password,
-  };
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(containerName)) return null;
+  return { containerName };
 }
 
+const dockerExec: SlotExec = (args, timeoutMs) =>
+  new Promise((resolve) => {
+    execFile(
+      "docker",
+      args,
+      { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+      (err: Error | null, stdout: string) => {
+        resolve({ stdout: stdout ?? "", ok: err === null });
+      },
+    );
+  });
+
 /**
- * Production fetcher. Uses Node's built-in `fetch` (Node ≥18). 2s
- * client-side timeout — the reconciliation is a "best effort"
- * after-the-fact recovery; if the REST endpoint isn't responding
- * promptly we degrade gracefully rather than blocking the turn.
+ * A fetcher that reads the message from inside the slot. 5s end to end: the
+ * reconciliation is a "best effort" after-the-fact recovery, and a slot that
+ * does not answer promptly degrades to "nothing reconciled" rather than
+ * blocking the turn.
  */
-export const defaultFetcher: CanonicalFetcher = async (endpoint, sessionId, messageId) => {
-  const url = `${endpoint.baseURL}/session/${sessionId}/message/${messageId}`;
-  const authz = `Basic ${Buffer.from(`${endpoint.username}:${endpoint.password}`).toString("base64")}`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2000);
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { authorization: authz, accept: "application/json" },
-      signal: ctrl.signal,
-    });
-    if (res.status === 404) return null;
-    if (!res.ok) {
-      logger.warn({ url, status: res.status }, "opencode REST returned non-2xx");
+export function execFetcher(exec: SlotExec = dockerExec): CanonicalFetcher {
+  return async (endpoint, sessionId, messageId) => {
+    const path = `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
+    const container = endpoint.containerName;
+    const { stdout, ok } = await exec(["exec", container, "sh", "-c", SLOT_REST_SCRIPT, "sh", path], 5000);
+    if (!ok) {
+      logger.warn({ container, path }, "opencode REST read from inside the slot failed");
       return null;
     }
-    const body = (await res.json()) as {
+    const cut = stdout.lastIndexOf("\n");
+    const status = Number(stdout.slice(cut + 1).trim());
+    if (status === 404) return null;
+    if (!(status >= 200 && status < 300)) {
+      logger.warn({ container, path, status }, "opencode REST returned non-2xx");
+      return null;
+    }
+    let body: {
       info?: { id?: string };
       parts?: Array<{ id: string; type: string; text?: string; ignored?: boolean }>;
     };
+    try {
+      body = JSON.parse(cut >= 0 ? stdout.slice(0, cut) : "");
+    } catch (err) {
+      logger.warn(
+        { container, path, err: (err as Error).message },
+        "opencode REST answered something that is not JSON",
+      );
+      return null;
+    }
     if (!body.info?.id || !Array.isArray(body.parts)) return null;
     const parts: CanonicalPart[] = body.parts.map((p) => ({
       id: p.id,
@@ -96,10 +124,8 @@ export const defaultFetcher: CanonicalFetcher = async (endpoint, sessionId, mess
       ignored: p.ignored ?? false,
     }));
     return { id: body.info.id, parts };
-  } catch (err) {
-    logger.warn({ url, err: (err as Error).message }, "opencode REST fetch failed");
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-};
+  };
+}
+
+/** Production fetcher: `docker exec` through the bridge's docker proxy. */
+export const defaultFetcher: CanonicalFetcher = execFetcher();

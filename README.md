@@ -224,7 +224,7 @@ groups; it never writes there.
 | `CERASE_ACP_REACHABILITY_INTERVAL_MS` | `60000` | How often each Discord adapter asks Discord whether it is answering (one unauthenticated gateway lookup). Every message sent or received counts as the same evidence, so a busy bridge rarely probes. |
 | `CERASE_ACP_REACHABILITY_STALE_MS` | `180000` | How long Discord may stay silent before the adapter reports `ready: false` on `/healthz` and `/internal/status`. Three missed probes, so one blip cannot flip it. |
 
-The six below were read by the code and documented nowhere until 2026-08-10
+The five below were read by the code and documented nowhere until 2026-08-10
 (`M21`). They are listed because an undocumented default is a decision somebody
 made once and nobody can find — not because you normally set them.
 
@@ -235,7 +235,6 @@ made once and nobody can find — not because you normally set them.
 | `CERASE_AGENT_WORKSPACE_ROOT` | `/home/agent/cerase/workspace` | Root the workspace-file broker serves from, inside the agent slot. |
 | `CERASE_MAX_ATTACHMENT_MB` | `64` | Ceiling on an inbound attachment. Anything larger is refused with a message the user can read, not truncated. |
 | `WORKSPACE_CHAT_PORT` | `7475` | Port the Workspace Chat webhook listener binds. Google's events arrive on `POST /chat/event`. |
-| `OPENCODE_SERVER_PASSWORD` | *(unset)* | Credential for the OpenCode REST server, when the slot runs one. |
 
 `BRIDGE_E2E_TEST=1` also exists and is **not** an operational knob: it enables a
 test-injection endpoint and the daemon logs *"never enable in production"* on
