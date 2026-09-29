@@ -1,9 +1,11 @@
 // A stand-in for the three Google endpoints the Workspace Chat adapter talks
 // to: the certificates Chat signs its events with, the OAuth token endpoint
 // that turns a service-account assertion into an access token, and the Chat
-// REST API that the reply is posted to and a message deleted from. All are served over real HTTP on
-// loopback, so the adapter's own request code runs unchanged and nothing
-// reaches the network.
+// REST API that the reply is posted to and a message's text rewritten on. All
+// are served over real HTTP on loopback, so the adapter's own request code runs
+// unchanged and nothing reaches the network. A request for anything else is
+// answered 404, as Google answers an unknown path, and recorded, so a test can
+// prove the adapter made no call the fake does not model.
 //
 // The token endpoint checks what Google checks: the assertion's signature
 // against the service account's public key, its issuer, its scope and its
@@ -59,6 +61,17 @@ export interface PostedMessage {
   authorization: string | undefined;
 }
 
+export interface EditedMessage {
+  /** The name Google gave the message when it was posted. */
+  name: string;
+  /** The message as it was posted. */
+  posted: PostedMessage;
+  /** The text the edit gave it. */
+  text: string;
+  /** The fields the edit asked to change, as the updateMask query parameter named them. */
+  updateMask: string;
+}
+
 export interface FakeGoogle {
   /** Base URL of the fake Chat API, the value workspace_chat.api_root takes. */
   apiRoot: string;
@@ -98,23 +111,25 @@ export interface FakeGoogle {
   holdNextPost(): () => void;
   /** Called when a post arrives, before it is answered. */
   onPost: ((message: PostedMessage) => void) | undefined;
-  /** Every message deleted, in the order the deletes arrived. */
-  deleted: PostedMessage[];
+  /** Every edit carried out, in the order the edits arrived. */
+  edits: EditedMessage[];
   /**
-   * Every delete refused because the name is no message the calling app
-   * posted: unknown, already deleted, or another app's. Google refuses these
-   * under app authentication; here they are also the evidence that the adapter
-   * tried to delete something that was not its own.
+   * Every edit refused because the name is no message the calling app posted:
+   * unknown, or another app's. Google refuses these under app authentication;
+   * here they are also the evidence that the adapter tried to edit something
+   * that was not its own.
    */
-  refusedDeletes: string[];
-  /** The next delete answers with this status and body instead of succeeding. */
-  failNextDelete(status: number, body: unknown): void;
-  /** The next delete is not answered until the returned function is called. */
-  holdNextDelete(): () => void;
-  /** Called when a delete has been carried out. */
-  onDelete: ((message: PostedMessage) => void) | undefined;
-  /** The posts that have not been deleted, in the order they were posted. */
-  standing(): PostedMessage[];
+  refusedEdits: string[];
+  /** The next edit answers with this status and body instead of succeeding. */
+  failNextEdit(status: number, body: unknown): void;
+  /** The next edit is not answered until the returned function is called. */
+  holdNextEdit(): () => void;
+  /** Called when an edit has been carried out. */
+  onEdit: ((edit: EditedMessage) => void) | undefined;
+  /** What each posted message says now, in the order they were posted: the conversation as the person sees it. */
+  shown(): string[];
+  /** Every request the fake does not serve, as method and path: a delete, for one. */
+  unserved: string[];
   close(): Promise<void>;
 }
 
@@ -139,11 +154,12 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   const owners = new Map<string, string>();
   const members = new Map<string, string[]>();
   const failures: { status: number; body: unknown }[] = [];
-  const deleteFailures: { status: number; body: unknown }[] = [];
+  const editFailures: { status: number; body: unknown }[] = [];
   const postHolds: Promise<void>[] = [];
-  const deleteHolds: Promise<void>[] = [];
-  // Every message posted, under the name it was given, with the account that posted it.
-  const messages = new Map<string, { message: PostedMessage; owner: string | undefined; deleted: boolean }>();
+  const editHolds: Promise<void>[] = [];
+  // Every message posted, under the name it was given, with the account that
+  // posted it and the text it says now.
+  const messages = new Map<string, { message: PostedMessage; owner: string | undefined; text: string }>();
   const hold = (holds: Promise<void>[]) => {
     let release = () => {};
     holds.push(new Promise<void>((resolve) => (release = resolve)));
@@ -172,12 +188,13 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     failNextPost: (status, body) => failures.push({ status, body }),
     holdNextPost: () => hold(postHolds),
     onPost: undefined,
-    deleted: [],
-    refusedDeletes: [],
-    failNextDelete: (status, body) => deleteFailures.push({ status, body }),
-    holdNextDelete: () => hold(deleteHolds),
-    onDelete: undefined,
-    standing: () => [...messages.values()].filter((m) => !m.deleted).map((m) => m.message),
+    edits: [],
+    refusedEdits: [],
+    failNextEdit: (status, body) => editFailures.push({ status, body }),
+    holdNextEdit: () => hold(editHolds),
+    onEdit: undefined,
+    shown: () => [...messages.values()].map((m) => m.text),
+    unserved: [],
   };
 
   let tokenUri = "";
@@ -255,26 +272,37 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         }
         fake.posts.push(message);
         const name = `${post[1]}/messages/${fake.posts.length}`;
-        messages.set(name, { message, owner: caller(req), deleted: false });
+        messages.set(name, { message, owner: caller(req), text: message.text });
         fake.onPost?.(message);
         return json(res, 200, { name, text: message.text });
       }
 
-      const remove = /^\/v1\/(spaces\/[^/]+\/messages\/[^/]+)$/.exec(url.pathname);
-      if (req.method === "DELETE" && remove?.[1]) {
+      // spaces.messages.patch changes only the fields its updateMask names, and
+      // Google refuses a patch that names none. A text sent without the mask
+      // saying so is ignored, as Google ignores it.
+      const patch = /^\/v1\/(spaces\/[^/]+\/messages\/[^/]+)$/.exec(url.pathname);
+      if (req.method === "PATCH" && patch?.[1]) {
+        const body = JSON.parse((await readBody(req)) || "{}") as { text?: string };
         if (!authorised(req)) return unauthenticated(res);
-        await deleteHolds.shift();
-        const failure = deleteFailures.shift();
+        const updateMask = url.searchParams.get("updateMask") ?? "";
+        if (updateMask === "") {
+          return json(res, 400, {
+            error: { code: 400, message: "update_mask is required.", status: "INVALID_ARGUMENT" },
+          });
+        }
+        await editHolds.shift();
+        const failure = editFailures.shift();
         if (failure) return json(res, failure.status, failure.body);
-        const found = messages.get(remove[1]);
-        if (!found || found.deleted || found.owner !== caller(req)) {
-          fake.refusedDeletes.push(remove[1]);
+        const found = messages.get(patch[1]);
+        if (!found || found.owner !== caller(req)) {
+          fake.refusedEdits.push(patch[1]);
           return json(res, 404, { error: { code: 404, message: "Message not found.", status: "NOT_FOUND" } });
         }
-        found.deleted = true;
-        fake.deleted.push(found.message);
-        fake.onDelete?.(found.message);
-        return json(res, 200, {});
+        if (updateMask.split(",").includes("text")) found.text = body.text ?? "";
+        const edit: EditedMessage = { name: patch[1], posted: found.message, text: found.text, updateMask };
+        fake.edits.push(edit);
+        fake.onEdit?.(edit);
+        return json(res, 200, { name: patch[1], text: found.text });
       }
 
       if (req.method === "GET" && url.pathname === "/v1/spaces") {
@@ -307,6 +335,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         return res.end(Buffer.from(`bytes of ${decodeURIComponent(media[1])}`));
       }
 
+      fake.unserved.push(`${req.method} ${url.pathname}`);
       return json(res, 404, { error: { code: 404, message: "not found", status: "NOT_FOUND" } });
     })();
   });

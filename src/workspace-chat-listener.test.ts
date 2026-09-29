@@ -24,7 +24,13 @@ vi.mock("./logger.js", () => ({
   },
 }));
 
-import { type FakeGoogle, makeServiceAccount, startFakeGoogle, writeKeyFile } from "./__tests__/fake-google.js";
+import {
+  type FakeGoogle,
+  makeServiceAccount,
+  type PostedMessage,
+  startFakeGoogle,
+  writeKeyFile,
+} from "./__tests__/fake-google.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
@@ -435,7 +441,7 @@ describe("workspace-chat: one Chat app per assistant", () => {
     await turnCount(1);
     turns[0]!.end("Prima risposta.");
     await replyCount(1);
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    await vi.waitFor(() => expect(google.edits).toHaveLength(1));
     logs.length = 0;
 
     google.failNextPost(403, {
@@ -799,15 +805,21 @@ describe("workspace-chat: one person, two assistants, two direct-message spaces"
 });
 
 // Chat shows a person neither that an app read their message nor that it is
-// writing, so the app posts a line saying so and deletes it once the answer is
-// on its way. Each case below is a way a turn can end, and in every one of them
-// the line has to go, taken down by the turn that posted it and no other. None
-// of it may cost the answer anything: a line Google refuses to post or to
-// delete, or answers slowly, is logged and the answer goes out regardless.
+// writing, so the app posts a line saying so and, once the answer is on its
+// way, rewrites that line to a single ellipsis. Each case below is a way a turn
+// can end, and every one of them ends the same way: the line edited once, by
+// the turn that posted it and no other, and nothing deleted. The answer is
+// always a message of its own. None of it may cost the answer anything: a line
+// Google refuses to post or to edit, or answers slowly, is logged and the
+// answer goes out regardless.
 describe("workspace-chat: the line that says the assistant is writing", () => {
   const MARIO = "mario.rossi@example.com";
   const IT = "ciao, mi prepari il riepilogo della settimana?";
   const WRITING_IT = writingNotice("it");
+  // Written out rather than imported, so the character the line ends as is
+  // pinned here and not only wherever the adapter takes it from.
+  const ELLIPSIS = "…";
+  const NOT_EDITED = "workspace-chat placeholder not edited; it still says the assistant is writing";
   let google: FakeGoogle;
   let dir: string;
   let app: NonNullable<AgentConfig["workspace_chat"]>;
@@ -824,6 +836,25 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
 
   const placeholders = () => google.posts.filter((p) => WRITING.has(p.text));
   const texts = (messages: { text: string }[]) => messages.map((m) => m.text);
+
+  // Long enough for a request sent after the one a test waited for, a second
+  // edit or a delete, to reach the fake on loopback and be counted.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+  /**
+   * The ending every path must reach, checked once the edits have landed and
+   * any further request the turns sent has had time to land too: each of
+   * `placeholders`, in that order, rewritten exactly once to the ellipsis with
+   * only its text named in the mask, no other message edited, and no request
+   * the fake does not serve, which is where a delete would go.
+   */
+  async function expectEachEndedOnce(...ended: PostedMessage[]) {
+    await vi.waitFor(() => expect(google.edits.length).toBeGreaterThanOrEqual(ended.length));
+    await settle();
+    expect(google.edits.map((e) => [e.posted, e.text, e.updateMask])).toEqual(ended.map((p) => [p, ELLIPSIS, "text"]));
+    expect(google.refusedEdits).toEqual([]);
+    expect(google.unserved).toEqual([]);
+  }
 
   async function startWith(d: Dispatcher) {
     await adapter?.stop();
@@ -897,84 +928,93 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("is posted into the message's thread, and deleted once the first part of the answer is posted, while the turn still runs", async () => {
+  it("is posted into the message's thread, and turns into an ellipsis once the first part of the answer is posted, while the turn still runs", async () => {
     await write({ thread: "spaces/DM-MARIO/threads/T7", threadReply: true });
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     expect(google.posts.map((p) => [p.text, p.thread])).toEqual([[WRITING_IT, "spaces/DM-MARIO/threads/T7"]]);
+    const [placeholder] = google.posts;
 
+    // The answer is on screen before the line changes: the edit is sent once
+    // the post has been answered, never ahead of it.
+    let postedWhenEdited: string[] = [];
+    google.onEdit = () => {
+      postedWhenEdited = texts(google.posts);
+    };
     const first = "Ecco la prima parte del riepilogo della settimana. ".repeat(6).trim();
     turns[0]!.say(first);
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
+    await vi.waitFor(() => expect(google.edits).toHaveLength(1));
     expect(turns[0]!.ended).toBe(false);
-    expect(texts(google.deleted)).toEqual([WRITING_IT]);
-    expect(texts(google.standing())).toEqual([first]);
+    expect(postedWhenEdited).toEqual([WRITING_IT, first]);
+    expect(google.shown()).toEqual([ELLIPSIS, first]);
 
     turns[0]!.end("E questo è il resto.");
     await vi.waitFor(() => expect(google.posts).toHaveLength(3));
     // The answer is posted as messages of its own, never written over the
     // placeholder: a new message is what makes the phone show the answer.
-    expect(texts(google.standing())).toEqual([first, "E questo è il resto."]);
-    expect(placeholders()).toHaveLength(1);
-    expect(google.refusedDeletes).toEqual([]);
+    expect(google.shown()).toEqual([ELLIPSIS, first, "E questo è il resto."]);
+    expect(placeholders()).toEqual([placeholder]);
+    await expectEachEndedOnce(placeholder!);
   });
 
-  it("is posted once and deleted once for an answer long enough to be sent in several messages, in the person's language", async () => {
+  it("is posted once and edited once for an answer long enough to be sent in several messages, in the person's language", async () => {
     const english = "hello, can you help me with the difference between these two documents?";
     await write({ text: english });
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     expect(texts(google.posts)).toEqual([writingNotice("en")]);
+    const [placeholder] = google.posts;
 
     turns[0]!.end("This is one sentence of a long answer. ".repeat(70));
     await vi.waitFor(() => expect(google.posts.length).toBeGreaterThanOrEqual(3));
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(texts(google.deleted)).toEqual([writingNotice("en")]);
-    expect(placeholders()).toHaveLength(1);
-    expect(google.standing().some((p) => WRITING.has(p.text))).toBe(false);
-    expect(google.refusedDeletes).toEqual([]);
+    await expectEachEndedOnce(placeholder!);
+    expect(placeholders()).toEqual([placeholder]);
+    const [top, ...answer] = google.shown();
+    expect(top).toBe(ELLIPSIS);
+    expect(answer.length).toBeGreaterThanOrEqual(2);
+    expect(answer.some((t) => WRITING.has(t) || t === ELLIPSIS)).toBe(false);
   });
 
-  it("is deleted when the turn fails, and the failure notice stays", async () => {
+  it("turns into an ellipsis when the turn fails, and the failure notice follows it", async () => {
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     turns[0]!.fail(new Error("the agent process exited"));
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(texts(google.standing())).toEqual([pickErrorMessage(IT)]);
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()).toEqual([ELLIPSIS, pickErrorMessage(IT)]);
   });
 
-  it("is deleted when the turn runs past its time limit, and the notice saying so stays", async () => {
+  it("turns into an ellipsis when the turn runs past its time limit, and the notice saying so follows it", async () => {
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     turns[0]!.fail(new TurnWatchdogError("ceiling", 600_000));
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(texts(google.standing())).toEqual([pickTooLongMessage(IT)]);
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()).toEqual([ELLIPSIS, pickTooLongMessage(IT)]);
   });
 
-  it("is deleted when the turn ends with an empty reply, and the notice saying so stays", async () => {
+  it("turns into an ellipsis when the turn ends with an empty reply, and the notice saying so follows it", async () => {
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     turns[0]!.end();
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(texts(google.standing())).toEqual([pickEmptyMessage(IT)]);
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()).toEqual([ELLIPSIS, pickEmptyMessage(IT)]);
   });
 
   // The one ending in which nothing at all is posted: all the turn wrote was
   // the engine's own summary, which never reaches the chat. No send target
-  // runs, so only the turn's own exit can take the line down.
-  it("is deleted when the turn ends with nothing posted at all", async () => {
+  // runs, so only the turn's own exit can end the line.
+  it("turns into an ellipsis when the turn ends with nothing posted at all", async () => {
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     turns[0]!.end("## Objective\nriassumere\n\n## Work state\nin corso\n\n## Next move\nrispondere\n");
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(google.standing()).toEqual([]);
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()).toEqual([ELLIPSIS]);
     expect(google.posts).toHaveLength(1);
   });
 
-  it("is deleted when the handler throws before the dispatcher made a send target", async () => {
+  it("turns into an ellipsis when the handler throws before the dispatcher made a send target", async () => {
     await startWith({
       noticeLang: () => "it",
       handleMessage: async () => {
@@ -982,33 +1022,42 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
       },
     } as unknown as Dispatcher);
     await write();
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(google.standing()).toEqual([]);
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()).toEqual([ELLIPSIS]);
   });
 
   // Two messages in quick succession are two turns, each with its own line.
-  // A turn takes down its own and no other, and a message sent to the person
-  // while both run, a scheduled one, takes down neither.
-  it("belongs to its own turn: two turns from one person each delete their own, and a scheduled message deletes none", async () => {
+  // A turn ends its own and no other, and a message sent to the person while
+  // both run, a scheduled one, ends neither.
+  it("belongs to its own turn: two turns from one person each edit their own, and a scheduled message edits none", async () => {
     await write({ thread: "spaces/DM-MARIO/threads/TA", threadReply: true, text: "prima domanda?" });
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     await write({ thread: "spaces/DM-MARIO/threads/TB", threadReply: true, text: "seconda domanda?" });
     await vi.waitFor(() => expect(google.posts).toHaveLength(2));
     await vi.waitFor(() => expect(turns).toHaveLength(2));
     expect(google.posts.map((p) => p.thread)).toEqual(["spaces/DM-MARIO/threads/TA", "spaces/DM-MARIO/threads/TB"]);
+    const [placeholderA, placeholderB] = google.posts;
 
     expect(await adapter!.makeSendTarget(MARIO)("Promemoria.")).toEqual({ ok: true });
-    const deletedThreads = () => google.deleted.map((p) => p.thread);
+    await settle();
+    expect(google.edits).toEqual([]);
+
     turns[0]!.end("Risposta alla prima.");
-    await vi.waitFor(() => expect(deletedThreads()).toContain("spaces/DM-MARIO/threads/TA"));
-    expect(deletedThreads()).toEqual(["spaces/DM-MARIO/threads/TA"]);
-    expect(placeholders().filter((p) => google.standing().includes(p))).toEqual([google.posts[1]]);
+    await vi.waitFor(() => expect(google.edits).toHaveLength(1));
+    await settle();
+    expect(google.edits.map((e) => e.posted)).toEqual([placeholderA]);
+    expect(google.shown()).toEqual([ELLIPSIS, WRITING_IT, "Promemoria.", "Risposta alla prima."]);
 
     turns[1]!.end("Risposta alla seconda.");
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(2));
-    expect(deletedThreads()).toEqual(["spaces/DM-MARIO/threads/TA", "spaces/DM-MARIO/threads/TB"]);
-    expect(texts(google.standing())).toEqual(["Promemoria.", "Risposta alla prima.", "Risposta alla seconda."]);
-    expect(google.refusedDeletes).toEqual([]);
+    await expectEachEndedOnce(placeholderA!, placeholderB!);
+    expect(google.shown()).toEqual([
+      ELLIPSIS,
+      ELLIPSIS,
+      "Promemoria.",
+      "Risposta alla prima.",
+      "Risposta alla seconda.",
+    ]);
   });
 
   it("refused by Google is logged, and the turn and its answer go on without it", async () => {
@@ -1025,12 +1074,15 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
         logs.filter((l) => l.msg === "workspace-chat placeholder not posted; the turn goes on without it"),
       ).toHaveLength(1),
     );
-    expect(google.deleted).toEqual([]);
-    expect(google.refusedDeletes).toEqual([]);
+    // Nothing was posted, so there is nothing to edit, and the answer is not edited in its place.
+    await expectEachEndedOnce();
+    expect(google.shown()).toEqual(["Ecco il riepilogo."]);
     expect(logs.filter((l) => l.level === "error")).toEqual([]);
   });
 
-  it("answered slowly by Google does not hold up the turn, and is deleted once it lands after the answer", async () => {
+  // Posted after the answer, the line ends below it rather than above: the
+  // edit waits for the post it rewrites, and the answer waits for neither.
+  it("answered slowly by Google does not hold up the turn, and still turns into an ellipsis once it lands after the answer", async () => {
     const release = google.holdNextPost();
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
@@ -1038,46 +1090,50 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     turns[0]!.end("Ecco il riepilogo.");
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     expect(texts(google.posts)).toEqual(["Ecco il riepilogo."]);
+    expect(google.edits).toEqual([]);
 
     release();
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(texts(google.deleted)).toEqual([WRITING_IT]);
-    expect(texts(google.standing())).toEqual(["Ecco il riepilogo."]);
+    await vi.waitFor(() => expect(google.posts).toHaveLength(2));
+    expect(texts(google.posts)).toEqual(["Ecco il riepilogo.", WRITING_IT]);
+    await expectEachEndedOnce(google.posts[1]!);
+    expect(google.shown()).toEqual(["Ecco il riepilogo.", ELLIPSIS]);
   });
 
-  it("deleted slowly does not hold up any part of the answer", async () => {
-    const release = google.holdNextDelete();
+  it("edited slowly does not hold up any part of the answer", async () => {
+    const release = google.holdNextEdit();
     await write();
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     turns[0]!.end("This is one sentence of a long answer. ".repeat(70));
     await vi.waitFor(() => expect(google.posts.length).toBeGreaterThanOrEqual(3));
-    expect(google.deleted).toEqual([]);
+    expect(google.edits).toEqual([]);
+    expect(google.shown()[0]).toBe(WRITING_IT);
 
     release();
-    await vi.waitFor(() => expect(google.deleted).toHaveLength(1));
-    expect(texts(google.deleted)).toEqual([WRITING_IT]);
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()[0]).toBe(ELLIPSIS);
   });
 
-  it("that Google refuses to delete is logged, not thrown, and the answer is delivered", async () => {
-    google.failNextDelete(403, {
+  it("that Google refuses to edit is logged once, not thrown and not retried, and the answer is delivered", async () => {
+    google.failNextEdit(403, {
       error: { code: 403, message: "The caller does not have permission", status: "PERMISSION_DENIED" },
     });
     await write();
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     turns[0]!.end("Ecco il riepilogo.");
-    await vi.waitFor(() =>
-      expect(
-        logs.filter((l) => l.msg === "workspace-chat placeholder not deleted; it stays in the conversation"),
-      ).toHaveLength(1),
-    );
-    const warned = logs.find((l) => l.msg === "workspace-chat placeholder not deleted; it stays in the conversation")!;
+    await vi.waitFor(() => expect(logs.filter((l) => l.msg === NOT_EDITED)).toHaveLength(1));
+    await settle();
+    expect(logs.filter((l) => l.msg === NOT_EDITED)).toHaveLength(1);
+    const warned = logs.find((l) => l.msg === NOT_EDITED)!;
     expect(warned).toMatchObject({ level: "warn", fields: { agentId: "agent-1", userId: MARIO } });
     expect(String(warned.fields.reason)).toContain(
-      "spaces.messages.delete on spaces/DM-MARIO/messages/1 failed: HTTP 403",
+      "spaces.messages.patch on spaces/DM-MARIO/messages/1 failed: HTTP 403",
     );
-    expect(texts(google.standing())).toEqual([WRITING_IT, "Ecco il riepilogo."]);
+    // A retry would have gone through, since only the first edit is refused.
+    expect(google.edits).toEqual([]);
+    expect(google.shown()).toEqual([WRITING_IT, "Ecco il riepilogo."]);
+    expect(google.unserved).toEqual([]);
     expect(logs.filter((l) => l.level === "error")).toEqual([]);
   });
 });

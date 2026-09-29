@@ -1,7 +1,7 @@
 // The Google Chat REST calls the Workspace Chat adapter makes as the tenant's
-// Chat app: posting a reply, deleting a message it posted, finding a user's
-// direct-message space, listing the app's direct-message spaces and
-// downloading an upload, each authorised with app authentication.
+// Chat app: posting a reply, rewriting the text of a message it posted,
+// finding a user's direct-message space, listing the app's direct-message
+// spaces and downloading an upload, each authorised with app authentication.
 //
 // App authentication is the OAuth 2.0 service-account flow: a JWT naming the
 // service account, the chat.bot scope and the token endpoint, signed with the
@@ -166,12 +166,17 @@ export class WorkspaceChatApi {
   }
 
   /**
-   * `spaces.messages.delete`: removes the message called `name`. Under app
-   * authentication Google deletes only a message this app created, so a name
+   * `spaces.messages.patch` with `updateMask=text`: replaces the text of the
+   * message called `name` and leaves the rest of it as it was. Under app
+   * authentication Google edits only a message this app created, so a name
    * that is somebody else's message is refused rather than acted on.
    */
-  async deleteMessage(name: string): Promise<void> {
-    const resp = await this.call("spaces.messages.delete", name, `/v1/${name}`, { method: "DELETE" });
+  async updateMessageText(name: string, text: string): Promise<void> {
+    const resp = await this.call("spaces.messages.patch", name, `/v1/${name}?updateMask=text`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
     await resp.body?.cancel();
   }
 

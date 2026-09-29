@@ -27,9 +27,11 @@
 // Chat shows a person neither that an app read their message nor that it is
 // writing: a reaction needs user authentication and there is no typing call.
 // So the app posts one line saying it is writing as soon as the message is
-// accepted, and deletes it when the turn's first reply is posted, or when the
-// turn ends without one. The answer is a message of its own, so the phone's
-// notification carries the answer and not the placeholder.
+// accepted, and rewrites its text to an ellipsis when the turn's first reply
+// is posted, or when the turn ends without one. The line is edited rather than
+// deleted, because a line that vanishes when the answer lands reads badly. The
+// answer is a message of its own, so the phone's notification carries the
+// answer and not the placeholder.
 //
 // Direct messages only: no group spaces, no cards.
 
@@ -41,7 +43,7 @@ import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { directMessagesOnlyNotice, writingNotice } from "./platform-notices.js";
+import { directMessagesOnlyNotice, WRITING_ENDED_NOTICE, writingNotice } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
 import {
   ChatApiError,
@@ -307,30 +309,34 @@ function apiFor(app: ChatApp): WorkspaceChatApi {
   return api;
 }
 
-/** Takes down a turn's placeholder. Idempotent, never rejects, and resolves once the delete has been answered. */
-type RemovePlaceholder = () => Promise<void>;
+/**
+ * Ends a turn's placeholder by rewriting its text to an ellipsis. Idempotent,
+ * never rejects, and resolves once the edit has been answered.
+ */
+type EndPlaceholder = () => Promise<void>;
 
 /**
- * Posts the line saying the assistant is writing, and returns what deletes it.
+ * Posts the line saying the assistant is writing, and returns what ends it.
  *
  * Neither half may cost the answer anything. The post is not awaited by the
- * turn, and a refused one is logged and leaves nothing to delete. The delete
- * waits for the post it undoes, so a placeholder that lands after the answer is
- * still taken down, and it is not awaited by the send that asks for it. Both
- * failures are logged and swallowed: a line left standing is a cosmetic defect,
- * an answer lost to it is not.
+ * turn, and a refused one is logged and leaves nothing to edit. The edit waits
+ * for the post it rewrites, so a placeholder that lands after the answer is
+ * still ended, and it is not awaited by the send that asks for it. It is made
+ * once however often it is asked for. Both failures are logged and swallowed:
+ * a line that still says the assistant is writing is a cosmetic defect, an
+ * answer lost to it is not.
  */
 function postPlaceholder(
   api: WorkspaceChatApi,
   conversation: Conversation & { space: string },
   text: string,
   context: { agentId: string; userId: string },
-): RemovePlaceholder {
+): EndPlaceholder {
   const { space, thread } = conversation;
   const posted = api.createMessage(space, text, thread).then(
     (name) => {
       if (name === undefined) {
-        logger.warn({ ...context, space }, "workspace-chat placeholder posted without a name, so it cannot be deleted");
+        logger.warn({ ...context, space }, "workspace-chat placeholder posted without a name, so it cannot be edited");
       }
       return name;
     },
@@ -342,20 +348,20 @@ function postPlaceholder(
       return undefined;
     },
   );
-  let removed: Promise<void> | undefined;
+  let ended: Promise<void> | undefined;
   return () => {
-    removed ??= posted.then(async (name) => {
+    ended ??= posted.then(async (name) => {
       if (name === undefined) return;
       try {
-        await api.deleteMessage(name);
+        await api.updateMessageText(name, WRITING_ENDED_NOTICE);
       } catch (err) {
         logger.warn(
           { ...context, message: name, reason: (err as Error).message },
-          "workspace-chat placeholder not deleted; it stays in the conversation",
+          "workspace-chat placeholder not edited; it still says the assistant is writing",
         );
       }
     });
-    return removed;
+    return ended;
   };
 }
 
@@ -378,10 +384,10 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
   let spaces: WorkspaceChatSpaces | undefined;
   // The placeholder of the turn about to call the dispatcher, until that turn's
   // send target takes it. Handed over rather than kept per person, because a
-  // turn may delete its own placeholder only: a second message from the same
+  // turn may end its own placeholder only: a second message from the same
   // person has a placeholder of its own, and neither the first turn's reply nor
-  // a scheduled message sent meanwhile may take it down.
-  const placeholders = new Map<string, RemovePlaceholder>();
+  // a scheduled message sent meanwhile may end it.
+  const placeholders = new Map<string, EndPlaceholder>();
 
   /**
    * The person's direct-message space with this app, when no event and no
@@ -425,7 +431,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     // person should wait to see that the message arrived.
     const space = conversation.space;
     const writing = writingNotice(dispatcher.noticeLang(agent.id, userId, text));
-    const removePlaceholder: RemovePlaceholder =
+    const endPlaceholder: EndPlaceholder =
       api && space !== undefined
         ? postPlaceholder(api, { ...conversation, space }, writing, { agentId: agent.id, userId })
         : async () => {};
@@ -455,17 +461,18 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       // await, so the conversation and the placeholder set on the lines before
       // are the ones this reply uses, even when another message from the same
       // person arrives while it runs. The oversize notice above goes out before
-      // the placeholder is handed over, so it leaves the placeholder standing.
+      // the placeholder is handed over, so the placeholder still says the
+      // assistant is writing after it.
       conversations.set(userId, conversation);
-      placeholders.set(userId, removePlaceholder);
+      placeholders.set(userId, endPlaceholder);
       spaces?.remember(userId, conversation.space);
       await dispatcher.handleMessage(agent.id, userId, outText);
     } finally {
       // The leak guard for a turn that posted nothing, or that threw before its
       // send target was made. A turn that answered has already asked for this,
       // and asking again costs nothing.
-      if (placeholders.get(userId) === removePlaceholder) placeholders.delete(userId);
-      void removePlaceholder();
+      if (placeholders.get(userId) === endPlaceholder) placeholders.delete(userId);
+      void endPlaceholder();
     }
   }
 
@@ -516,7 +523,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     makeSendTarget(userId: string) {
       // Taken now, not at send time: see runTurn.
       const conversation = conversations.get(userId);
-      const removePlaceholder = placeholders.get(userId);
+      const endPlaceholder = placeholders.get(userId);
       placeholders.delete(userId);
       return async (chunk: string): Promise<DeliveryResult> => {
         let space = conversation?.space;
@@ -572,9 +579,9 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           return { ok: false, error };
         } finally {
           // After the post rather than before it, and not awaited: the answer
-          // is on screen before the placeholder leaves, and a slow or refused
-          // delete holds up neither this chunk nor the next.
-          void removePlaceholder?.();
+          // is on screen before the placeholder turns into an ellipsis, and a
+          // slow or refused edit holds up neither this chunk nor the next.
+          void endPlaceholder?.();
         }
       };
     },

@@ -65,27 +65,40 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
     ]);
   });
 
-  // The line saying the assistant is writing is deleted with the same key it
-  // was posted with, by the name Google returned for it.
-  it("a post returns the message's name, and the same app deletes the message by it", async () => {
+  // The line saying the assistant is writing is rewritten with the same key it
+  // was posted with, by the name Google returned for it. Only its text changes:
+  // the mask names that field alone, and the message stays where it was.
+  it("a post returns the message's name, and the same app rewrites that message's text by it", async () => {
     const client = api();
     const name = await client.createMessage("spaces/AAAA", "Sto scrivendo…");
     expect(name).toBe("spaces/AAAA/messages/1");
-    await client.deleteMessage(name!);
-    expect(google.deleted.map((p) => p.text)).toEqual(["Sto scrivendo…"]);
-    expect(google.standing()).toEqual([]);
+    await client.updateMessageText(name!, "…");
+    expect(google.edits.map((e) => [e.name, e.posted.text, e.text, e.updateMask])).toEqual([
+      ["spaces/AAAA/messages/1", "Sto scrivendo…", "…", "text"],
+    ]);
+    expect(google.shown()).toEqual(["…"]);
+    expect(google.unserved).toEqual([]);
     expect(google.tokenRequests()).toBe(1);
   });
 
-  it("a refused delete raises an error naming the call, the message and Google's reason", async () => {
-    const client = api();
-    const name = await client.createMessage("spaces/AAAA", "Sto scrivendo…");
-    await client.deleteMessage(name!);
-    const err = await client.deleteMessage(name!).catch((e: unknown) => e);
+  it("a refused edit raises an error naming the call, the message and Google's reason", async () => {
+    const other = makeServiceAccount("somebody-else@other-project.iam.gserviceaccount.com");
+    google.trust(other);
+    const otherKey = join(dir, "other.json");
+    writeKeyFile(otherKey, other, google.tokenUri);
+    const name = await new WorkspaceChatApi({ keyPath: otherKey, apiRoot: google.apiRoot }).createMessage(
+      "spaces/AAAA",
+      "Un messaggio di un'altra app.",
+    );
+    const err = await api()
+      .updateMessageText(name!, "…")
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ChatApiError);
     expect((err as Error).message).toBe(
-      "spaces.messages.delete on spaces/AAAA/messages/1 failed: HTTP 404 NOT_FOUND: Message not found.",
+      "spaces.messages.patch on spaces/AAAA/messages/1 failed: HTTP 404 NOT_FOUND: Message not found.",
     );
+    expect(google.refusedEdits).toEqual(["spaces/AAAA/messages/1"]);
+    expect(google.shown()).toEqual(["Un messaggio di un'altra app."]);
   });
 
   it("without a thread the reply goes to the space and asks for no reply option", async () => {

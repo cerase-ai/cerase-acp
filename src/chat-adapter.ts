@@ -99,12 +99,13 @@ export interface ChatAdapter {
    * cleared by the send that precedes it, NO per-chunk re-trigger.
    *
    * Workspace Chat has no indicator to raise, so its handler posts a
-   * placeholder message instead, and the send target deletes it after the
-   * turn's first post rather than before: a delete re-raises nothing, and
-   * waiting on it would hold the answer up. The placeholder is handed to the
-   * one send target made for its turn, not kept per user, because two turns
-   * from one person each have their own; the handler's `finally` is the same
-   * leak guard as above.
+   * placeholder message instead, and the send target rewrites its text to an
+   * ellipsis after the turn's first post rather than before: an edit re-raises
+   * nothing, and waiting on it would hold the answer up. The placeholder is
+   * edited, never deleted, and the answer is always a new message. It is
+   * handed to the one send target made for its turn, not kept per user,
+   * because two turns from one person each have their own; the handler's
+   * `finally` is the same leak guard as above.
    */
   makeSendTarget(userId: string): (chunk: string) => Promise<DeliveryResult>;
 

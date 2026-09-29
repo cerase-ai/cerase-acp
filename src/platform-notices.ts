@@ -134,8 +134,8 @@ export function directMessagesOnlyNotice(lang: SupportedLang): string {
 /**
  * The line a Google Chat conversation shows while its answer is being written.
  * Chat gives an app neither a read receipt nor a typing indicator, so the app
- * posts this on receipt and deletes it once the answer is on its way: it has to
- * read as a status, and it is never the last thing in the conversation.
+ * posts this on receipt and rewrites it to WRITING_ENDED_NOTICE once the answer
+ * is on its way: it has to read as a status.
  */
 export function writingNotice(lang: SupportedLang): string {
   return pick(
@@ -148,6 +148,13 @@ export function writingNotice(lang: SupportedLang): string {
     lang,
   );
 }
+
+/**
+ * What the writing line says once the turn it announced has ended: a single
+ * horizontal ellipsis, the same in every language. The line stays where it was
+ * posted, above the answer, which arrives as a message of its own.
+ */
+export const WRITING_ENDED_NOTICE = "\u2026";
 
 /**
  * The last segment of a workspace-relative path.
