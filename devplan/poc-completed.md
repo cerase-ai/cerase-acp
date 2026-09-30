@@ -207,3 +207,4 @@ Carried forward in [`v0.1.md`](v0.1.md):
 - **Skill command pinning, slash commands, button-based permission approval**
   — explicit UX-incompatibility per cerase M2 rules.
 - **Doctor checks** — structured pino logs cover the PoC observability need.
+| `M-UNDICI-HIGH-CVE-BLOCKED-THE-PUBLISH-1` | 09-30 | The publish of `b8982d5` was refused by Trivy for CVE-2026-19534 (high) in `undici` 6.28.0, pulled in by discord.js. Raised to 6.29.0, the same change as Dependabot PR #39, which is closed; the next publish passed the scan (`sha-562c6a9`). | `42b7c94` |
