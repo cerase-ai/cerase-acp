@@ -187,14 +187,15 @@ message was written in one.
 
 Chat gives an app neither a read receipt nor a typing indicator: a reaction
 needs user authentication, and the API has no typing call. So as soon as a
-message is accepted the app posts one line in the conversation's language
-(*Sto scrivendo…* in Italian) where the reply will go, and once the first part
-of the reply has been posted it rewrites that line to a single *…* with
+message is accepted the app posts a single speech balloon, 💬, the same in
+every language, where the reply will go, and once the first part of the reply
+has been posted it rewrites that line to a single *…* with
 `spaces.messages.patch` and `updateMask=text` (same key, same scope; Google lets
 an app edit only the messages it posted). A turn that ends with nothing to say,
 fails, runs out of time or throws leaves the line as *…* too. Nothing is
 deleted. The reply is a new message below the line, so the phone's notification
-shows the reply rather than the placeholder. Each message has its own
+shows the reply rather than the placeholder, and a 💬 still standing later
+means the assistant is still working on that message. Each message has its own
 placeholder: two messages sent in quick succession show two, and each one is
 edited once, by its own turn. A message sent while no turn is running, such as
 a scheduled one, edits none. A placeholder Google refuses to post or edit is

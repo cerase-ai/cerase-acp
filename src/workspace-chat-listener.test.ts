@@ -41,7 +41,7 @@ import {
   pickRefusalMessage,
   pickTooLongMessage,
 } from "./dispatcher.js";
-import { directMessagesOnlyNotice, writingNotice } from "./platform-notices.js";
+import { directMessagesOnlyNotice } from "./platform-notices.js";
 import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
 import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
@@ -49,11 +49,12 @@ import { EMITTENTE, svuotaCache, URL_CERTIFICATI } from "./workspace-chat-verify
 
 process.env.WORKSPACE_CHAT_PORT = "0";
 
-// Every accepted message is first answered by the line saying the assistant is
-// writing. The tests about where and with which key a reply goes count replies,
-// and leave that line to the tests about it.
-const WRITING = new Set((["it", "en", "es", "fr"] as const).map((lang) => writingNotice(lang)));
-const repliesIn = (google: FakeGoogle) => google.posts.filter((p) => !WRITING.has(p.text));
+// Every accepted message is first answered by the placeholder, a single speech
+// balloon. The tests about where and with which key a reply goes count replies,
+// and leave that line to the tests about it. Written out rather than imported,
+// so the character posted is pinned here and not only in the adapter.
+const BALLOON = "💬";
+const repliesIn = (google: FakeGoogle) => google.posts.filter((p) => p.text !== BALLOON);
 
 const PROJECT = "111111111111";
 const PROJECT_2 = "222222222222";
@@ -805,7 +806,7 @@ describe("workspace-chat: one person, two assistants, two direct-message spaces"
 });
 
 // Chat shows a person neither that an app read their message nor that it is
-// writing, so the app posts a line saying so and, once the answer is on its
+// writing, so the app posts a speech balloon and, once the answer is on its
 // way, rewrites that line to a single ellipsis. Each case below is a way a turn
 // can end, and every one of them ends the same way: the line edited once, by
 // the turn that posted it and no other, and nothing deleted. The answer is
@@ -815,7 +816,6 @@ describe("workspace-chat: one person, two assistants, two direct-message spaces"
 describe("workspace-chat: the line that says the assistant is writing", () => {
   const MARIO = "mario.rossi@example.com";
   const IT = "ciao, mi prepari il riepilogo della settimana?";
-  const WRITING_IT = writingNotice("it");
   // Written out rather than imported, so the character the line ends as is
   // pinned here and not only wherever the adapter takes it from.
   const ELLIPSIS = "…";
@@ -834,7 +834,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     ended: boolean;
   }[];
 
-  const placeholders = () => google.posts.filter((p) => WRITING.has(p.text));
+  const placeholders = () => google.posts.filter((p) => p.text === BALLOON);
   const texts = (messages: { text: string }[]) => messages.map((m) => m.text);
 
   // Long enough for a request sent after the one a test waited for, a second
@@ -932,7 +932,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     await write({ thread: "spaces/DM-MARIO/threads/T7", threadReply: true });
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
-    expect(google.posts.map((p) => [p.text, p.thread])).toEqual([[WRITING_IT, "spaces/DM-MARIO/threads/T7"]]);
+    expect(google.posts.map((p) => [p.text, p.thread])).toEqual([[BALLOON, "spaces/DM-MARIO/threads/T7"]]);
     const [placeholder] = google.posts;
 
     // The answer is on screen before the line changes: the edit is sent once
@@ -945,7 +945,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     turns[0]!.say(first);
     await vi.waitFor(() => expect(google.edits).toHaveLength(1));
     expect(turns[0]!.ended).toBe(false);
-    expect(postedWhenEdited).toEqual([WRITING_IT, first]);
+    expect(postedWhenEdited).toEqual([BALLOON, first]);
     expect(google.shown()).toEqual([ELLIPSIS, first]);
 
     turns[0]!.end("E questo è il resto.");
@@ -957,11 +957,38 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     await expectEachEndedOnce(placeholder!);
   });
 
-  it("is posted once and edited once for an answer long enough to be sent in several messages, in the person's language", async () => {
+  // A symbol has no language, so a message in any of the four the bridge
+  // speaks gets the same one code point, sent exactly as written here, and no
+  // sentence in its place.
+  it("is a single speech balloon, U+1F4AC, whatever language the message is written in", async () => {
+    const messages = [
+      "ciao, mi prepari il riepilogo della settimana?",
+      "hello, can you help me with the difference between these two documents?",
+      "hola, ¿me preparas el resumen de la semana, por favor?",
+      "bonjour, peux-tu me préparer le résumé de la semaine, s'il te plaît ?",
+    ];
+    expect(messages.map((m) => detectLanguage(m))).toEqual(["it", "en", "es", "fr"]);
+    for (const [i, text] of messages.entries()) {
+      await write({ text, thread: `spaces/DM-MARIO/threads/L${i}`, threadReply: true });
+      await vi.waitFor(() => expect(google.attemptedPosts).toHaveLength(i + 1));
+    }
+    await vi.waitFor(() => expect(turns).toHaveLength(messages.length));
+    expect(google.attemptedPosts.map((p) => p.text)).toEqual([BALLOON, BALLOON, BALLOON, BALLOON]);
+    expect([...BALLOON].map((c) => c.codePointAt(0))).toEqual([0x1f4ac]);
+
+    for (const [i, turn] of turns.entries()) {
+      turn.end("Fatto.");
+      await vi.waitFor(() => expect(google.edits).toHaveLength(i + 1));
+    }
+    await expectEachEndedOnce(...placeholders());
+    expect(google.shown()).toEqual([ELLIPSIS, ELLIPSIS, ELLIPSIS, ELLIPSIS, "Fatto.", "Fatto.", "Fatto.", "Fatto."]);
+  });
+
+  it("is posted once and edited once for an answer long enough to be sent in several messages", async () => {
     const english = "hello, can you help me with the difference between these two documents?";
     await write({ text: english });
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
-    expect(texts(google.posts)).toEqual([writingNotice("en")]);
+    expect(texts(google.posts)).toEqual([BALLOON]);
     const [placeholder] = google.posts;
 
     turns[0]!.end("This is one sentence of a long answer. ".repeat(70));
@@ -971,7 +998,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     const [top, ...answer] = google.shown();
     expect(top).toBe(ELLIPSIS);
     expect(answer.length).toBeGreaterThanOrEqual(2);
-    expect(answer.some((t) => WRITING.has(t) || t === ELLIPSIS)).toBe(false);
+    expect(answer.some((t) => t === BALLOON || t === ELLIPSIS)).toBe(false);
   });
 
   it("turns into an ellipsis when the turn fails, and the failure notice follows it", async () => {
@@ -1016,7 +1043,6 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
 
   it("turns into an ellipsis when the handler throws before the dispatcher made a send target", async () => {
     await startWith({
-      noticeLang: () => "it",
       handleMessage: async () => {
         throw new Error("unknown agent id");
       },
@@ -1047,7 +1073,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     await vi.waitFor(() => expect(google.edits).toHaveLength(1));
     await settle();
     expect(google.edits.map((e) => e.posted)).toEqual([placeholderA]);
-    expect(google.shown()).toEqual([ELLIPSIS, WRITING_IT, "Promemoria.", "Risposta alla prima."]);
+    expect(google.shown()).toEqual([ELLIPSIS, BALLOON, "Promemoria.", "Risposta alla prima."]);
 
     turns[1]!.end("Risposta alla seconda.");
     await expectEachEndedOnce(placeholderA!, placeholderB!);
@@ -1094,7 +1120,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
 
     release();
     await vi.waitFor(() => expect(google.posts).toHaveLength(2));
-    expect(texts(google.posts)).toEqual(["Ecco il riepilogo.", WRITING_IT]);
+    expect(texts(google.posts)).toEqual(["Ecco il riepilogo.", BALLOON]);
     await expectEachEndedOnce(google.posts[1]!);
     expect(google.shown()).toEqual(["Ecco il riepilogo.", ELLIPSIS]);
   });
@@ -1107,7 +1133,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     turns[0]!.end("This is one sentence of a long answer. ".repeat(70));
     await vi.waitFor(() => expect(google.posts.length).toBeGreaterThanOrEqual(3));
     expect(google.edits).toEqual([]);
-    expect(google.shown()[0]).toBe(WRITING_IT);
+    expect(google.shown()[0]).toBe(BALLOON);
 
     release();
     await expectEachEndedOnce(google.posts[0]!);
@@ -1132,7 +1158,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     );
     // A retry would have gone through, since only the first edit is refused.
     expect(google.edits).toEqual([]);
-    expect(google.shown()).toEqual([WRITING_IT, "Ecco il riepilogo."]);
+    expect(google.shown()).toEqual([BALLOON, "Ecco il riepilogo."]);
     expect(google.unserved).toEqual([]);
     expect(logs.filter((l) => l.level === "error")).toEqual([]);
   });

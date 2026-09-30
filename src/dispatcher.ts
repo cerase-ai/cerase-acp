@@ -195,11 +195,8 @@ export class Dispatcher {
    * detection first; on a message too short to say («vedi contatti?»), the
    * last language this person wrote in; before anybody has, the organisation's.
    * English only when none of the three answers.
-   *
-   * Public so a channel adapter writing a notice of its own before the turn
-   * starts picks the same language the dispatcher would.
    */
-  noticeLang(agentId: string, userId: string, text: string): SupportedLang {
+  private noticeLang(agentId: string, userId: string, text: string): SupportedLang {
     const detected = detectLanguage(text);
     if (detected !== "unknown") return detected;
     const last = this.deps.turnMeta.languageFor(agentId, userId);

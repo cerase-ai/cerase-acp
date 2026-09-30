@@ -70,11 +70,11 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
   // the mask names that field alone, and the message stays where it was.
   it("a post returns the message's name, and the same app rewrites that message's text by it", async () => {
     const client = api();
-    const name = await client.createMessage("spaces/AAAA", "Sto scrivendo…");
+    const name = await client.createMessage("spaces/AAAA", "💬");
     expect(name).toBe("spaces/AAAA/messages/1");
     await client.updateMessageText(name!, "…");
     expect(google.edits.map((e) => [e.name, e.posted.text, e.text, e.updateMask])).toEqual([
-      ["spaces/AAAA/messages/1", "Sto scrivendo…", "…", "text"],
+      ["spaces/AAAA/messages/1", "💬", "…", "text"],
     ]);
     expect(google.shown()).toEqual(["…"]);
     expect(google.unserved).toEqual([]);

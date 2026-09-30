@@ -12,7 +12,10 @@
 //   - no raw path, no id, no internal name. The assistant's own output-hygiene
 //     contract forbids those, and a notice that breaks it teaches the reader
 //     that paths are normal in this chat. A file is named by its NAME.
-//   - no emoji. The house style leaves emoji to the user.
+//   - no emoji. The house style leaves emoji to the user. One symbol is the
+//     exception, by the operator's decision: the speech balloon Google Chat
+//     shows while an answer is being written, chosen over a sentence saying
+//     so. It reads the same in every language and is never part of a notice.
 //   - say whether the thing is permanent. "I could not attach it" and "this
 //     channel cannot carry attachments" call for different next moves.
 //
@@ -132,22 +135,14 @@ export function directMessagesOnlyNotice(lang: SupportedLang): string {
 }
 
 /**
- * The line a Google Chat conversation shows while its answer is being written.
- * Chat gives an app neither a read receipt nor a typing indicator, so the app
- * posts this on receipt and rewrites it to WRITING_ENDED_NOTICE once the answer
- * is on its way: it has to read as a status.
+ * The line a Google Chat conversation shows while its answer is being written:
+ * a single speech balloon, U+1F4AC, the same in every language. Chat gives an
+ * app neither a read receipt nor a typing indicator, so the app posts this on
+ * receipt and rewrites it to WRITING_ENDED_NOTICE once the answer is on its
+ * way. Every way a turn ends rewrites it, so a balloon still standing is a turn
+ * still running, or an edit Google refused, which is logged.
  */
-export function writingNotice(lang: SupportedLang): string {
-  return pick(
-    {
-      it: "Sto scrivendo…",
-      en: "I'm writing…",
-      es: "Estoy escribiendo…",
-      fr: "J'écris…",
-    },
-    lang,
-  );
-}
+export const WRITING_NOTICE = "\u{1F4AC}";
 
 /**
  * What the writing line says once the turn it announced has ended: a single

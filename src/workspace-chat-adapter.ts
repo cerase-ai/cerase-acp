@@ -26,12 +26,12 @@
 //
 // Chat shows a person neither that an app read their message nor that it is
 // writing: a reaction needs user authentication and there is no typing call.
-// So the app posts one line saying it is writing as soon as the message is
-// accepted, and rewrites its text to an ellipsis when the turn's first reply
-// is posted, or when the turn ends without one. The line is edited rather than
-// deleted, because a line that vanishes when the answer lands reads badly. The
-// answer is a message of its own, so the phone's notification carries the
-// answer and not the placeholder.
+// So the app posts a speech balloon as soon as the message is accepted, and
+// rewrites its text to an ellipsis when the turn's first reply is posted, or
+// when the turn ends without one. The line is edited rather than deleted,
+// because a line that vanishes when the answer lands reads badly. The answer
+// is a message of its own, so the phone's notification carries the answer and
+// not the placeholder.
 //
 // Direct messages only: no group spaces, no cards.
 
@@ -43,7 +43,7 @@ import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { directMessagesOnlyNotice, WRITING_ENDED_NOTICE, writingNotice } from "./platform-notices.js";
+import { directMessagesOnlyNotice, WRITING_ENDED_NOTICE, WRITING_NOTICE } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
 import {
   ChatApiError,
@@ -316,7 +316,8 @@ function apiFor(app: ChatApp): WorkspaceChatApi {
 type EndPlaceholder = () => Promise<void>;
 
 /**
- * Posts the line saying the assistant is writing, and returns what ends it.
+ * Posts the speech balloon saying the assistant is writing, and returns what
+ * ends it.
  *
  * Neither half may cost the answer anything. The post is not awaited by the
  * turn, and a refused one is logged and leaves nothing to edit. The edit waits
@@ -329,11 +330,10 @@ type EndPlaceholder = () => Promise<void>;
 function postPlaceholder(
   api: WorkspaceChatApi,
   conversation: Conversation & { space: string },
-  text: string,
   context: { agentId: string; userId: string },
 ): EndPlaceholder {
   const { space, thread } = conversation;
-  const posted = api.createMessage(space, text, thread).then(
+  const posted = api.createMessage(space, WRITING_NOTICE, thread).then(
     (name) => {
       if (name === undefined) {
         logger.warn({ ...context, space }, "workspace-chat placeholder posted without a name, so it cannot be edited");
@@ -430,10 +430,9 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     // Posted before the uploads are fetched, which can take longer than the
     // person should wait to see that the message arrived.
     const space = conversation.space;
-    const writing = writingNotice(dispatcher.noticeLang(agent.id, userId, text));
     const endPlaceholder: EndPlaceholder =
       api && space !== undefined
-        ? postPlaceholder(api, { ...conversation, space }, writing, { agentId: agent.id, userId })
+        ? postPlaceholder(api, { ...conversation, space }, { agentId: agent.id, userId })
         : async () => {};
     try {
       let outText = text;
