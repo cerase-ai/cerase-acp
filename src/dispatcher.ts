@@ -19,6 +19,13 @@ import { deliveryFailureNotice } from "./platform-notices.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
 import { type SessionManager, type SessionUpdateHandler, TurnWatchdogError } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
+import {
+  fenceOpenAfter,
+  isToolCallMarkup,
+  toolCallMarkupHoldStart,
+  toolCallMarkupRetryPrompt,
+  toolCallMarkupStart,
+} from "./tool-call-markup.js";
 import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
@@ -97,6 +104,18 @@ const TURN_EMPTY: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   es: "No he generado una respuesta. Inténtalo de nuevo o reformula.",
   fr: "Je n'ai pas produit de réponse. Réessaie ou reformule.",
   unknown: "I didn't produce a reply. Try again or rephrase.",
+};
+
+// A turn whose answer came out as a tool call written as text, twice: the
+// first was held back and the assistant was given one more try, and the second
+// was held back too. The person has been sent nothing that answers them, and
+// the one thing that can still help is asking again.
+const TURN_UNSENT: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "La risposta non mi è uscita in modo corretto e non te l'ho mandata. Chiedimelo di nuovo, per favore.",
+  en: "My answer did not come out right, so I did not send it. Please ask me again.",
+  es: "Mi respuesta no ha salido bien y no te la he enviado. Pídemelo de nuevo, por favor.",
+  fr: "Ma réponse n'est pas sortie correctement et je ne te l'ai pas envoyée. Redemande-moi, s'il te plaît.",
+  unknown: "My answer did not come out right, so I did not send it. Please ask me again.",
 };
 
 /**
@@ -311,6 +330,17 @@ export class Dispatcher {
       reply.end();
       drainResult = await queue.drain();
     }
+    // An answer that ended as a tool call written out as text was held back,
+    // not sent. The assistant gets one more try on the same session; when that
+    // one ends the same way the person is told, because nothing they were sent
+    // answers them.
+    let answerUnsent = false;
+    let retryDrain: DrainResult = { ok: true };
+    if (!failed && reply.endedInMarkup()) {
+      const retry = await this.retryUnsentAnswer(agentId, userId, send, text);
+      retryDrain = retry.drain;
+      answerUnsent = !retry.answered;
+    }
     // Read once, here, whatever the turn did: an outcome left in the tracker
     // is an outcome the next turn would inherit.
     const attachFailures = this.deps.attachOutcomes?.take(agentId, userId) ?? [];
@@ -318,7 +348,7 @@ export class Dispatcher {
     // After any partial output has been flushed, tell the user what
     // happened. Best-effort: a failure here is logged + folded into the
     // delivery outcome, never rethrown.
-    let deliveryOk = drainResult.ok;
+    let deliveryOk = drainResult.ok && retryDrain.ok;
     if (failed) {
       const lang = this.noticeLang(agentId, userId, text);
       const copy = creditExhausted
@@ -327,6 +357,15 @@ export class Dispatcher {
           ? TURN_TOO_LONG[lang]
           : TURN_ERROR[lang];
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
+      if (!r.ok) deliveryOk = false;
+    } else if (answerUnsent) {
+      const r = await this.safeSend(
+        send,
+        TURN_UNSENT[this.noticeLang(agentId, userId, text)],
+        agentId,
+        userId,
+        "unsent-answer message",
+      );
       if (!r.ok) deliveryOk = false;
     } else if (!produced) {
       const r = await this.safeSend(
@@ -353,10 +392,47 @@ export class Dispatcher {
       await this.correctAttachClaim(agentId, userId, send, text, attachFailures);
       return { ok: false, error: attachFailureError(attachFailures) };
     }
+    if (answerUnsent) {
+      return { ok: false, error: new Error("the answer came out as tool-call markup twice and was not sent") };
+    }
     if (!deliveryOk) {
-      return { ok: false, error: this.deliveryError(drainResult) };
+      return { ok: false, error: this.deliveryError(drainResult.ok ? retryDrain : drainResult) };
     }
     return { ok: true };
+  }
+
+  /**
+   * Give the assistant one more try after its answer came out as a tool call
+   * written as text, on the same session, and report whether it answered this
+   * time. Its reply takes the same path as any other, so a second answer of
+   * the same kind is held back too; a retry that itself fails counts as no
+   * answer. It is never retried again.
+   */
+  private async retryUnsentAnswer(
+    agentId: string,
+    userId: string,
+    send: SendTarget,
+    text: string,
+  ): Promise<{ answered: boolean; drain: DrainResult }> {
+    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
+    const reply = this.replyStream(queue, agentId, userId);
+    let failed = false;
+    try {
+      await this.deps.sessionManager.prompt(agentId, userId, toolCallMarkupRetryPrompt(), (update) => {
+        reply.push(update);
+      });
+    } catch (err) {
+      failed = true;
+      logger.error({ err, agentId, userId }, "the retry after an answer written as tool-call markup failed");
+    } finally {
+      reply.end();
+    }
+    const drain = await queue.drain();
+    const answered = !failed && reply.delivered() > 0 && !reply.endedInMarkup();
+    if (!answered) {
+      logger.warn({ agentId, userId }, "the retry did not produce an answer either — telling the person to ask again");
+    }
+    return { answered, drain };
   }
 
   /**
@@ -413,30 +489,70 @@ export class Dispatcher {
    * and judging that answer together with the summary before it would withhold
    * both. An agent that sends no message ids gets the first case only.
    *
+   * A line opening a tool-call block starts the same hold, for the same
+   * reason: whether the block runs to the end of the message, and is therefore
+   * an answer the model wrote as a call, is known only when the message ends.
+   * The stream reports whether the turn ended on such a block, which is what
+   * decides the retry.
+   *
    * `push` answers whether the update carried reply text.
    */
   private replyStream(
     queue: SendQueue,
     agentId: string,
     userId: string,
-  ): { push: (update: Parameters<SessionUpdateHandler>[0]) => boolean; end: () => void } {
+  ): {
+    push: (update: Parameters<SessionUpdateHandler>[0]) => boolean;
+    end: () => void;
+    endedInMarkup: () => boolean;
+    delivered: () => number;
+  } {
+    // Whether what this message has sent so far leaves a code fence open. A
+    // tool-call block inside a fence is quoted, not emitted, so no hold starts
+    // there.
+    let fenceOpen = false;
+    let delivered = 0;
+    // True while the last text of the turn is a tool-call block that was held
+    // back; anything sent after it answers the person and clears it.
+    let endedInMarkup = false;
+    const deliver = (text: string) => {
+      queue.enqueue(text);
+      fenceOpen = fenceOpenAfter(text, fenceOpen);
+      delivered += 1;
+      endedInMarkup = false;
+    };
     const buffer = new StreamBuffer({
-      onFlush: (chunk) => queue.enqueue(chunk),
-      holdFrom: summaryHeadingStart,
+      onFlush: deliver,
+      holdFrom: (piece) => earliest(summaryHeadingStart(piece), toolCallMarkupHoldStart(piece, fenceOpen)),
       onHeld: (held) => {
-        if (!isInternalSummaryBlock(held)) {
-          queue.enqueue(held);
+        if (isInternalSummaryBlock(held)) {
+          logger.warn(
+            { agentId, userId, chars: held.length },
+            "egress: suppressed an internal engine summary/compaction block",
+          );
+          try {
+            this.deps.onSummaryWithheld?.(agentId, held);
+          } catch (err) {
+            logger.warn({ err, agentId }, "capturing a withheld summary failed — ignored");
+          }
           return;
         }
-        logger.warn(
-          { agentId, userId, chars: held.length },
-          "egress: suppressed an internal engine summary/compaction block",
-        );
-        try {
-          this.deps.onSummaryWithheld?.(agentId, held);
-        } catch (err) {
-          logger.warn({ err, agentId }, "capturing a withheld summary failed — ignored");
+        // Judged whole, from its first opening line: a block that runs to the
+        // end of the message is held back, and the sentence before it, when
+        // there is one, is sent as it would have been. Anything else, a block
+        // followed by prose among it, is delivered unchanged.
+        const at = toolCallMarkupStart(held, fenceOpen);
+        if (at >= 0 && isToolCallMarkup(held.slice(at))) {
+          const before = held.slice(0, at).trimEnd();
+          if (before.length > 0) deliver(before);
+          logger.warn(
+            { agentId, userId, chars: held.length - at },
+            "egress: held back an answer written as tool-call markup",
+          );
+          endedInMarkup = true;
+          return;
         }
+        deliver(held);
       },
     });
     let messageId: string | undefined;
@@ -444,12 +560,17 @@ export class Dispatcher {
       push: (update) => {
         if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;
         const next = (update as { messageId?: string }).messageId;
-        if (next && messageId && next !== messageId) buffer.release();
+        if (next && messageId && next !== messageId) {
+          buffer.release();
+          fenceOpen = false;
+        }
         if (next) messageId = next;
         buffer.push(update.content.text);
         return true;
       },
       end: () => buffer.end(),
+      endedInMarkup: () => endedInMarkup,
+      delivered: () => delivered,
     };
   }
 
@@ -486,4 +607,11 @@ export class Dispatcher {
     }
     return new Error("delivery failed");
   }
+}
+
+/** The smaller of two indexes where -1 means none. */
+function earliest(a: number, b: number): number {
+  if (a < 0) return b;
+  if (b < 0) return a;
+  return Math.min(a, b);
 }

@@ -30,6 +30,20 @@ For each configured agent template:
 - Prepends a `[turn_meta: gap=…, lang=…]` block to each
   `session/prompt`. The agent reads this per the system-prompt rules
   in `cerase-core/agent-runtime/slots/slot-default/srv/AGENTS.md`.
+- Holds back an answer that ends in a tool call written out as text —
+  `<tool_calls>`, `<function_calls>`, a bare `<invoke name=…>` or
+  DeepSeek's DSML markers, where the model should have made the call.
+  The sentence before the block is sent and the block is not; the
+  assistant gets one more try on the same session, with a prompt that
+  opens `[reply_result: not sent]` and says nothing ran. When that answer
+  ends the same way too, the person is told the answer did not come out
+  and to ask again, and the turn reports a failure. A block inside a
+  code fence, or one followed by prose, is a quote and is sent
+  unchanged. This covers every channel and scheduled messages, because
+  all of them run their turns through `Dispatcher.handleMessage`; the
+  console chat reads the transcript from opencode instead, and
+  cerase-core applies the same rule there. Rule and recorded shapes:
+  `src/tool-call-markup.ts`.
 
 ## Architecture (PoC v0.1)
 
