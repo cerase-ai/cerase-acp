@@ -82,6 +82,8 @@ function makeFakeSessionManager(): FakeSessionManager {
 function baseAgent(id: string, overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
     id,
+    channel: "discord",
+    mode: "cerase",
     bot_token: `tok-${id}`,
     allowed_users: [`u-${id}`],
     cwd: "/home/agent/cerase/workspace",

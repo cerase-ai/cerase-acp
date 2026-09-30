@@ -17,6 +17,8 @@ const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", impor
 function fakeAgent(id: string, overrides?: Partial<AgentConfig>): AgentConfig {
   return {
     id,
+    channel: "discord",
+    mode: "cerase",
     bot_token: `tok-${id}`,
     allowed_users: [`u-${id}-1`],
     cwd: "/home/agent/cerase/workspace",

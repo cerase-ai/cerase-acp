@@ -168,9 +168,9 @@ describe("AdapterSupervisor", () => {
     expect(sup.isScheduled("agent-10")).toBe(false);
 
     expect(terminal).toHaveLength(1);
-    expect(terminal[0].agentId).toBe("agent-10");
-    expect(terminal[0].rejection.code).toBe("TokenInvalid");
-    expect(terminal[0].rejection.credential).toBe("bot_token");
+    expect(terminal[0]!.agentId).toBe("agent-10");
+    expect(terminal[0]!.rejection.code).toBe("TokenInvalid");
+    expect(terminal[0]!.rejection.credential).toBe("bot_token");
     expect(sup.terminalFailure("agent-10")?.code).toBe("TokenInvalid");
   });
 

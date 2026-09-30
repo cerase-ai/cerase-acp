@@ -57,6 +57,7 @@ function makeConfig(overrides?: {
     agents: [
       {
         id: "doc-qa",
+        channel: "discord",
         bot_token: "irrelevant-for-acp-tests",
         allowed_users: ["111"],
         cwd: overrides?.cwd ?? "/home/agent/cerase/workspace",

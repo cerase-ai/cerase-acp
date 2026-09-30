@@ -9,10 +9,20 @@ import { TurnMetaTracker } from "./turn-meta.js";
 
 function cfg(locale?: "it" | "en" | "es" | "fr"): BridgeConfig {
   return {
-    agents: [{ id: "a", bot_token: "x", allowed_users: ["u"], spawn: { command: "true", args: [] } }],
+    agents: [
+      {
+        id: "a",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
+        bot_token: "x",
+        allowed_users: ["u"],
+        spawn: { command: "true", args: [] },
+      },
+    ],
     session: { idle_timeout_minutes: 60, max_concurrent: 4 },
     ...(locale ? { locale } : {}),
-  } as BridgeConfig;
+  };
 }
 
 function failing(): SessionManager {
@@ -36,7 +46,9 @@ async function failureNotice(config: BridgeConfig, turns: string[]): Promise<str
     },
   });
   for (const t of turns) await d.handleMessage("a", "u", t);
-  return sent[sent.length - 1];
+  const notice = sent.at(-1);
+  if (notice === undefined) throw new Error("no failure notice was sent");
+  return notice;
 }
 
 describe("a failed turn's notice", () => {

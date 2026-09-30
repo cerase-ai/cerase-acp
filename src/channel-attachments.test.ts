@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { extractSlackFiles, extractTelegramFiles, extractWorkspaceChatAttachments } from "./channel-attachments.js";
+import {
+  extractSlackFiles,
+  extractTelegramFiles,
+  extractWorkspaceChatAttachments,
+  type TelegramMessageLike,
+  type WorkspaceChatMessageLike,
+} from "./channel-attachments.js";
+
+// A message as a platform delivers it carries fields the extractor does not
+// read, such as its text. The types below add those fields to what each
+// extractor reads, so a message is written out whole and still checked.
+type SlackMessageLike = NonNullable<Parameters<typeof extractSlackFiles>[0]>;
+type WorkspaceChatAttachment = NonNullable<WorkspaceChatMessageLike["attachment"]>[number];
 
 describe("extractTelegramFiles", () => {
   it("takes the largest photo size and defaults the name", () => {
@@ -22,7 +34,8 @@ describe("extractTelegramFiles", () => {
     expect(extractTelegramFiles({ video: { file_id: "vid" } })).toEqual([{ fileId: "vid", name: "video.mp4" }]);
   });
   it("returns [] for a text-only or empty message", () => {
-    expect(extractTelegramFiles({ text: "ciao" })).toEqual([]);
+    const textOnly: TelegramMessageLike & { text: string } = { text: "ciao" };
+    expect(extractTelegramFiles(textOnly)).toEqual([]);
     expect(extractTelegramFiles(undefined)).toEqual([]);
   });
 });
@@ -42,7 +55,8 @@ describe("extractSlackFiles", () => {
   });
   it("skips files without a private URL; [] when no files", () => {
     expect(extractSlackFiles({ files: [{ name: "x" }] })).toEqual([]);
-    expect(extractSlackFiles({ text: "hi" })).toEqual([]);
+    const textOnly: SlackMessageLike & { text: string } = { text: "hi" };
+    expect(extractSlackFiles(textOnly)).toEqual([]);
   });
 });
 
@@ -55,7 +69,11 @@ describe("extractWorkspaceChatAttachments", () => {
     ).toEqual([{ name: "invoice.pdf", resourceName: "spaces/x/att/1" }]);
   });
   it("skips drive-only attachments (no resourceName); [] when none", () => {
-    expect(extractWorkspaceChatAttachments({ attachment: [{ driveDataRef: { driveFileId: "abc" } }] })).toEqual([]);
-    expect(extractWorkspaceChatAttachments({ text: "hi" })).toEqual([]);
+    const fromDrive: WorkspaceChatAttachment & { driveDataRef: { driveFileId: string } } = {
+      driveDataRef: { driveFileId: "abc" },
+    };
+    expect(extractWorkspaceChatAttachments({ attachment: [fromDrive] })).toEqual([]);
+    const textOnly: WorkspaceChatMessageLike & { text: string } = { text: "hi" };
+    expect(extractWorkspaceChatAttachments(textOnly)).toEqual([]);
   });
 });

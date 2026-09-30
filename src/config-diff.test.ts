@@ -4,6 +4,7 @@ import { diffConfigs } from "./config-diff.js";
 
 const baseAgent = (id: string, overrides: Partial<AgentConfig> = {}): AgentConfig => ({
   id,
+  channel: "discord",
   bot_token: `tok-${id}`,
   allowed_users: [`u-${id}-1`],
   cwd: "/home/agent/cerase/workspace",

@@ -19,12 +19,18 @@ function makeConfig(): BridgeConfig {
     agents: [
       {
         id: "doc-qa",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
         bot_token: "tok-doc",
         allowed_users: ["111"],
         spawn: { command: "env", args: ["--", "FAKE_REPLY=hi", "node", FAKE_CHILD] },
       },
       {
         id: "policy-qa",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
         bot_token: "tok-pol",
         allowed_users: ["222"],
         spawn: { command: "env", args: ["--", "FAKE_REPLY=hi", "node", FAKE_CHILD] },
@@ -132,7 +138,17 @@ describe("runBridge", () => {
     vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
 
     const cfg: BridgeConfig = {
-      agents: [{ id: "solo", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } }],
+      agents: [
+        {
+          id: "solo",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
+          bot_token: "tok",
+          allowed_users: ["111"],
+          spawn: { command: "true", args: [] },
+        },
+      ],
       session: { idle_timeout_minutes: 60, max_concurrent: 16 },
     };
 
@@ -166,9 +182,9 @@ describe("runBridge", () => {
       agents: Array<{ id: string; ready: boolean | null; failure?: { kind: string; credential: string } }>;
     };
     expect(status.agents).toHaveLength(1);
-    expect(status.agents[0].ready).toBe(false);
-    expect(status.agents[0].failure?.kind).toBe("credential_rejected");
-    expect(status.agents[0].failure?.credential).toBe("bot_token");
+    expect(status.agents[0]!.ready).toBe(false);
+    expect(status.agents[0]!.failure?.kind).toBe("credential_rejected");
+    expect(status.agents[0]!.failure?.credential).toBe("bot_token");
   });
 
   // The second thing the exit cost: a one-agent box whose single adapter hit
@@ -184,7 +200,17 @@ describe("runBridge", () => {
       vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "5000");
 
       const cfg: BridgeConfig = {
-        agents: [{ id: "solo", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } }],
+        agents: [
+          {
+            id: "solo",
+            channel: "discord",
+            cwd: "/home/agent/cerase/workspace",
+            mode: "cerase",
+            bot_token: "tok",
+            allowed_users: ["111"],
+            spawn: { command: "true", args: [] },
+          },
+        ],
         session: { idle_timeout_minutes: 60, max_concurrent: 16 },
       };
 
@@ -249,8 +275,8 @@ describe("runBridge", () => {
     });
 
     // Bridge resolved despite doc-qa.start() rejecting; both starts attempted.
-    expect(made["doc-qa"].startCalls).toBe(1);
-    expect(made["policy-qa"].startCalls).toBe(1);
+    expect(made["doc-qa"]!.startCalls).toBe(1);
+    expect(made["policy-qa"]!.startCalls).toBe(1);
     expect(handle.internalUrl).toBeDefined();
 
     // /internal/status is truthful: the failed adapter reports ready:false
@@ -317,7 +343,7 @@ describe("runBridge", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 250));
     // One attempt, and no retry after it.
-    expect(made["doc-qa"].startCalls).toBe(1);
+    expect(made["doc-qa"]!.startCalls).toBe(1);
 
     const statusRes = await fetch(`${handle.internalUrl}/internal/status`, {
       headers: { authorization: `Bearer ${SECRET}` },
@@ -413,8 +439,8 @@ describe("runBridge", () => {
     const cfg = makeConfig();
     // doc-qa's slot offers modes and not the one the assistant runs under;
     // policy-qa's offers it. Same bridge, same code path, one difference.
-    cfg.agents[0].spawn = { command: "env", args: ["--", "FAKE_MODES=build,plan", "node", FAKE_CHILD] };
-    cfg.agents[1].spawn = { command: "env", args: ["--", "FAKE_MODES=build,cerase,plan", "node", FAKE_CHILD] };
+    cfg.agents[0]!.spawn = { command: "env", args: ["--", "FAKE_MODES=build,plan", "node", FAKE_CHILD] };
+    cfg.agents[1]!.spawn = { command: "env", args: ["--", "FAKE_MODES=build,cerase,plan", "node", FAKE_CHILD] };
     const SECRET = "session-mode-secret";
     vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
     vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
@@ -477,8 +503,24 @@ describe("runBridge", () => {
 
       const cfg: BridgeConfig = {
         agents: [
-          { id: "web", bot_token: "n/a", allowed_users: ["111"], spawn: { command: "true", args: [] } },
-          { id: "discordy", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } },
+          {
+            id: "web",
+            channel: "discord",
+            cwd: "/home/agent/cerase/workspace",
+            mode: "cerase",
+            bot_token: "n/a",
+            allowed_users: ["111"],
+            spawn: { command: "true", args: [] },
+          },
+          {
+            id: "discordy",
+            channel: "discord",
+            cwd: "/home/agent/cerase/workspace",
+            mode: "cerase",
+            bot_token: "tok",
+            allowed_users: ["111"],
+            spawn: { command: "true", args: [] },
+          },
         ],
         session: { idle_timeout_minutes: 60, max_concurrent: 16 },
       };
@@ -494,8 +536,9 @@ describe("runBridge", () => {
         stopCalls: 0,
         async start() {
           (this as FakeAdapter).startCalls += 1;
-          if (failsLeftById[agentId] > 0) {
-            failsLeftById[agentId] -= 1;
+          const failsLeft = failsLeftById[agentId] ?? 0;
+          if (failsLeft > 0) {
+            failsLeftById[agentId] = failsLeft - 1;
             throw new Error(`transient login failure for ${agentId}`);
           }
           liveById[agentId] = true;
@@ -529,13 +572,13 @@ describe("runBridge", () => {
 
       // discordy's first start failed → bridge stayed up, it's concretely
       // not-ready; the healthy web transport is ready.
-      expect(made.discordy.startCalls).toBe(1);
+      expect(made.discordy!.startCalls).toBe(1);
       expect(await getReady("discordy")).toBe(false);
       expect(await getReady("web")).toBe(true);
 
       // Advance past the (jittered) backoff → supervisor retries and recovers.
       await vi.advanceTimersByTimeAsync(5000);
-      expect(made.discordy.startCalls).toBe(2);
+      expect(made.discordy!.startCalls).toBe(2);
       expect(await getReady("discordy")).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -747,6 +790,9 @@ session:
       agents: [
         {
           id: "demo",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
           bot_token: "fake-token",
           allowed_users: ["111"],
           spawn: {
@@ -842,6 +888,9 @@ describe("an attach that never arrives cannot close as a delivered turn", () => 
       agents: [
         {
           id: "attach-probe",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
           bot_token: "irrelevant",
           allowed_users: ["111"],
           spawn: { command: "env", args: ["--", `FAKE_REPLY=${REPLY}`, "node", FAKE_CHILD] },
@@ -975,6 +1024,9 @@ describe("a summary the agent streams inside a turn", () => {
       agents: [
         {
           id: "summary-probe",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
           bot_token: "irrelevant",
           allowed_users: ["111"],
           spawn: {
@@ -1040,7 +1092,17 @@ describe("a client that believes a dead socket is alive", () => {
   });
 
   const soloConfig = (): BridgeConfig => ({
-    agents: [{ id: "solo", bot_token: "tok", allowed_users: ["111"], spawn: { command: "true", args: [] } }],
+    agents: [
+      {
+        id: "solo",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
+        bot_token: "tok",
+        allowed_users: ["111"],
+        spawn: { command: "true", args: [] },
+      },
+    ],
     session: { idle_timeout_minutes: 60, max_concurrent: 16 },
   });
 

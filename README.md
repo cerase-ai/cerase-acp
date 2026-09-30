@@ -85,7 +85,8 @@ session:
 ```bash
 npm ci && npm run build
 
-# The suite. Vitest, no Docker, no chat platform, no network.
+# The suite. Vitest, no Docker, no chat platform, no network. It includes a
+# type check over the code and the tests (tsconfig.test.json).
 npm test
 
 # one-shot prompt
@@ -421,6 +422,12 @@ vitest. Tests live alongside source as `src/**/*.test.ts`. The
 `src/__tests__/fake-acp-child.mjs` fixture lets the session-manager
 tests exercise the full ACP stdio loop without OpenCode or LiteLLM
 running.
+
+`npm run build` type-checks only what ships: `tsconfig.json` leaves the
+tests out. `tsconfig.test.json` applies the same settings to everything
+under `src`, tests and shared fakes included, and `src/typecheck.test.ts`
+runs it inside the suite, so a type error in a test fails `npm test` and
+CI. `npm run typecheck` runs the same check alone.
 
 End-to-end tests against a real Compose stack (LiteLLM + opencode +
 bridge) live in `cerase/tests/e2e-discord/` and drive the bridge via

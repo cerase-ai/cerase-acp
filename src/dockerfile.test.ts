@@ -154,7 +154,10 @@ function finalStageUserDefect(text: string): string | undefined {
   let stage = stages.length - 1;
   while (stages[stage]!.user === undefined) {
     const base = stages[stage]!.base;
-    const earlier = stages.slice(0, stage).findLastIndex((s) => s.name === base);
+    const earlier = stages
+      .slice(0, stage)
+      .map((s) => s.name)
+      .lastIndexOf(base);
     if (earlier < 0) return `the final stage runs as the user of ${base}, which no USER here names`;
     stage = earlier;
   }

@@ -43,6 +43,9 @@ describe("a file arrives after the sentence that introduces it", () => {
       agents: [
         {
           id: "order-probe",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
           bot_token: "irrelevant",
           allowed_users: ["111"],
           spawn: { command: "env", args: ["--", `FAKE_REPLY=${REPLY}`, "node", FAKE_CHILD] },
@@ -114,6 +117,9 @@ describe("a file arrives after the sentence that introduces it", () => {
       agents: [
         {
           id: "order-probe-bare",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
           bot_token: "irrelevant",
           allowed_users: ["111"],
           spawn: {

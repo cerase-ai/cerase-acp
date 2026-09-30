@@ -7,6 +7,7 @@ import {
   prependUploadMarker,
   sanitizeFilename,
 } from "./inbound-attachments.js";
+import type { FileWriter } from "./workspace-files.js";
 
 describe("sanitizeFilename", () => {
   it("keeps a safe basename", () => {
@@ -37,7 +38,7 @@ describe("prependUploadMarker", () => {
 describe("ingestInboundAttachments", () => {
   it("downloads each file, writes it under uploads/<ts>-<i>/, returns the paths", async () => {
     const fetcher = vi.fn(async (url: string) => Buffer.from(`bytes-of-${url}`));
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     const result = await ingestInboundAttachments(
       "cerase-agent-3",
       [
@@ -55,13 +56,13 @@ describe("ingestInboundAttachments", () => {
     expect(writer).toHaveBeenCalledTimes(2);
     const [argv0, bytes0] = writer.mock.calls[0]!;
     expect(argv0).toEqual(expect.arrayContaining(["docker", "exec", "-i", "cerase-agent-3"]));
-    expect((argv0 as string[]).join(" ")).toContain("uploads/1000-0/voice.ogg");
-    expect((bytes0 as Buffer).toString()).toBe("bytes-of-https://cdn/x/voice.ogg");
+    expect(argv0.join(" ")).toContain("uploads/1000-0/voice.ogg");
+    expect(bytes0.toString()).toBe("bytes-of-https://cdn/x/voice.ogg");
   });
 
   it("rejects an oversized file (fail-loud) but keeps the rest", async () => {
     const fetcher = vi.fn(async (url: string) => (url.includes("big") ? Buffer.alloc(20) : Buffer.from("ok")));
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     const result = await ingestInboundAttachments(
       "c",
       [
@@ -82,7 +83,7 @@ describe("ingestInboundAttachments", () => {
       if (url.includes("bad")) throw new Error("404");
       return Buffer.from("ok");
     });
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     const result = await ingestInboundAttachments(
       "c",
       [
@@ -100,7 +101,7 @@ describe("ingestInboundAttachments", () => {
 
   it("forwards auth headers to the fetcher (Slack url_private needs the bot token)", async () => {
     const fetcher = vi.fn(async () => Buffer.from("x"));
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     await ingestInboundAttachments("c", [{ name: "a.pdf", url: "https://slack/x" }], "slack", {
       fetcher,
       writer,
@@ -113,7 +114,7 @@ describe("ingestInboundAttachments", () => {
 
 describe("ingestInboundBuffers", () => {
   it("stores pre-fetched bytes (Workspace Chat media) without a fetcher", async () => {
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     const result = await ingestInboundBuffers(
       "cerase-agent-2",
       [{ name: "doc.pdf", bytes: Buffer.from("PDF") }],
@@ -123,8 +124,8 @@ describe("ingestInboundBuffers", () => {
     expect(result.stored).toEqual(["uploads/5-0/doc.pdf"]);
     expect(result.rejected).toEqual([]);
     const [argv, bytes] = writer.mock.calls[0]!;
-    expect((argv as string[]).join(" ")).toContain("uploads/5-0/doc.pdf");
-    expect((bytes as Buffer).toString()).toBe("PDF");
+    expect(argv.join(" ")).toContain("uploads/5-0/doc.pdf");
+    expect(bytes.toString()).toBe("PDF");
   });
 });
 
@@ -171,7 +172,7 @@ describe("per-channel cap — effectiveMaxMb (M-FILE-LIMITS-1)", () => {
   it("the channel ceiling binds BELOW the global setting (discord 25 < 64): a 26 MB upload is rejected", async () => {
     const big = Buffer.alloc(26 * 1024 * 1024); // 26 MB > discord's 25 MB ceiling, < global 64
     const fetcher = vi.fn(async () => big);
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     const result = await ingestInboundAttachments("c", [{ name: "clip.mov", url: "https://cdn/clip" }], "discord", {
       fetcher,
       writer,
@@ -184,7 +185,7 @@ describe("per-channel cap — effectiveMaxMb (M-FILE-LIMITS-1)", () => {
 
   it("the global setting still binds for a channel with no lower ceiling (workspace-chat: a 26 MB upload passes)", async () => {
     const big = Buffer.alloc(26 * 1024 * 1024); // 26 MB < global 64, no platform ceiling
-    const writer = vi.fn(async () => {});
+    const writer = vi.fn<FileWriter>(async () => {});
     const result = await ingestInboundBuffers("c", [{ name: "report.pdf", bytes: big }], "workspace-chat", {
       writer,
       now: () => 2,

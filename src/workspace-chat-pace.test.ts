@@ -31,7 +31,7 @@ import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { Dispatcher } from "./dispatcher.js";
 import { deliveryFailureNotice } from "./platform-notices.js";
-import type { SessionManager, SessionUpdateHandler } from "./session-manager.js";
+import type { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 import { ChatApiError, WorkspaceChatApi } from "./workspace-chat-api.js";
@@ -403,20 +403,16 @@ interface Turn {
 
 /** A session manager whose turns answer what the test tells them to, when it tells them to. */
 function scriptedSessions(turns: Turn[]): SessionManager {
-  return {
-    prompt: (_agentId: string, userId: string, _text: string, onUpdate?: SessionUpdateHandler) =>
-      new Promise((resolve) => {
-        turns.push({
-          userId,
-          say: (text) =>
-            onUpdate?.({
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text },
-            } as Parameters<SessionUpdateHandler>[0]),
-          end: () => resolve({ stopReason: "end_turn" }),
-        });
-      }),
-  } as unknown as SessionManager;
+  const prompt: SessionManager["prompt"] = (_agentId, userId, _text, onUpdate) =>
+    new Promise((resolve) => {
+      turns.push({
+        userId,
+        say: (text) => onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+        end: () => resolve({ stopReason: "end_turn" }),
+      });
+    });
+  // The dispatcher calls prompt() and nothing else on it.
+  return { prompt } as unknown as SessionManager;
 }
 
 /** Five paragraphs, each long enough to be flushed and posted as a message of its own. */

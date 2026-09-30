@@ -21,6 +21,9 @@ function makeConfig(reply: string): BridgeConfig {
     agents: [
       {
         id: "doc-qa",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
         bot_token: "irrelevant",
         allowed_users: ["111"],
         spawn: { command: "env", args: ["--", `FAKE_REPLY=${reply}`, "node", FAKE_CHILD] },
@@ -163,7 +166,7 @@ describe("Dispatcher", () => {
     const d = new Dispatcher({
       config: cfg,
       // resolve without ever emitting an agent_message_chunk
-      sessionManager: makeStubMgr(async () => {}),
+      sessionManager: makeStubMgr(async () => ({ stopReason: "end_turn" })),
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
@@ -181,7 +184,8 @@ describe("Dispatcher", () => {
     const d = new Dispatcher({
       config: cfg,
       sessionManager: makeStubMgr(async (_a, _u, _t, onUpdate) => {
-        onUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } } as never);
+        onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } });
+        return { stopReason: "end_turn" };
       }),
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
@@ -206,7 +210,8 @@ describe("no AI disclaimer on first contact (M-ACP-DISCLOSURE-OFF)", () => {
     return { prompt } as unknown as SessionManager;
   }
   const okTurn: SessionManager["prompt"] = async (_a, _u, _t, onUpdate) => {
-    onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } as never);
+    onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
+    return { stopReason: "end_turn" };
   };
 
   it("sends only the reply on first contact — never a disclaimer", async () => {
@@ -273,7 +278,8 @@ describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
     return { prompt } as unknown as SessionManager;
   }
   const okTurn: SessionManager["prompt"] = async (_a, _u, _t, onUpdate) => {
-    onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } as never);
+    onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
+    return { stopReason: "end_turn" };
   };
 
   it("out of credits: replies the no-credits copy and NEVER spawns/prompts", async () => {
@@ -309,7 +315,7 @@ describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
       config: cfg,
       sessionManager: makeStubMgr(async (a, u, t, onUpdate) => {
         promptCalled = true;
-        await okTurn(a, u, t, onUpdate);
+        return okTurn(a, u, t, onUpdate);
       }),
       turnMeta: new TurnMetaTracker(),
       creditCheck: async () => ({ exhausted: false }),
@@ -332,7 +338,7 @@ describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
       config: cfg,
       sessionManager: makeStubMgr(async (a, u, t, onUpdate) => {
         promptCalled = true;
-        await okTurn(a, u, t, onUpdate);
+        return okTurn(a, u, t, onUpdate);
       }),
       turnMeta: new TurnMetaTracker(),
       creditCheck: async () => {
@@ -356,7 +362,7 @@ describe("proactive credit gate (M-MUTE-SURFACE-2)", () => {
       config: cfg,
       sessionManager: makeStubMgr(async (a, u, t, onUpdate) => {
         promptCalled = true;
-        await okTurn(a, u, t, onUpdate);
+        return okTurn(a, u, t, onUpdate);
       }),
       turnMeta: new TurnMetaTracker(),
       // creditCheck intentionally omitted
@@ -392,6 +398,9 @@ describe("a failed attach denies the turn its success", () => {
       agents: [
         {
           id: "doc-qa",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
           bot_token: "irrelevant",
           allowed_users: ["111"],
           spawn: { command: "env", args: ["--", "FAKE_ECHO_PROMPT=1", "node", FAKE_CHILD] },

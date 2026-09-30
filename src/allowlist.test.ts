@@ -6,12 +6,18 @@ const cfg: BridgeConfig = {
   agents: [
     {
       id: "doc-qa",
+      channel: "discord",
+      cwd: "/home/agent/cerase/workspace",
+      mode: "cerase",
       bot_token: "discord-token-doc",
       allowed_users: ["111111111111111111", "222222222222222222"],
       spawn: { command: "docker", args: ["exec", "-i", "cerase-agent-doc-qa", "opencode", "acp"] },
     },
     {
       id: "policy-qa",
+      channel: "discord",
+      cwd: "/home/agent/cerase/workspace",
+      mode: "cerase",
       bot_token: "discord-token-policy",
       allowed_users: ["333333333333333333"],
       spawn: { command: "docker", args: ["exec", "-i", "cerase-agent-policy-qa", "opencode", "acp"] },

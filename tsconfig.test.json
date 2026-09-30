@@ -1,0 +1,12 @@
+{
+  // The build's settings over everything under src, the tests included.
+  // tsconfig.json leaves the tests out because the image carries none of them,
+  // and vitest runs a test without checking its types, so without this file a
+  // type error in a test passes both. Emits nothing; src/typecheck.test.ts runs it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,3 +1,4 @@
+import type * as acp from "@agentclientprotocol/sdk";
 import { describe, expect, it } from "vitest";
 import { advertisedModeIds, CERASE_SESSION_MODE, decideSessionMode } from "./session-mode.js";
 
@@ -76,17 +77,17 @@ describe("advertisedModeIds", () => {
   });
 
   it("reads the spec's own modes object", () => {
-    expect(
-      advertisedModeIds({
-        modes: {
-          currentModeId: "build",
-          availableModes: [
-            { id: "build", name: "Build" },
-            { id: "cerase", name: "Cerase" },
-          ],
-        },
-      }),
-    ).toEqual(["build", "cerase"]);
+    const response: acp.NewSessionResponse = {
+      sessionId: "ses_spec",
+      modes: {
+        currentModeId: "build",
+        availableModes: [
+          { id: "build", name: "Build" },
+          { id: "cerase", name: "Cerase" },
+        ],
+      },
+    };
+    expect(advertisedModeIds(response)).toEqual(["build", "cerase"]);
   });
 
   it("flattens a grouped select, which would otherwise read as no modes at all", () => {

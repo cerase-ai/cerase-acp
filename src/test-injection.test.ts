@@ -13,6 +13,9 @@ function makeConfig(reply: string): BridgeConfig {
     agents: [
       {
         id: "doc-qa",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
         bot_token: "irrelevant",
         allowed_users: ["111"],
         spawn: { command: "env", args: ["--", `FAKE_REPLY=${reply}`, "node", FAKE_CHILD] },
