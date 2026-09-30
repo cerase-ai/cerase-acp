@@ -11,9 +11,18 @@
 // key file and the configuration instead of constants inside the SDK, and the
 // bridge's tests can run the real request code against fake endpoints on
 // loopback.
+//
+// Google accepts one write a second in a space, counting posts, edits and
+// deletes together and every app in the space together, and answers 429 above
+// it (developers.google.com/workspace/chat/limits). Every post and edit made
+// here therefore waits for its space's turn, and one Google refuses for that
+// rate is sent again later instead of being lost.
 
 import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { makeLogger } from "./logger.js";
+
+const logger = makeLogger("cerase-acp.workspace-chat.api");
 
 export const CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot";
 export const GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token";
@@ -51,6 +60,18 @@ export function googleEndpointProblem(key: string, value: string): string | unde
 const RENEW_MARGIN_MS = 60_000;
 const ASSERTION_LIFETIME_SEC = 3600;
 
+/** The shortest time between two writes into one space: Google allows one a second. */
+export const SPACE_WRITE_INTERVAL_MS = 1000;
+
+// A write refused with 429 is sent again after the wait its Retry-After names,
+// or after 1, 2, 4 and 8 seconds when it names none, which is the exponential
+// backoff Google asks for. The fifth refusal is final. A Retry-After longer
+// than a minute is final at once: waiting it out would hold every later write
+// into the space, and the rest of the answer, for longer than a person waits.
+const RATE_LIMIT_ATTEMPTS = 5;
+const FIRST_RATE_LIMIT_WAIT_MS = 1000;
+const LONGEST_RATE_LIMIT_WAIT_MS = 60_000;
+
 export interface ServiceAccountKey {
   client_email: string;
   private_key: string;
@@ -64,9 +85,72 @@ export class ChatApiError extends Error {
     message: string,
     readonly httpStatus: number | undefined,
     readonly googleStatus: string | undefined,
+    /** How long a 429 asked the caller to wait, when its Retry-After said. */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "ChatApiError";
+  }
+}
+
+/** A Retry-After header in milliseconds, in either of its two forms: seconds, or an HTTP date. */
+function retryAfterMs(header: string | null): number | undefined {
+  const value = header?.trim() ?? "";
+  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The order and the pace of the writes into each space.
+ *
+ * Writes into one space are sent in the order they were asked for, each at
+ * least `intervalMs` after the one before it was sent; writes into different
+ * spaces do not wait for each other. A write is timed from the moment it is
+ * sent and not from Google's answer, so a write Google answers slowly holds
+ * nothing behind it for longer than the interval.
+ */
+class SpaceWrites {
+  private readonly spaces = new Map<string, { nextAt: number; queue: Promise<void> }>();
+
+  constructor(private readonly intervalMs: number) {}
+
+  /**
+   * Resolves when a write into `space` may be sent, with the function that
+   * records it as sent. That function must be called exactly when the request
+   * leaves, or when the write is abandoned before it does; later calls do
+   * nothing.
+   */
+  async turn(space: string): Promise<() => void> {
+    let state = this.spaces.get(space);
+    if (!state) {
+      state = { nextAt: 0, queue: Promise.resolve() };
+      this.spaces.set(space, state);
+    }
+    const before = state.queue;
+    let release = () => {};
+    state.queue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await before;
+    // Checked again after every wait: a 429 answered meanwhile moves nextAt.
+    for (let wait = state.nextAt - Date.now(); wait > 0; wait = state.nextAt - Date.now()) await sleep(wait);
+    const ready = state;
+    let sent = false;
+    return () => {
+      if (sent) return;
+      sent = true;
+      ready.nextAt = Math.max(ready.nextAt, Date.now() + this.intervalMs);
+      release();
+    };
+  }
+
+  /** Holds every write into `space` back for `ms` from now. */
+  holdBack(space: string, ms: number): void {
+    const state = this.spaces.get(space);
+    if (state) state.nextAt = Math.max(state.nextAt, Date.now() + ms);
   }
 }
 
@@ -118,6 +202,8 @@ export interface WorkspaceChatApiOptions {
   /** The Chat API's base URL, without a trailing slash. */
   apiRoot: string;
   now?: () => number;
+  /** The shortest time between two writes into one space. Google's limit unless a test sets its own. */
+  writeIntervalMs?: number;
 }
 
 interface GoogleErrorBody {
@@ -144,9 +230,11 @@ async function describeFailure(resp: Response): Promise<{ status?: string; reaso
 export class WorkspaceChatApi {
   private token: { value: string; expiresAt: number } | undefined;
   private readonly now: () => number;
+  private readonly writes: SpaceWrites;
 
   constructor(private readonly opts: WorkspaceChatApiOptions) {
     this.now = opts.now ?? Date.now;
+    this.writes = new SpaceWrites(opts.writeIntervalMs ?? SPACE_WRITE_INTERVAL_MS);
   }
 
   /**
@@ -156,7 +244,7 @@ export class WorkspaceChatApi {
   async createMessage(space: string, text: string, thread?: string): Promise<string | undefined> {
     const query = thread ? "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" : "";
     const body = thread ? { text, thread: { name: thread } } : { text };
-    const resp = await this.call("spaces.messages.create", space, `/v1/${space}/messages${query}`, {
+    const resp = await this.write("spaces.messages.create", space, space, `/v1/${space}/messages${query}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -172,7 +260,8 @@ export class WorkspaceChatApi {
    * that is somebody else's message is refused rather than acted on.
    */
   async updateMessageText(name: string, text: string): Promise<void> {
-    const resp = await this.call("spaces.messages.patch", name, `/v1/${name}?updateMask=text`, {
+    const space = name.split("/messages/")[0] ?? name;
+    const resp = await this.write("spaces.messages.patch", name, space, `/v1/${name}?updateMask=text`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text }),
@@ -217,12 +306,51 @@ export class WorkspaceChatApi {
     return Buffer.from(await resp.arrayBuffer());
   }
 
+  /**
+   * A call that writes into `space`, sent in that space's turn. A refusal for
+   * the rate, 429, is sent again in a later turn, after the wait Google named
+   * or the next step of the backoff, and every write into the space waits with
+   * it. Any other refusal is returned as `call` returns it.
+   */
+  private async write(what: string, target: string, space: string, path: string, init: RequestInit): Promise<Response> {
+    for (let attempt = 1; ; attempt++) {
+      const sent = await this.writes.turn(space);
+      try {
+        return await this.call(what, target, path, init, sent);
+      } catch (err) {
+        if (!(err instanceof ChatApiError) || err.httpStatus !== 429) throw err;
+        const wait = err.retryAfterMs ?? FIRST_RATE_LIMIT_WAIT_MS * 2 ** (attempt - 1);
+        const fields = { what, target, space, attempt, waitMs: wait, retryAfterMs: err.retryAfterMs };
+        if (attempt >= RATE_LIMIT_ATTEMPTS || wait > LONGEST_RATE_LIMIT_WAIT_MS) {
+          logger.error(
+            { ...fields, reason: err.message },
+            "workspace-chat write refused for Google's rate limit, given up",
+          );
+          throw err;
+        }
+        logger.warn(fields, "workspace-chat write refused for Google's rate limit, sent again after the wait");
+        this.writes.holdBack(space, wait);
+      } finally {
+        sent();
+      }
+    }
+  }
+
   // One retry, on 401 only: that is the answer to a token Google no longer
   // accepts, and a fresh token is the whole remedy. Any other refusal is
   // returned to the caller, whose send queue owns retrying a delivery.
-  private async call(what: string, target: string, path: string, init: RequestInit): Promise<Response> {
+  // `sending` is called as the first request leaves, which is the moment a
+  // write's turn is counted from.
+  private async call(
+    what: string,
+    target: string,
+    path: string,
+    init: RequestInit,
+    sending?: () => void,
+  ): Promise<Response> {
     for (let attempt = 1; ; attempt++) {
       const token = await this.accessToken();
+      sending?.();
       const resp = await fetch(`${this.opts.apiRoot}${path}`, {
         ...init,
         headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}` },
@@ -234,7 +362,12 @@ export class WorkspaceChatApi {
         continue;
       }
       const { status, reason } = await describeFailure(resp);
-      throw new ChatApiError(`${what} on ${target} failed: HTTP ${resp.status} ${reason}`.trim(), resp.status, status);
+      throw new ChatApiError(
+        `${what} on ${target} failed: HTTP ${resp.status} ${reason}`.trim(),
+        resp.status,
+        status,
+        resp.status === 429 ? retryAfterMs(resp.headers.get("retry-after")) : undefined,
+      );
     }
   }
 

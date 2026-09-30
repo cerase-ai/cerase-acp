@@ -45,7 +45,9 @@ describe("workspace-chat API: app authentication and the calls made with it", ()
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const api = () => new WorkspaceChatApi({ keyPath, apiRoot: google.apiRoot, now: () => clock });
+  // The pace of writes into a space is workspace-chat-pace.test.ts's subject;
+  // these tests post into one space several times and are about the token.
+  const api = () => new WorkspaceChatApi({ keyPath, apiRoot: google.apiRoot, now: () => clock, writeIntervalMs: 0 });
 
   it("a reply goes into the event's thread, authorised by a token issued to the service account for chat.bot", async () => {
     await api().createMessage("spaces/AAAA", "Ecco il riepilogo.", "spaces/AAAA/threads/T1");

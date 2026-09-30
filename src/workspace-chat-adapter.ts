@@ -22,7 +22,9 @@
 // answer and then shows the user an error, and a turn routinely takes longer.
 // The reply is posted with spaces.messages.create under app authentication,
 // into the space the message came from and into its thread when it was written
-// in one.
+// in one. Every post and edit into a space waits for that space's turn, one a
+// second as Google allows, so a long answer in several messages arrives whole;
+// the pace is kept by the API client, below the send queue.
 //
 // Chat shows a person neither that an app read their message nor that it is
 // writing: a reaction needs user authentication and there is no typing call.
@@ -578,8 +580,10 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           return { ok: false, error };
         } finally {
           // After the post rather than before it, and not awaited: the answer
-          // is on screen before the placeholder turns into an ellipsis, and a
-          // slow or refused edit holds up neither this chunk nor the next.
+          // is on screen before the placeholder turns into an ellipsis. The
+          // edit is a write like any other and takes the space's next turn,
+          // the one after this chunk; a slow or refused edit holds up neither
+          // this chunk nor the next beyond that turn.
           void endPlaceholder?.();
         }
       };

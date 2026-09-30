@@ -24,6 +24,20 @@ vi.mock("./logger.js", () => ({
   },
 }));
 
+// These tests are about where each message goes and when the placeholder
+// changes. The one write a second Google allows in a space is checked on fake
+// timers in workspace-chat-pace.test.ts; kept here, it would make most of these
+// tests several real seconds long, so the client they run is built without it.
+vi.mock("./workspace-chat-api.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./workspace-chat-api.js")>();
+  class UnpacedWorkspaceChatApi extends real.WorkspaceChatApi {
+    constructor(opts: ConstructorParameters<typeof real.WorkspaceChatApi>[0]) {
+      super({ ...opts, writeIntervalMs: 0 });
+    }
+  }
+  return { ...real, WorkspaceChatApi: UnpacedWorkspaceChatApi };
+});
+
 import {
   type FakeGoogle,
   makeServiceAccount,

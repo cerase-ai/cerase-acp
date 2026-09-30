@@ -1,6 +1,9 @@
 // Per-channel FIFO that delivers messages to Discord while respecting:
 //   - the 2000-character per-message limit (split on nice boundaries)
 //   - the rate-limit (~5 messages/sec on DMs; we space sends ≥100ms)
+// Google Chat allows one write a second in a space, counting the placeholder's
+// edit; that pace is kept per space by its API client, below this queue, so a
+// Chat send target resolves only once its turn has come.
 
 import type { DeliveryResult } from "./chat-adapter.js";
 import { makeLogger } from "./logger.js";
