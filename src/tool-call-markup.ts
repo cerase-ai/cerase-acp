@@ -24,6 +24,8 @@
 // prose is left alone, and so is anything inside a code fence: that is how an
 // answer quotes the syntax to somebody who asked about it.
 
+import { bridgePromptLine } from "./bridge-prompt.js";
+
 const OPENER = String.raw`(?:<(?:tool_calls|function_calls)\s*>|<tool_call[\s>]|<invoke\s+name=|<[｜|]+\s*DSML\s*[｜|]+)`;
 
 // An opening tag at the start of a line, indentation allowed.
@@ -98,8 +100,8 @@ export function endsInToolCallMarkup(text: string): boolean {
   return at >= 0 && isToolCallMarkup(text.slice(at));
 }
 
-/** The first line of the follow-up prompt, which the console chat reads to keep it out of the transcript. */
-export const MARKUP_RETRY_MARKER = "[reply_result: not sent]";
+/** The first line of the follow-up prompt, which marks it as the bridge's: see bridge-prompt.ts. */
+export const MARKUP_RETRY_MARKER = bridgePromptLine("reply", "not sent");
 
 /**
  * The follow-up prompt that gives the assistant its one more try.

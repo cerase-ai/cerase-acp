@@ -44,6 +44,17 @@ For each configured agent template:
   console chat reads the transcript from opencode instead, and
   cerase-core applies the same rule there. Rule and recorded shapes:
   `src/tool-call-markup.ts`.
+- Opens every prompt it sends the assistant on its own, the follow-up
+  above and the correction after a file that did not reach the person,
+  with one line `[<what>_result: <outcome>]`, built by
+  `src/bridge-prompt.ts`. opencode stores these prompts as user messages;
+  the console chat reads the transcript from the session and hides every
+  user message that opens with such a line. Every prompt carrying
+  somebody's words starts with the `[turn_meta: …]` block instead, so
+  nothing a person types is hidden. The examples both repos test against
+  are cerase-core's `control-plane/tests/fixtures/bridge-prompts.json`,
+  copied here by `cerase-core/scripts/sync-tooling.sh` and pinned in
+  `scripts/TOOLING.sha256`: change them there and re-sync.
 
 ## Architecture (PoC v0.1)
 

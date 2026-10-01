@@ -11,6 +11,8 @@
 // on what was intended: the send path records a failure as it happens, the
 // dispatcher reads once at the end of the turn and clears.
 
+import { bridgePromptLine } from "./bridge-prompt.js";
+
 /** One file the person was promised and did not get. */
 export interface AttachFailure {
   /** The file as the reader would name it, never a workspace path. */
@@ -53,12 +55,12 @@ export class AttachOutcomeTracker {
  * still writing, so the earliest the assistant can be told is the moment its
  * turn ends. Written in English like every other block the bridge prepends,
  * and it names the files rather than the paths for the same reason the user
- * notices do.
+ * notices do. Its first line marks it as the bridge's: see bridge-prompt.ts.
  */
 export function attachFailurePrompt(failures: AttachFailure[]): string {
   const lines = failures.map((f) => `- ${f.fileName}: ${f.reason}`).join("\n");
   return [
-    "[attach_result: failed]",
+    bridgePromptLine("attach", "failed"),
     "The file(s) below did NOT reach the person you are writing to. The upload runs after you stop writing, so this is the first you can hear of it.",
     lines,
     "Correct the record now, in one short message in the language of the conversation: say the file did not arrive and withdraw any claim that the work was delivered. Do not claim delivery, and do not emit an attach marker in this message.",

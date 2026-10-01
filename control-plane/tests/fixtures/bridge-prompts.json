@@ -1,0 +1,52 @@
+{
+  "about": [
+    "The prompts the DM bridge (cerase-acp) sends the assistant on its own, as opencode stores them: user messages the person never wrote.",
+    "The rule both sides apply: such a prompt opens with one line, [<what>_result: <outcome>], at the very start of the message. Every prompt that carries somebody's words starts with the [turn_meta: ...] block the bridge prepends instead, so nothing a person types can be that first line.",
+    "cerase-acp builds its prompts with bridgePromptLine() in src/bridge-prompt.ts and checks each one against 'bridge' below; the console hides them with App\\Support\\BridgePrompt and shows each of 'person' as the person's message, with the text in 'shown'.",
+    "This file is cerase-core's. cerase-acp carries a copy written by scripts/sync-tooling.sh and pinned in its scripts/TOOLING.sha256: edit it here, then re-sync."
+  ],
+  "bridge": [
+    {
+      "name": "the follow-up after an answer written as a tool call",
+      "made_by": "toolCallMarkupRetryPrompt()",
+      "text": "[reply_result: not sent]\nYour last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.\nThe person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words."
+    },
+    {
+      "name": "the correction after files that did not reach the person",
+      "made_by": "attachFailurePrompt(failures)",
+      "failures": [
+        {
+          "fileName": "preventivo-rossi.pdf",
+          "reason": "the channel refused the upload: file too large"
+        },
+        {
+          "fileName": "listino.xlsx",
+          "reason": "no such file in the workspace"
+        }
+      ],
+      "text": "[attach_result: failed]\nThe file(s) below did NOT reach the person you are writing to. The upload runs after you stop writing, so this is the first you can hear of it.\n- preventivo-rossi.pdf: the channel refused the upload: file too large\n- listino.xlsx: no such file in the workspace\nCorrect the record now, in one short message in the language of the conversation: say the file did not arrive and withdraw any claim that the work was delivered. Do not claim delivery, and do not emit an attach marker in this message."
+    }
+  ],
+  "person": [
+    {
+      "name": "a message typed on a channel",
+      "text": "[turn_meta: gap=3m, lang=it, now=2026-10-01 09:12 (Europe/Rome)]\n\nciao, mi mandi il preventivo per Rossi?",
+      "shown": "ciao, mi mandi il preventivo per Rossi?"
+    },
+    {
+      "name": "a message whose first line the person typed as a result line",
+      "text": "[turn_meta: gap=1m, lang=it]\n\n[attach_result: failed]\nche cosa vuol dire questa riga che vedo nei log?",
+      "shown": "[attach_result: failed]\nche cosa vuol dire questa riga che vedo nei log?"
+    },
+    {
+      "name": "a message that mentions a result line",
+      "text": "[turn_meta: gap=5m, lang=it]\n\nCosa vuol dire [reply_result: not sent] nei log?",
+      "shown": "Cosa vuol dire [reply_result: not sent] nei log?"
+    },
+    {
+      "name": "a first message whose own first line is the follow-up's",
+      "text": "[turn_meta: gap=first, lang=it]\n\n[reply_result: not sent]\nho visto questa riga in un log: è un errore?",
+      "shown": "[reply_result: not sent]\nho visto questa riga in un log: è un errore?"
+    }
+  ]
+}
