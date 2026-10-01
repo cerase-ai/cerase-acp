@@ -3,7 +3,9 @@
 //   - the rate-limit (~5 messages/sec on DMs; we space sends ≥100ms)
 // Google Chat allows one write a second in a space, counting the placeholder's
 // edit; that pace is kept per space by its API client, below this queue, so a
-// Chat send target resolves only once its turn has come.
+// Chat send target resolves only once its turn has come. A Chat answer reaches
+// the queue whole and is cut by the channel's own `split`, at Google's message
+// size instead of Discord's.
 
 import type { DeliveryResult } from "./chat-adapter.js";
 import { makeLogger } from "./logger.js";
@@ -15,7 +17,8 @@ const logger = makeLogger("cerase-acp.send-queue");
 // the " ⏎" continuation marker (4 bytes UTF-8) on non-final chunks.
 const HARD_LIMIT = 2000;
 const CHUNK_BUDGET = 1990;
-const CONTINUATION = " ⏎";
+/** Ends every part of a message cut in several but the last. */
+export const CONTINUATION = " ⏎";
 
 /**
  * Splits `text` into Discord-ready chunks. Each chunk except the last
@@ -58,6 +61,8 @@ export interface SendQueueOptions {
   minIntervalMs?: number;
   /** The notice sent once when a chunk is lost. Defaults to the Italian one. */
   failureMarker?: string;
+  /** Cuts one enqueued text into the messages the channel takes. Defaults to `chunkForDiscord`. */
+  split?: (text: string) => string[];
 }
 
 /**
@@ -89,6 +94,7 @@ export class SendQueue {
   private readonly send: (chunk: string) => Promise<DeliveryResult>;
   private readonly minIntervalMs: number;
   private readonly failureMarker: string;
+  private readonly split: (text: string) => string[];
   private donePromise: Promise<void> = Promise.resolve();
   private resolveDone: (() => void) | undefined;
 
@@ -96,10 +102,11 @@ export class SendQueue {
     this.send = opts.send;
     this.minIntervalMs = opts.minIntervalMs ?? 100;
     this.failureMarker = opts.failureMarker ?? DELIVERY_FAILURE_MARKER;
+    this.split = opts.split ?? chunkForDiscord;
   }
 
   enqueue(text: string): void {
-    const chunks = chunkForDiscord(text);
+    const chunks = this.split(text);
     if (chunks.length === 0) return;
     if (this.items.length === 0 && !this.running) {
       this.donePromise = new Promise<void>((resolve) => {

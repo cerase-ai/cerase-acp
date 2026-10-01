@@ -185,20 +185,22 @@ function scripted(replies: string[], size = 1000) {
   return { mgr, prompts };
 }
 
-async function turn(replies: string[], message: string, size?: number) {
+/** `whole` stands for a channel that takes each answer as one message, as Google Chat does. */
+async function turn(replies: string[], message: string, size?: number, whole = false) {
   const { mgr, prompts } = scripted(replies, size);
   const sent: string[] = [];
   const d = new Dispatcher({
     config: CONFIG,
     sessionManager: mgr,
     turnMeta: new TurnMetaTracker(),
+    wholeAnswers: () => (whole ? { split: (text) => [text] } : undefined),
     resolveSendTarget: () => async (chunk) => {
       sent.push(chunk);
       return { ok: true };
     },
   });
   const result = await d.handleMessage("a", "u", message);
-  return { result, prompts, chat: sent.join("\n") };
+  return { result, prompts, sent, chat: sent.join("\n") };
 }
 
 const ASK = "fammi la presentazione per il primo incontro con il cliente";
@@ -248,5 +250,29 @@ describe("an answer written as a tool call", () => {
     const { prompts, chat } = await turn([QUOTED.fencedAtTheEnd], "mi fai un esempio di chiamata in xml?", 9);
     expect(prompts).toHaveLength(1);
     expect(chat.replace(/\s+/g, " ")).toBe(QUOTED.fencedAtTheEnd.replace(/\s+/g, " "));
+  });
+});
+
+describe("an answer written as a tool call, on a channel that takes each answer as one message", () => {
+  it("leaves the block out of the message: the sentence before it is one message, the retry's answer another", async () => {
+    const { result, prompts, sent } = await turn([RECORDED.functionCalls, ANSWER], ASK, 7, true);
+    expect(prompts).toHaveLength(2);
+    expect(sent).toEqual(["Un attimo, controllo la giacenza di PN-4471 prima di confermare.", ANSWER]);
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("sends nothing of a block with no sentence before it, and the notice when the retry ends the same way", async () => {
+    const { result, sent } = await turn([RECORDED.dsmlOnly, RECORDED.toolCallsJson], ASK, 7, true);
+    expect(sent).toEqual([
+      "Ok, ci penso io: preparo l'email per Marta e la invio.",
+      "La risposta non mi è uscita in modo corretto e non te l'ho mandata. Chiedimelo di nuovo, per favore.",
+    ]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("sends an answer that quotes the syntax inside prose as one message, as written", async () => {
+    const { prompts, sent } = await turn([QUOTED.proseAfterTheBlock], "come si scrive una chiamata in xml?", 9, true);
+    expect(prompts).toHaveLength(1);
+    expect(sent).toEqual([QUOTED.proseAfterTheBlock]);
   });
 });

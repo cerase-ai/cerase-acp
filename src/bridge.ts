@@ -341,6 +341,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         }
       : undefined,
     onSummaryWithheld: captureSummary,
+    // Asked of the adapter at every turn rather than once, because a reload
+    // replaces an agent's adapter in the map this reads.
+    wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {

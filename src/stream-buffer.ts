@@ -14,6 +14,10 @@
 // A caller can also ask the buffer to stop flushing for a while (see
 // `holdFrom`): some text can only be judged whole, and once a piece of it
 // has been sent there is nothing left to judge.
+//
+// With `wholeMessages` none of the three triggers applies: the buffer sends
+// only when `flush()` or `end()` asks it to, so a channel that takes an answer
+// as one message is handed the answer in one piece.
 
 export interface StreamBufferOptions {
   onFlush: (text: string) => void;
@@ -34,6 +38,12 @@ export interface StreamBufferOptions {
   holdFrom?: (piece: string) => number;
   /** Receives held text. Defaults to `onFlush`. */
   onHeld?: (text: string) => void;
+  /**
+   * When true, no sentence boundary, cap or idle timer flushes the buffer:
+   * text goes out only when `flush()` or `end()` is called, judged for a hold
+   * as every flush is. Default false.
+   */
+  wholeMessages?: boolean;
 }
 
 const SENTENCE_END = /[.!?\n]/;
@@ -47,6 +57,7 @@ export class StreamBuffer {
   private readonly onFlush: (text: string) => void;
   private readonly holdFrom?: (piece: string) => number;
   private readonly onHeld: (text: string) => void;
+  private readonly wholeMessages: boolean;
   private ended = false;
   private holding = false;
 
@@ -57,14 +68,15 @@ export class StreamBuffer {
     this.idleMs = opts.idleMs ?? 500;
     this.holdFrom = opts.holdFrom;
     this.onHeld = opts.onHeld ?? opts.onFlush;
+    this.wholeMessages = opts.wholeMessages ?? false;
   }
 
   push(text: string): void {
     if (this.ended || !text) return;
     this.buffer += text;
     // Held text waits for release() or end(); no boundary, cap or timer
-    // applies to it.
-    if (this.holding) return;
+    // applies to it, nor to any text of a buffer that keeps messages whole.
+    if (this.holding || this.wholeMessages) return;
     this.resetIdleTimer();
 
     // Boundary flush
@@ -81,6 +93,22 @@ export class StreamBuffer {
       this.emit(this.buffer);
       this.buffer = "";
     }
+  }
+
+  /**
+   * Send what the buffer holds now, as the idle timer would: the part before a
+   * hold that starts in it goes to `onFlush`, and the hold starts. A no-op while
+   * a hold is on, since held text waits for `release()` or `end()`.
+   */
+  flush(): void {
+    if (this.ended || this.holding || this.buffer.length === 0) return;
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
+    }
+    if (this.startsHold(this.buffer)) return;
+    this.emit(this.buffer.trimEnd());
+    this.buffer = "";
   }
 
   /**
@@ -156,11 +184,8 @@ export class StreamBuffer {
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.buffer.length > 0) {
-        if (this.startsHold(this.buffer)) return;
-        this.emit(this.buffer.trimEnd());
-        this.buffer = "";
-      }
+      this.idleTimer = undefined;
+      this.flush();
     }, this.idleMs);
   }
 

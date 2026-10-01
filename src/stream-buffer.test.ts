@@ -108,6 +108,67 @@ describe("StreamBuffer", () => {
     }
   });
 
+  describe("a buffer that keeps messages whole", () => {
+    function whole(holdFrom?: (piece: string) => number) {
+      const out: string[] = [];
+      const kept: string[] = [];
+      const buf = new StreamBuffer({
+        onFlush: (s) => out.push(s),
+        onHeld: (s) => kept.push(s),
+        holdFrom,
+        wholeMessages: true,
+      });
+      return { buf, out, kept };
+    }
+
+    it("sends nothing on a sentence end, on the size cap or on the idle timer, and everything at end()", () => {
+      const { buf, out } = whole();
+      const answer = `${"Prima frase della risposta, abbastanza lunga da contare. ".repeat(40)}Ultima frase.`;
+      for (let i = 0; i < answer.length; i += 50) buf.push(answer.slice(i, i + 50));
+      vi.advanceTimersByTime(60_000);
+      expect(answer.length).toBeGreaterThan(2000);
+      expect(out).toEqual([]);
+      buf.end();
+      expect(out).toEqual([answer]);
+    });
+
+    it("sends what it holds on flush(), and what comes after on the next flush()", () => {
+      const { buf, out } = whole();
+      buf.push("Un attimo, controllo la tua agenda.");
+      buf.flush();
+      expect(out).toEqual(["Un attimo, controllo la tua agenda."]);
+      buf.flush();
+      expect(out).toHaveLength(1);
+      buf.push("Domani hai due riunioni.");
+      buf.end();
+      expect(out).toEqual(["Un attimo, controllo la tua agenda.", "Domani hai due riunioni."]);
+    });
+
+    it("judges a flush for a hold, and keeps the held text for release()", () => {
+      const { buf, out, kept } = whole((piece) => {
+        const m = /^HOLD$/m.exec(piece);
+        return m ? m.index : -1;
+      });
+      buf.push("before the hold.\nHOLD\nkept.");
+      buf.flush();
+      expect(out).toEqual(["before the hold."]);
+      buf.flush();
+      expect(kept).toEqual([]);
+      buf.release();
+      expect(kept).toEqual(["HOLD\nkept."]);
+    });
+  });
+
+  it("flush() on a streaming buffer sends a partial sentence before its idle timer", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), idleMs: 500 });
+    buf.push("partial sentence without terminator");
+    buf.flush();
+    expect(out).toEqual(["partial sentence without terminator"]);
+    vi.advanceTimersByTime(1000);
+    expect(out).toHaveLength(1);
+  });
+
   describe("a hold", () => {
     // Stands in for the caller's rule: hold from the first line reading HOLD.
     const holdFrom = (piece: string) => {

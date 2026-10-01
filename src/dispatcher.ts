@@ -11,7 +11,7 @@ import {
   attachFailureError,
   attachFailurePrompt,
 } from "./attach-outcome.js";
-import type { DeliveryResult } from "./chat-adapter.js";
+import type { DeliveryResult, WholeAnswers } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { makeLogger } from "./logger.js";
@@ -74,6 +74,13 @@ export interface DispatcherDeps {
    * above: the CLI and test ingresses have nowhere to keep it.
    */
   onSummaryWithheld?: (agentId: string, summary: string) => void;
+  /**
+   * The agent's channel, when it takes each answer as one message: see
+   * `ChatAdapter.wholeAnswers`. Absent, or answering undefined, a reply goes
+   * out in pieces as it streams, which is what Discord and the CLI and test
+   * ingresses get.
+   */
+  wholeAnswers?: (agentId: string) => WholeAnswers | undefined;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -197,6 +204,14 @@ export function isCreditExhaustedError(err: unknown): boolean {
   return /cerase credit gate|BudgetExceeded|credits? exhausted/i.test(text);
 }
 
+/** One prompt's reply on its way from the ACP stream to the send queue: see `Dispatcher.replyStream`. */
+interface ReplyStream {
+  push: (update: Parameters<SessionUpdateHandler>[0]) => boolean;
+  end: () => void;
+  endedInMarkup: () => boolean;
+  delivered: () => number;
+}
+
 export class Dispatcher {
   constructor(private deps: DispatcherDeps) {}
 
@@ -277,8 +292,7 @@ export class Dispatcher {
       }
     }
 
-    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
-    const reply = this.replyStream(queue, agentId, userId);
+    const { queue, reply } = this.openReply(agentId, userId, send, text);
 
     // One call, two facts, and neither is worth failing a turn over. The
     // resolver inside is consulted only when this process has no memory of the
@@ -414,8 +428,7 @@ export class Dispatcher {
     send: SendTarget,
     text: string,
   ): Promise<{ answered: boolean; drain: DrainResult }> {
-    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
-    const reply = this.replyStream(queue, agentId, userId);
+    const { queue, reply } = this.openReply(agentId, userId, send, text);
     let failed = false;
     try {
       await this.deps.sessionManager.prompt(agentId, userId, toolCallMarkupRetryPrompt(), (update) => {
@@ -451,8 +464,7 @@ export class Dispatcher {
     text: string,
     failures: AttachFailure[],
   ): Promise<void> {
-    const queue = new SendQueue({ send, failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)) });
-    const reply = this.replyStream(queue, agentId, userId);
+    const { queue, reply } = this.openReply(agentId, userId, send, text);
     try {
       await this.deps.sessionManager.prompt(agentId, userId, attachFailurePrompt(failures), (update) => {
         reply.push(update);
@@ -464,6 +476,25 @@ export class Dispatcher {
       await queue.drain();
       this.deps.attachOutcomes?.take(agentId, userId);
     }
+  }
+
+  /**
+   * The send queue and the reply stream for one prompt's answer, in the shape
+   * the agent's channel takes it.
+   */
+  private openReply(
+    agentId: string,
+    userId: string,
+    send: SendTarget,
+    text: string,
+  ): { queue: SendQueue; reply: ReplyStream } {
+    const whole = this.deps.wholeAnswers?.(agentId);
+    const queue = new SendQueue({
+      send,
+      failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)),
+      split: whole ? (answer) => whole.split(answer) : undefined,
+    });
+    return { queue, reply: this.replyStream(queue, agentId, userId, whole !== undefined) };
   }
 
   /**
@@ -495,18 +526,18 @@ export class Dispatcher {
    * The stream reports whether the turn ended on such a block, which is what
    * decides the retry.
    *
+   * On a channel that takes each answer as one message (`whole`), nothing is
+   * flushed as it streams. The text is judged by the same holds when the agent
+   * starts a new message, starts a tool, or ends the turn, and what is
+   * delivered goes to the queue in one piece only when a tool starts or the
+   * turn ends. The text before a tool is therefore a message of its own, sent
+   * as the tool starts: a tool can run for minutes, and the person reads what
+   * the assistant is doing while it does, instead of finding it at the top of
+   * the answer once the work it announces is over.
+   *
    * `push` answers whether the update carried reply text.
    */
-  private replyStream(
-    queue: SendQueue,
-    agentId: string,
-    userId: string,
-  ): {
-    push: (update: Parameters<SessionUpdateHandler>[0]) => boolean;
-    end: () => void;
-    endedInMarkup: () => boolean;
-    delivered: () => number;
-  } {
+  private replyStream(queue: SendQueue, agentId: string, userId: string, whole: boolean): ReplyStream {
     // Whether what this message has sent so far leaves a code fence open. A
     // tool-call block inside a fence is quoted, not emitted, so no hold starts
     // there.
@@ -515,14 +546,27 @@ export class Dispatcher {
     // True while the last text of the turn is a tool-call block that was held
     // back; anything sent after it answers the person and clears it.
     let endedInMarkup = false;
+    // On a whole-answer channel, what has been delivered of the answer and not
+    // yet sent. Every cut inside one answer falls at the start of a line — the
+    // heading or the tool-call block a hold starts at — or at the end of an
+    // assistant message, and the buffer trims the whitespace at a cut; a blank
+    // line is what puts back the break that was there.
+    let answer: string[] = [];
+    const sendAnswer = () => {
+      if (answer.length === 0) return;
+      queue.enqueue(answer.join("\n\n"));
+      answer = [];
+    };
     const deliver = (text: string) => {
-      queue.enqueue(text);
+      if (whole) answer.push(text);
+      else queue.enqueue(text);
       fenceOpen = fenceOpenAfter(text, fenceOpen);
       delivered += 1;
       endedInMarkup = false;
     };
     const buffer = new StreamBuffer({
       onFlush: deliver,
+      wholeMessages: whole,
       holdFrom: (piece) => earliest(summaryHeadingStart(piece), toolCallMarkupHoldStart(piece, fenceOpen)),
       onHeld: (held) => {
         if (isInternalSummaryBlock(held)) {
@@ -558,9 +602,15 @@ export class Dispatcher {
     let messageId: string | undefined;
     return {
       push: (update) => {
+        if (whole && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")) {
+          buffer.flush();
+          sendAnswer();
+          return false;
+        }
         if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;
         const next = (update as { messageId?: string }).messageId;
         if (next && messageId && next !== messageId) {
+          if (whole) buffer.flush();
           buffer.release();
           fenceOpen = false;
         }
@@ -568,7 +618,10 @@ export class Dispatcher {
         buffer.push(update.content.text);
         return true;
       },
-      end: () => buffer.end(),
+      end: () => {
+        buffer.end();
+        sendAnswer();
+      },
       endedInMarkup: () => endedInMarkup,
       delivered: () => delivered,
     };

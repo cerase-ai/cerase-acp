@@ -23,8 +23,13 @@
 // The reply is posted with spaces.messages.create under app authentication,
 // into the space the message came from and into its thread when it was written
 // in one. Every post and edit into a space waits for that space's turn, one a
-// second as Google allows, so a long answer in several messages arrives whole;
-// the pace is kept by the API client, below the send queue.
+// second as Google allows; the pace is kept by the API client, below the send
+// queue.
+//
+// Each message rings the person's phone, so an answer is posted as one message
+// once it is complete, not in the pieces it streams in, and in more than one
+// only past Google's message size. What the assistant writes before it starts a
+// tool is a message of its own, posted as the tool starts.
 //
 // Chat shows a person neither that an app read their message nor that it is
 // writing: a reaction needs user authentication and there is no typing call.
@@ -54,7 +59,7 @@ import {
   readServiceAccountKey,
   WorkspaceChatApi,
 } from "./workspace-chat-api.js";
-import { toChatText } from "./workspace-chat-format.js";
+import { splitForGoogleChat, toChatText } from "./workspace-chat-format.js";
 import { WorkspaceChatSpaces } from "./workspace-chat-spaces.js";
 import { accettabile, URL_CERTIFICATI } from "./workspace-chat-verify.js";
 
@@ -521,6 +526,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       api = undefined;
       await closeServerIfUnused();
     },
+    wholeAnswers: { split: splitForGoogleChat },
     makeSendTarget(userId: string) {
       // Taken now, not at send time: see runTurn.
       const conversation = conversations.get(userId);

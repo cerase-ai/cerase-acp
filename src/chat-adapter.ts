@@ -29,6 +29,14 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  */
 export type DeliveryResult = { ok: true } | { ok: false; error: Error };
 
+/**
+ * How a channel that takes each answer as one message cuts it: into one
+ * message, unless the answer is larger than one message may be there.
+ */
+export interface WholeAnswers {
+  split(text: string): string[];
+}
+
 export interface ChatAdapter {
   agentId: string;
   start(): Promise<void>;
@@ -108,6 +116,16 @@ export interface ChatAdapter {
    * handler's `finally` is the same leak guard as above.
    */
   makeSendTarget(userId: string): (chunk: string) => Promise<DeliveryResult>;
+
+  /**
+   * Set by a channel where every message is a notification and the reply
+   * cannot stream into one, which is Google Chat. The dispatcher then sends an
+   * answer once it is complete — when the turn ends, or when the assistant
+   * starts a tool, so the text written before the tool runs arrives while it
+   * runs — and cuts it with `split` instead of at Discord's 2,000 characters.
+   * Absent, the reply goes out in pieces as it streams.
+   */
+  wholeAnswers?: WholeAnswers;
 
   /**
    * CHAT-UX / ATTACH-1 — upload a workspace file as a chat attachment to

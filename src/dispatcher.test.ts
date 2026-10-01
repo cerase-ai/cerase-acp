@@ -561,7 +561,7 @@ describe("a summary streamed inside a turn", () => {
    * filter the bridge's send path does, so what lands in `delivered` is what a
    * person would have read.
    */
-  function harness(updates: Update[], fail?: Error) {
+  function harness(updates: Update[], fail?: Error, whole = false) {
     const delivered: string[] = [];
     const withheld: string[] = [];
     let duringTurn: string[] = [];
@@ -569,6 +569,7 @@ describe("a summary streamed inside a turn", () => {
       config: makeConfig("unused"),
       sessionManager: streamingMgr(updates, () => (duringTurn = [...delivered]), fail),
       turnMeta: new TurnMetaTracker(),
+      wholeAnswers: () => (whole ? { split: (text) => [text] } : undefined),
       onSummaryWithheld: (_agentId, summary) => withheld.push(summary),
       resolveSendTarget: () => async (chunk) => {
         if (!isInternalSummaryBlock(chunk)) delivered.push(chunk);
@@ -677,6 +678,51 @@ describe("a summary streamed inside a turn", () => {
       "## Objective\nPreparare il confronto tra i tre fornitori entro venerdì.",
       pickErrorMessage("ciao"),
     ]);
+  });
+
+  // On a channel that takes each answer as one message the same holds decide
+  // what is sent, and nothing withheld reaches the message it would have been
+  // part of.
+  describe("on a channel that takes each answer as one message", () => {
+    it("withholds the summary and sends the paragraph before it as the only message", async () => {
+      const h = harness(chunked(LEAD + SUMMARY), undefined, true);
+      await expect(h.d.handleMessage("doc-qa", "111", "ciao")).resolves.toEqual({ ok: true });
+      expect(h.duringTurn()).toEqual([]);
+      expect(h.delivered).toEqual([LEAD.trimEnd()]);
+      expect(h.withheld).toHaveLength(1);
+      expect(h.withheld[0]).toContain("## Objective");
+    });
+
+    it("sends the answer after a summary in a new message, alone", async () => {
+      const ANSWER =
+        "Ecco il confronto che mi avevi chiesto: la seconda offerta è la più conveniente, la prima la più veloce.";
+      const h = harness([...chunked(SUMMARY, "msg_compaction"), ...chunked(ANSWER, "msg_answer")], undefined, true);
+      await expect(h.d.handleMessage("doc-qa", "111", "ciao")).resolves.toEqual({ ok: true });
+      expect(h.delivered).toEqual([ANSWER]);
+      expect(h.withheld).toEqual([SUMMARY]);
+    });
+
+    it("sends an answer that uses one of its headings as one message, as written", async () => {
+      const ANSWER = [
+        "Certo, ecco come la imposterei.",
+        "",
+        "## Objective",
+        "Chiudere il confronto tra i tre fornitori entro venerdì, così il responsabile acquisti può decidere.",
+        "",
+        "Se mi mandi anche il listino del terzo fornitore, lo aggiungo subito.",
+      ].join("\n");
+      const h = harness(chunked(ANSWER), undefined, true);
+      await h.d.handleMessage("doc-qa", "111", "come imposteresti il confronto?");
+      expect(h.delivered).toEqual([ANSWER]);
+    });
+
+    it("sends what a failed turn wrote before the failure notice, as one message", async () => {
+      const ANSWER = "Ci sto lavorando.\n\n## Objective\nPreparare il confronto tra i tre fornitori entro venerdì.";
+      const h = harness(chunked(ANSWER), new Error("opencode child crashed"), true);
+      const result = await h.d.handleMessage("doc-qa", "111", "ciao");
+      expect(result.ok).toBe(false);
+      expect(h.delivered).toEqual([ANSWER, pickErrorMessage("ciao")]);
+    });
   });
 
   it("judges held text when the turn fails, and withholds it when it is a summary", async () => {

@@ -1077,6 +1077,88 @@ describe("a summary the agent streams inside a turn", () => {
   });
 });
 
+// Google Chat takes an answer as one message; the bridge learns that from the
+// agent's adapter, at every turn, and Discord-shaped adapters declare nothing.
+describe("the shape of an answer comes from the agent's adapter", () => {
+  let handle: RunBridgeHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  const ANSWER = Array.from(
+    { length: 8 },
+    (_, i) => `Parte ${i + 1} del riepilogo: ${"la settimana prosegue ".repeat(12).trim()}.`,
+  ).join(" ");
+
+  it("an adapter that takes whole answers gets one message, and one that does not gets the streamed pieces", async () => {
+    const SECRET = "whole-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    const spawn = { command: "env", args: ["--", `FAKE_REPLY=${ANSWER}`, "FAKE_CHUNKS=40", "node", FAKE_CHILD] };
+    const agent = (id: string): AgentConfig => ({
+      id,
+      channel: "discord",
+      cwd: "/home/agent/cerase/workspace",
+      mode: "cerase",
+      bot_token: "irrelevant",
+      allowed_users: ["111"],
+      spawn,
+    });
+    const cfg: BridgeConfig = {
+      agents: [agent("whole-probe"), agent("pieces-probe")],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    };
+
+    const chat = new Map<string, string[]>();
+    const split = vi.fn((text: string) => [text]);
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (a, dispatcher) => {
+        const fake = makeFakeAdapter(a, dispatcher, "ok");
+        chat.set(a.id, []);
+        fake.makeSendTarget = () => async (chunk: string) => {
+          chat.get(a.id)?.push(chunk);
+          return { ok: true };
+        };
+        if (a.id === "whole-probe") fake.wholeAnswers = { split };
+        return fake;
+      },
+    });
+
+    for (const id of ["whole-probe", "pieces-probe"]) {
+      const res = await fetch(`${handle.internalUrl}/internal/inject`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+        body: JSON.stringify({ agent_id: id, user_id: "111", text: "ciao", surface_in_chat: false }),
+      });
+      expect(res.status).toBe(202);
+    }
+    await vi.waitFor(
+      async () => {
+        const st = await fetch(`${handle?.internalUrl}/internal/status`, {
+          headers: { authorization: `Bearer ${SECRET}` },
+        });
+        const body = (await st.json()) as { inject: { in_flight: number; succeeded: number } };
+        expect(body.inject.in_flight).toBe(0);
+        expect(body.inject.succeeded).toBe(2);
+      },
+      { timeout: 8000, interval: 100 },
+    );
+
+    expect(chat.get("whole-probe")).toEqual([ANSWER]);
+    expect(split).toHaveBeenCalledWith(ANSWER);
+    const pieces = chat.get("pieces-probe") ?? [];
+    expect(pieces.length).toBeGreaterThanOrEqual(8);
+    // Whitespace aside: a chunk the child sends late is flushed by the idle
+    // timer, which can cut inside a sentence.
+    expect(pieces.join("").replace(/\s+/g, "")).toBe(ANSWER.replace(/\s+/g, ""));
+  });
+});
+
 // The measured case: the container lost its network for five minutes and both
 // status surfaces reported the Discord adapter healthy throughout, with
 // nothing logged. The adapter recovered on its own, so nothing was broken —

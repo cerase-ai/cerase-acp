@@ -216,6 +216,16 @@ edited once, by its own turn. A message sent while no turn is running, such as
 a scheduled one, edits none. A placeholder Google refuses to post or edit is
 logged as a warning and the reply goes out regardless.
 
+Every Chat message rings the person's phone, and Google takes one write a
+second in a space, so an answer is posted as one message once the assistant has
+finished writing it, not in the sentence groups it streams in, which is how
+Discord receives it. What the assistant writes before it starts a tool, such as
+*un attimo, controllo l'agenda*, is a message of its own, posted as the tool
+starts, so the person reads it while the tool runs. An answer is cut in two only
+when it is larger than a Chat message may be, 32,000 bytes; the first part ends
+with ⏎. Text the bridge holds back, an internal summary or an answer written as
+a tool call, is left out of the message as it is on every channel.
+
 The listener is open while at least one `workspace_chat` agent is registered.
 
 The bridge runs as `node` (uid 1000, gid 1000). It needs read permission on the

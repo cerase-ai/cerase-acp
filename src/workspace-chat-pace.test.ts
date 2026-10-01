@@ -1,4 +1,9 @@
-// The pace of the writes into a Google Chat space, on fake timers.
+// The pace of the writes into a Google Chat space, and the messages an answer
+// becomes there, on fake timers.
+//
+// Every Chat message is a notification, so an answer is posted as one message
+// once it is complete; what the assistant writes before a tool is one more,
+// posted as the tool starts. Discord keeps receiving the streamed pieces.
 //
 // Google accepts one write a second in a space, counting posts, edits and
 // deletes together, and answers 429 above it. The Google here applies that rule
@@ -32,6 +37,7 @@ import type { AgentConfig, BridgeConfig } from "./config.js";
 import { Dispatcher } from "./dispatcher.js";
 import { deliveryFailureNotice } from "./platform-notices.js";
 import type { SessionManager } from "./session-manager.js";
+import { StreamBuffer } from "./stream-buffer.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 import { ChatApiError, WorkspaceChatApi } from "./workspace-chat-api.js";
@@ -398,16 +404,25 @@ function deliver(event: unknown): Promise<number> {
 interface Turn {
   userId: string;
   say(text: string): void;
+  /** The assistant starts a tool, reported as opencode reports it, and the tool finishes. */
+  tool(): void;
   end(): void;
 }
 
 /** A session manager whose turns answer what the test tells them to, when it tells them to. */
 function scriptedSessions(turns: Turn[]): SessionManager {
+  let calls = 0;
   const prompt: SessionManager["prompt"] = (_agentId, userId, _text, onUpdate) =>
     new Promise((resolve) => {
       turns.push({
         userId,
         say: (text) => onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+        tool: () => {
+          calls += 1;
+          const toolCallId = `call_${calls}`;
+          onUpdate?.({ sessionUpdate: "tool_call", toolCallId, title: "calendar_events", status: "pending" });
+          onUpdate?.({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+        },
         end: () => resolve({ stopReason: "end_turn" }),
       });
     });
@@ -419,12 +434,25 @@ function scriptedSessions(turns: Turn[]): SessionManager {
 const answer = (n: number) =>
   Array.from({ length: n }, (_, i) => `Parte ${i + 1} del riepilogo: ${"la settimana prosegue ".repeat(12).trim()}.`);
 
-describe("Google Chat: a long answer arrives whole, at Google's pace", () => {
+/** An answer of about 2,300 characters, in eight sentence groups each long enough to have been a message. */
+const LONG = answer(8).join(" ");
+const NARRATION = "Un attimo, controllo la tua agenda della settimana.";
+
+/** Streams `text` the way a model does: forty characters every 50 ms. */
+async function stream(turn: Turn, text: string): Promise<void> {
+  for (let i = 0; i < text.length; i += 40) {
+    turn.say(text.slice(i, i + 40));
+    await vi.advanceTimersByTimeAsync(50);
+  }
+}
+
+describe("Google Chat: an answer is one message, posted at Google's pace", () => {
   const MARIO = "mario.rossi@example.com";
   const LUIGI = "luigi.verdi@example.com";
   let google: StandInGoogle;
   let dir: string;
   let adapter: ChatAdapter | undefined;
+  let dispatcher: Dispatcher;
   let turns: Turn[];
 
   beforeEach(async () => {
@@ -451,10 +479,13 @@ describe("Google Chat: a long answer arrives whole, at Google's pace", () => {
     };
     writeKeyFile(join(dir, "agent-1.json"), makeServiceAccount(), TOKEN_URI);
     const config: BridgeConfig = { agents: [agent], session: { idle_timeout_minutes: 60, max_concurrent: 16 } };
-    const dispatcher = new Dispatcher({
+    // Wired as the bridge wires it: the send target and the shape of an answer
+    // both come from the agent's adapter.
+    dispatcher = new Dispatcher({
       config,
       sessionManager: scriptedSessions(turns),
       turnMeta: new TurnMetaTracker(),
+      wholeAnswers: () => adapter?.wholeAnswers,
       resolveSendTarget: (_agentId, userId) => adapter!.makeSendTarget(userId),
     });
     adapter = await createChatAdapter(agent, dispatcher);
@@ -480,62 +511,114 @@ describe("Google Chat: a long answer arrives whole, at Google's pace", () => {
     return turns.find((t) => t.userId === email)!;
   }
 
-  function answerWith(turn: Turn, parts: string[]) {
-    for (const part of parts) turn.say(part);
-    turn.end();
-  }
-
   const inSpace = (space: string) => google.writes.filter((w) => w.space === space);
 
-  it("a five-part answer and the placeholder's edit never make two writes into the space within a second, and the first part is not held back", async () => {
+  it("a 2,000-character answer streamed in pieces is one message, posted when it ends, and the placeholder's edit follows it", async () => {
+    expect(LONG.length).toBeGreaterThan(2000);
     const turn = await write(MARIO, "spaces/DM-MARIO");
-    // A turn takes seconds; the answer is ready well after the placeholder.
     await vi.advanceTimersByTimeAsync(5000);
-    const answeredAt = Date.now();
-    const parts = answer(5);
-    answerWith(turn, parts);
+    await stream(turn, LONG);
+    const endedAt = Date.now();
+    turn.end();
     await vi.advanceTimersByTimeAsync(30_000);
 
     const writes = inSpace("spaces/DM-MARIO");
     expect(writes.map((w) => [w.method, w.text, w.status])).toEqual([
       ["POST", BALLOON, 200],
-      ["POST", parts[0], 200],
+      ["POST", LONG, 200],
       ["PATCH", ELLIPSIS, 200],
-      ["POST", parts[1], 200],
-      ["POST", parts[2], 200],
-      ["POST", parts[3], 200],
-      ["POST", parts[4], 200],
     ]);
-    expect(closestPair(writes)).toBeGreaterThanOrEqual(1000);
-    expect(writes[1]?.at).toBe(answeredAt);
-    expect(google.shown("spaces/DM-MARIO")).toEqual([ELLIPSIS, ...parts]);
+    expect(writes[1]?.at).toBe(endedAt);
+    expect(writes[2]!.at - writes[1]!.at).toBe(1000);
+    expect(google.shown("spaces/DM-MARIO")).toEqual([ELLIPSIS, LONG]);
     expect(logs.filter((l) => l.level === "error")).toEqual([]);
   });
 
-  it("a part Google refuses for the rate is sent again after the wait it names, and every part arrives, in order", async () => {
-    const parts = answer(5);
-    google.refuse((w) => w.text === parts[2], { status: 429, retryAfter: "2" });
+  it("what the assistant writes before a tool is a message of its own, posted as the tool starts; the answer after it is one more", async () => {
+    const turn = await write(MARIO, "spaces/DM-MARIO");
+    await vi.advanceTimersByTimeAsync(3000);
+    turn.say(NARRATION);
+    const toolAt = Date.now();
+    turn.tool();
+    // The tool runs for twenty seconds.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await stream(turn, LONG);
+    const endedAt = Date.now();
+    turn.end();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const writes = inSpace("spaces/DM-MARIO");
+    expect(writes.map((w) => [w.at, w.method, w.text, w.status])).toEqual([
+      [writes[0]!.at, "POST", BALLOON, 200],
+      [toolAt, "POST", NARRATION, 200],
+      [toolAt + 1000, "PATCH", ELLIPSIS, 200],
+      [endedAt, "POST", LONG, 200],
+    ]);
+    expect(google.shown("spaces/DM-MARIO")).toEqual([ELLIPSIS, NARRATION, LONG]);
+  });
+
+  it("after a quick tool, the narration, the placeholder's edit and the answer never make two writes into the space within a second", async () => {
     const turn = await write(MARIO, "spaces/DM-MARIO");
     await vi.advanceTimersByTimeAsync(5000);
-    answerWith(turn, parts);
+    const toolAt = Date.now();
+    turn.say(NARRATION);
+    turn.tool();
+    turn.say(LONG);
+    turn.end();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const writes = inSpace("spaces/DM-MARIO");
+    expect(writes.slice(1).map((w) => [w.at - toolAt, w.method, w.text, w.status])).toEqual([
+      [0, "POST", NARRATION, 200],
+      [1000, "PATCH", ELLIPSIS, 200],
+      [2000, "POST", LONG, 200],
+    ]);
+    expect(closestPair(writes)).toBeGreaterThanOrEqual(1000);
+  });
+
+  it("an answer Google refuses for the rate is sent again whole after the wait it names", async () => {
+    google.refuse((w) => w.text === LONG, { status: 429, retryAfter: "2" });
+    const turn = await write(MARIO, "spaces/DM-MARIO");
+    await vi.advanceTimersByTimeAsync(5000);
+    turn.say(LONG);
+    turn.end();
     await vi.advanceTimersByTimeAsync(30_000);
 
     const writes = inSpace("spaces/DM-MARIO");
     expect(writes.map((w) => [w.text, w.status])).toEqual([
       [BALLOON, 200],
-      [parts[0], 200],
+      [LONG, 429],
+      [LONG, 200],
       [ELLIPSIS, 200],
-      [parts[1], 200],
-      [parts[2], 429],
-      [parts[2], 200],
-      [parts[3], 200],
-      [parts[4], 200],
     ]);
-    const [refused, resent] = writes.filter((w) => w.text === parts[2]);
-    expect(resent!.at - refused!.at).toBeGreaterThanOrEqual(2000);
+    expect(writes[2]!.at - writes[1]!.at).toBeGreaterThanOrEqual(2000);
     expect(closestPair(writes)).toBeGreaterThanOrEqual(1000);
-    expect(google.shown("spaces/DM-MARIO")).toEqual([ELLIPSIS, ...parts]);
+    expect(google.shown("spaces/DM-MARIO")).toEqual([ELLIPSIS, LONG]);
     expect(google.writes.some((w) => w.text === deliveryFailureNotice("it"))).toBe(false);
+  });
+
+  it("an answer larger than one Chat message is two, each within Google's limit, with the placeholder's edit after the first", async () => {
+    const paragraph = "La consegna è prevista per venerdì, perché il fornitore ha già confermato la merce.";
+    const HUGE = Array.from({ length: 420 }, (_, i) => `${i + 1}. ${paragraph}`).join("\n");
+    expect(Buffer.byteLength(HUGE)).toBeGreaterThan(32_000);
+    const turn = await write(MARIO, "spaces/DM-MARIO");
+    await vi.advanceTimersByTimeAsync(5000);
+    turn.say(HUGE);
+    turn.end();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const writes = inSpace("spaces/DM-MARIO");
+    expect(writes.map((w) => [w.method, w.status])).toEqual([
+      ["POST", 200],
+      ["POST", 200],
+      ["PATCH", 200],
+      ["POST", 200],
+    ]);
+    const [first, second] = [writes[1]!.text, writes[3]!.text];
+    for (const part of [first, second]) expect(Buffer.byteLength(part)).toBeLessThanOrEqual(32_000);
+    expect(first.endsWith(" ⏎")).toBe(true);
+    expect(`${first.replace(/ ⏎$/, "")}\n${second}`).toBe(HUGE);
+    expect(closestPair(writes)).toBeGreaterThanOrEqual(1000);
   });
 
   it("two people's conversations do not slow each other: each space keeps its own second", async () => {
@@ -543,21 +626,45 @@ describe("Google Chat: a long answer arrives whole, at Google's pace", () => {
     const luigi = await write(LUIGI, "spaces/DM-LUIGI");
     await vi.advanceTimersByTimeAsync(5000);
     const answeredAt = Date.now();
-    const parts = answer(3);
-    answerWith(mario, parts);
-    answerWith(luigi, parts);
+    for (const turn of [mario, luigi]) {
+      turn.say(NARRATION);
+      turn.tool();
+      turn.say(LONG);
+      turn.end();
+    }
     await vi.advanceTimersByTimeAsync(30_000);
 
     for (const space of ["spaces/DM-MARIO", "spaces/DM-LUIGI"]) {
       const writes = inSpace(space);
       expect(writes.map((w) => [w.at - answeredAt, w.text, w.status]).slice(1)).toEqual([
-        [0, parts[0], 200],
+        [0, NARRATION, 200],
         [1000, ELLIPSIS, 200],
-        [2000, parts[1], 200],
-        [3000, parts[2], 200],
+        [2000, LONG, 200],
       ]);
-      expect(google.shown(space)).toEqual([ELLIPSIS, ...parts]);
+      expect(google.shown(space)).toEqual([ELLIPSIS, NARRATION, LONG]);
     }
+  });
+
+  it("a scheduled message's answer is one message too, and edits no placeholder", async () => {
+    const first = await write(MARIO, "spaces/DM-MARIO");
+    first.say("Ciao!");
+    first.end();
+    await vi.advanceTimersByTimeAsync(10_000);
+    const before = inSpace("spaces/DM-MARIO").length;
+
+    // What /internal/inject runs for a scheduled message: a turn no event opened.
+    const handled = dispatcher.handleMessage("agent-1", MARIO, "[scheduled] riepilogo della settimana");
+    await until(() => turns.length === 2, "the scheduled turn");
+    await stream(turns[1]!, LONG);
+    turns[1]!.end();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(await handled).toEqual({ ok: true });
+    expect(
+      inSpace("spaces/DM-MARIO")
+        .slice(before)
+        .map((w) => [w.method, w.text, w.status]),
+    ).toEqual([["POST", LONG, 200]]);
   });
 });
 
@@ -604,5 +711,58 @@ describe("Discord keeps its own pace", () => {
 
     expect(await handled).toEqual({ ok: true });
     expect(sent.map((s) => [s.at - answeredAt, s.text])).toEqual(parts.map((p, i) => [i * 100, p]));
+  });
+
+  it("a 2,000-character answer after a tool goes out in the pieces it always did", async () => {
+    useFakeClock();
+    const sent: { at: number; text: string }[] = [];
+    const turns: Turn[] = [];
+    const config: BridgeConfig = {
+      agents: [
+        {
+          id: "agent-d",
+          channel: "discord",
+          bot_token: "discord-bot-token",
+          allowed_users: ["123456789012345678"],
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
+          spawn: { command: "docker", args: [] },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+    };
+    const dispatcher = new Dispatcher({
+      config,
+      sessionManager: scriptedSessions(turns),
+      turnMeta: new TurnMetaTracker(),
+      wholeAnswers: () => undefined,
+      resolveSendTarget: () => async (chunk) => {
+        sent.push({ at: Date.now(), text: chunk });
+        return { ok: true };
+      },
+    });
+    const handled = dispatcher.handleMessage("agent-d", "123456789012345678", "ciao, mi prepari il riepilogo?");
+    await until(() => turns.length === 1, "the turn");
+    const turn = turns[0]!;
+    turn.say(NARRATION);
+    const toolAt = Date.now();
+    turn.tool();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await stream(turn, LONG);
+    turn.end();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The pieces the reply buffer cuts the same stream into, which is what
+    // Discord was sent before Google Chat took answers whole.
+    const pieces: string[] = [];
+    const reference = new StreamBuffer({ onFlush: (piece) => pieces.push(piece) });
+    for (let i = 0; i < LONG.length; i += 40) reference.push(LONG.slice(i, i + 40));
+    reference.end();
+
+    expect(await handled).toEqual({ ok: true });
+    expect(pieces.length).toBeGreaterThanOrEqual(8);
+    expect(sent.map((s) => s.text)).toEqual([NARRATION, ...pieces]);
+    // The text before the tool went out on the buffer's idle timer, not when the tool started.
+    expect(sent[0]!.at - toolAt).toBe(500);
   });
 });
