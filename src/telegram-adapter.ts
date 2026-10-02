@@ -20,7 +20,12 @@ import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attach
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
+import {
+  buildOversizeNotice,
+  effectiveMaxMb,
+  ingestInboundAttachments,
+  prependUploadMarker,
+} from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
@@ -97,11 +102,18 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           const userId = String(ctx.from.id);
           const caption = ctx.message?.caption ?? "";
           const refs = extractTelegramFiles(ctx.message);
-          const files: { name: string; url: string }[] = [];
+          const files: { name: string; url: string; sizeBytes?: number }[] = [];
+          const capBytes = effectiveMaxMb("telegram") * 1024 * 1024;
           for (const ref of refs) {
+            // Over the cap by the size Telegram reports: no link is asked for,
+            // and the ingest refuses it from that size without a download.
+            if (ref.sizeBytes !== undefined && ref.sizeBytes > capBytes) {
+              files.push({ name: ref.name, url: "", sizeBytes: ref.sizeBytes });
+              continue;
+            }
             try {
               const link = await ctx.telegram.getFileLink(ref.fileId);
-              files.push({ name: ref.name, url: link.href });
+              files.push({ name: ref.name, url: link.href, sizeBytes: ref.sizeBytes });
             } catch (err) {
               logger.warn({ err, agentId: agent.id, fileId: ref.fileId }, "telegram getFileLink failed — skipped");
             }

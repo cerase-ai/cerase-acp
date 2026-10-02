@@ -6,6 +6,7 @@
 // BRIDGE_E2E_TEST endpoint, without unit-testing discord.js mocks.
 
 import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partials, Routes } from "discord.js";
+import { extractDiscordFiles } from "./channel-attachments.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
@@ -64,10 +65,9 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       const userId = msg.author.id;
       let text = msg.content ?? "";
       // C4-2 — inbound attachments: a file with no caption must NOT be dropped.
-      const inbound = [...msg.attachments.values()].map((a) => ({
-        name: a.name ?? "file",
-        url: a.url,
-      }));
+      // Each carries the size Discord reports, so one over the cap is refused
+      // before it is downloaded.
+      const inbound = extractDiscordFiles(msg.attachments.values());
       if (!text && inbound.length === 0) return;
       // Cache the channel for future replies.
       if (msg.channel.isDMBased() && msg.channel.type !== undefined) {

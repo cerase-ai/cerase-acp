@@ -87,17 +87,26 @@ describe("the language the platform writes in", () => {
 
 describe("the notices that used to be Italian-only", () => {
   it("localises the oversize-upload notice", () => {
-    expect(oversizeUploadNotice(["a.pdf"], 25, "en")).toContain("over the 25 MB limit");
-    expect(oversizeUploadNotice(["a.pdf"], 25, "fr")).toContain("25 Mo");
-    expect(oversizeUploadNotice(["a.pdf"], 25, "unknown")).toBe(oversizeUploadNotice(["a.pdf"], 25, "it"));
+    const one = [{ name: "a.pdf", sizeBytes: 30 * 1024 * 1024 }];
+    expect(oversizeUploadNotice(one, 25, "en")).toContain("the limit is 25 MB");
+    expect(oversizeUploadNotice(one, 25, "fr")).toContain("25 Mo");
+    expect(oversizeUploadNotice(one, 25, "fr")).toContain("30,0 Mo");
+    expect(oversizeUploadNotice(one, 25, "unknown")).toBe(oversizeUploadNotice(one, 25, "it"));
   });
 
   it("says one file or several, and names them all", () => {
-    const many = oversizeUploadNotice(["a.pdf", "b.png"], 8, "en");
+    const many = oversizeUploadNotice(
+      [
+        { name: "a.pdf", sizeBytes: 9 * 1024 * 1024 },
+        { name: "b.png", sizeBytes: 10 * 1024 * 1024 },
+      ],
+      8,
+      "en",
+    );
     expect(many).toContain("«a.pdf»");
     expect(many).toContain("«b.png»");
     expect(many).toContain("are over");
-    expect(oversizeUploadNotice(["a.pdf"], 8, "en")).toContain("is over");
+    expect(oversizeUploadNotice([{ name: "a.pdf", sizeBytes: 9 * 1024 * 1024 }], 8, "en")).toContain("is 9.0 MB");
   });
 
   it("gives the delivery failure one language, not two joined by a slash", () => {
@@ -126,7 +135,7 @@ describe("one register across every platform notice", () => {
         attachmentsUnsupportedNotice("f", l),
         deliveryFailureNotice(l),
         directMessagesOnlyNotice(l),
-        oversizeUploadNotice(["f"], 10, l),
+        oversizeUploadNotice([{ name: "f", sizeBytes: 11 * 1024 * 1024 }], 10, l),
         pickErrorMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickEmptyMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickNoCreditsMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { setConsoleFileLimitMb } from "./file-limit.js";
 import { CERASE_SESSION_MODE } from "./session-mode.js";
 
 // Agent ids end up in container names, log keys, and `docker exec`
@@ -183,6 +184,10 @@ const BridgeConfigSchema = z
     // The organisation's language, for the notices the bridge writes by itself
     // when a person's own messages have not said which language they use.
     locale: z.enum(["it", "en", "es", "fr"]).optional(),
+    // The console's file-size limit, in MB. An inbound attachment over it is
+    // refused before it is downloaded, and an outbound one is read up to it.
+    // Optional: a control-plane that does not write it leaves the fallback.
+    max_file_mb: z.number().int().positive().optional(),
   })
   .superRefine((cfg, ctx) => {
     const seen = new Set<string>();
@@ -241,5 +246,8 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     const issues = result.error.issues.map((i) => `  - ${i.path.join(".") || "<root>"}: ${i.message}`).join("\n");
     throw new Error(`agents.yaml schema validation failed:\n${issues}`);
   }
+  // Set on every load, the boot one and each reload, so the limit the bridge
+  // holds attachments to is always the console's last word.
+  setConsoleFileLimitMb(result.data.max_file_mb);
   return result.data;
 }

@@ -7,6 +7,8 @@
 export interface TelegramFileRef {
   fileId: string;
   name: string;
+  /** `file_size` as Telegram reports it, when it does. */
+  sizeBytes?: number;
 }
 
 /**
@@ -16,11 +18,16 @@ export interface TelegramFileRef {
  * named fields stay precisely typed (M-AUDIT-acp-2).
  */
 export interface TelegramMessageLike {
-  photo?: Array<{ file_id: string }>;
-  document?: { file_id: string; file_name?: string };
-  voice?: { file_id: string };
-  audio?: { file_id: string; file_name?: string };
-  video?: { file_id: string; file_name?: string };
+  photo?: Array<{ file_id: string; file_size?: number }>;
+  document?: { file_id: string; file_name?: string; file_size?: number };
+  voice?: { file_id: string; file_size?: number };
+  audio?: { file_id: string; file_name?: string; file_size?: number };
+  video?: { file_id: string; file_name?: string; file_size?: number };
+}
+
+/** A reported size, kept only when it is one: a whole number of bytes. */
+function reportedSize(value: unknown): { sizeBytes: number } | Record<string, never> {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? { sizeBytes: value } : {};
 }
 
 /**
@@ -35,27 +42,57 @@ export function extractTelegramFiles(message: TelegramMessageLike | undefined): 
 
   if (Array.isArray(message.photo) && message.photo.length > 0) {
     const largest = message.photo[message.photo.length - 1];
-    if (largest?.file_id) out.push({ fileId: largest.file_id, name: "photo.jpg" });
+    if (largest?.file_id) out.push({ fileId: largest.file_id, name: "photo.jpg", ...reportedSize(largest.file_size) });
   }
   if (message.document?.file_id) {
-    out.push({ fileId: message.document.file_id, name: message.document.file_name ?? "document" });
+    out.push({
+      fileId: message.document.file_id,
+      name: message.document.file_name ?? "document",
+      ...reportedSize(message.document.file_size),
+    });
   }
   if (message.voice?.file_id) {
-    out.push({ fileId: message.voice.file_id, name: "voice.ogg" });
+    out.push({ fileId: message.voice.file_id, name: "voice.ogg", ...reportedSize(message.voice.file_size) });
   }
   if (message.audio?.file_id) {
-    out.push({ fileId: message.audio.file_id, name: message.audio.file_name ?? "audio" });
+    out.push({
+      fileId: message.audio.file_id,
+      name: message.audio.file_name ?? "audio",
+      ...reportedSize(message.audio.file_size),
+    });
   }
   if (message.video?.file_id) {
-    out.push({ fileId: message.video.file_id, name: message.video.file_name ?? "video.mp4" });
+    out.push({
+      fileId: message.video.file_id,
+      name: message.video.file_name ?? "video.mp4",
+      ...reportedSize(message.video.file_size),
+    });
   }
   return out;
+}
+
+/** A Discord attachment: its CDN URL and the size Discord reports. */
+export interface DiscordFileRef {
+  name: string;
+  url: string;
+  sizeBytes?: number;
+}
+
+/**
+ * The attachments of a Discord message, with the size Discord reports for
+ * each, so one over the cap is refused before it is downloaded.
+ */
+export function extractDiscordFiles(
+  attachments: Iterable<{ name?: string | null; url: string; size?: number }>,
+): DiscordFileRef[] {
+  return [...attachments].map((a) => ({ name: a.name ?? "file", url: a.url, ...reportedSize(a.size) }));
 }
 
 /** A Slack file: a private URL that needs the bot token to download. */
 export interface SlackFileRef {
   name: string;
   url: string;
+  sizeBytes?: number;
 }
 
 /**
@@ -67,6 +104,7 @@ interface SlackMessageLike {
     name?: string | null;
     url_private_download?: string;
     url_private?: string;
+    size?: number;
   }>;
 }
 
@@ -81,7 +119,7 @@ export function extractSlackFiles(message: SlackMessageLike | undefined): SlackF
   for (const f of message.files) {
     const url = f?.url_private_download ?? f?.url_private;
     if (typeof url === "string" && url !== "") {
-      out.push({ name: typeof f.name === "string" && f.name !== "" ? f.name : "file", url });
+      out.push({ name: typeof f.name === "string" && f.name !== "" ? f.name : "file", url, ...reportedSize(f.size) });
     }
   }
   return out;

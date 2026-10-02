@@ -67,31 +67,50 @@ export function attachmentsUnsupportedNotice(fileName: string, lang: SupportedLa
   );
 }
 
+/** A size in MB with one decimal, in the reader's own number format. */
+function megabytes(sizeBytes: number, lang: SupportedLang): string {
+  const value = (sizeBytes / (1024 * 1024)).toFixed(1);
+  return lang === "en"
+    ? `${value} MB`
+    : lang === "fr"
+      ? `${value.replace(".", ",")} Mo`
+      : `${value.replace(".", ",")} MB`;
+}
+
 /**
- * Uploads the user sent that were dropped for exceeding the size cap.
+ * Uploads the user sent that were refused for exceeding the size cap.
  *
- * The cap reported is the EFFECTIVE per-channel one, so the reader sees the
- * ceiling that actually bound rather than the global setting.
+ * Each file is named with its size, and the cap reported is the EFFECTIVE
+ * per-channel one, so the reader sees how far over the file was and the
+ * ceiling that actually bound rather than the console's limit. It ends with
+ * the three ways to send the same thing within the limit.
  */
-export function oversizeUploadNotice(names: string[], capMb: number, lang: SupportedLang): string {
-  const quoted = names.map((n) => `«${n}»`).join(", ");
-  if (names.length === 1) {
+export function oversizeUploadNotice(
+  files: Array<{ name: string; sizeBytes: number }>,
+  capMb: number,
+  lang: SupportedLang,
+): string {
+  if (files.length === 1) {
+    const [file] = files;
+    const name = `«${file!.name}»`;
+    const size = megabytes(file!.sizeBytes, lang);
     return pick(
       {
-        it: `${quoted} supera il limite di ${capMb} MB, quindi non l'ho ricevuto. Se me lo mandi più leggero lo guardo subito.`,
-        en: `${quoted} is over the ${capMb} MB limit, so it did not reach me. Send a lighter version and I will look at it right away.`,
-        es: `${quoted} supera el límite de ${capMb} MB, así que no me ha llegado. Mándame una versión más ligera y lo miro enseguida.`,
-        fr: `${quoted} dépasse la limite de ${capMb} Mo, donc il ne m'est pas parvenu. Envoie-m'en une version plus légère et je le regarde tout de suite.`,
+        it: `${name} pesa ${size} e il limite è ${capMb} MB, quindi non l'ho ricevuto. Mandamelo più leggero, diviso in parti o esportato in PDF e lo guardo subito.`,
+        en: `${name} is ${size} and the limit is ${capMb} MB, so it did not reach me. Send it smaller, split into parts or exported to PDF and I will look at it right away.`,
+        es: `${name} pesa ${size} y el límite es de ${capMb} MB, así que no me ha llegado. Mándamelo más ligero, dividido en partes o exportado a PDF y lo miro enseguida.`,
+        fr: `${name} fait ${size} et la limite est de ${capMb} Mo, donc il ne m'est pas parvenu. Envoie-le plus léger, découpé en plusieurs parties ou exporté en PDF et je le regarde tout de suite.`,
       },
       lang,
     );
   }
+  const listed = files.map((f) => `«${f.name}» (${megabytes(f.sizeBytes, lang)})`).join(", ");
   return pick(
     {
-      it: `${quoted} superano il limite di ${capMb} MB, quindi non li ho ricevuti. Se me li mandi più leggeri li guardo subito.`,
-      en: `${quoted} are over the ${capMb} MB limit, so they did not reach me. Send lighter versions and I will look at them right away.`,
-      es: `${quoted} superan el límite de ${capMb} MB, así que no me han llegado. Mándame versiones más ligeras y las miro enseguida.`,
-      fr: `${quoted} dépassent la limite de ${capMb} Mo, donc ils ne me sont pas parvenus. Envoie-m'en des versions plus légères et je les regarde tout de suite.`,
+      it: `${listed} superano il limite di ${capMb} MB, quindi non li ho ricevuti. Mandameli più leggeri, divisi in parti o esportati in PDF e li guardo subito.`,
+      en: `${listed} are over the ${capMb} MB limit, so they did not reach me. Send them smaller, split into parts or exported to PDF and I will look at them right away.`,
+      es: `${listed} superan el límite de ${capMb} MB, así que no me han llegado. Mándamelos más ligeros, divididos en partes o exportados a PDF y los miro enseguida.`,
+      fr: `${listed} dépassent la limite de ${capMb} Mo, donc ils ne me sont pas parvenus. Envoie-les plus légers, découpés en plusieurs parties ou exportés en PDF et je les regarde tout de suite.`,
     },
     lang,
   );

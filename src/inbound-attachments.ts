@@ -8,6 +8,7 @@
 // so attachments never reached the agent. The logic lives here (pure +
 // injectable) so it is unit-tested without channel SDKs / real docker / network.
 
+import { fileLimitMb } from "./file-limit.js";
 import { makeLogger } from "./logger.js";
 import { oversizeUploadNotice } from "./platform-notices.js";
 import type { SupportedLang } from "./turn-meta.js";
@@ -15,32 +16,25 @@ import { type FileWriter, writeAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.attachments");
 
-/**
- * Inbound chat-upload cap, in MB. Operator-tunable via
- * CERASE_MAX_ATTACHMENT_MB (default 64). This is the operator's global setting;
- * the EFFECTIVE per-channel cap is `min(this, the channel's platform ceiling)` —
- * see `effectiveMaxMb`. Whichever is lower binds.
- */
-export const MAX_ATTACHMENT_MB = Number(process.env.CERASE_MAX_ATTACHMENT_MB) || 64;
-const DEFAULT_MAX_BYTES = MAX_ATTACHMENT_MB * 1024 * 1024;
+const MB = 1024 * 1024;
 
 /** The chat channels that ingest inbound attachments (the web panel doesn't). */
 export type Channel = "discord" | "telegram" | "slack" | "workspace-chat";
 
 /**
  * Each channel's real platform ceiling for an inbound file, in MB. The
- * EFFECTIVE cap is `min(MAX_ATTACHMENT_MB, this)`. Discord caps DM uploads at
+ * EFFECTIVE cap is `min(the console's limit, this)`. Discord caps DM uploads at
  * ~25 MB; Telegram's Bot API getFile download tops out at 20 MB (the LOWEST of
  * the lot — lower than Discord); Slack allows up to ~1 GB. A channel with NO
- * entry here falls back to the global setting alone — workspace-chat is the
+ * entry here falls back to the console's limit alone — workspace-chat is the
  * internal web chat, which has no platform ceiling, so it is intentionally
- * omitted and the operator's MAX_ATTACHMENT_MB binds.
+ * omitted.
  */
 const CHANNEL_MAX_MB: Partial<Record<Channel, number>> = { discord: 25, telegram: 20, slack: 1024 };
 
-/** The effective inbound cap for a channel, in MB: min(global setting, channel ceiling). */
+/** The effective inbound cap for a channel, in MB: min(the console's limit, channel ceiling). */
 export function effectiveMaxMb(channel: Channel): number {
-  return Math.min(MAX_ATTACHMENT_MB, CHANNEL_MAX_MB[channel] ?? Number.POSITIVE_INFINITY);
+  return Math.min(fileLimitMb(), CHANNEL_MAX_MB[channel] ?? Number.POSITIVE_INFINITY);
 }
 
 export interface InboundFile {
@@ -48,6 +42,11 @@ export interface InboundFile {
   name: string;
   /** A URL the bridge can GET to fetch the bytes. */
   url: string;
+  /**
+   * The size the channel reports, in bytes, when it reports one. A file over
+   * the cap is refused from it without being downloaded.
+   */
+  sizeBytes?: number;
 }
 
 /** Injectable for tests: GET a URL → bytes. Defaults to global fetch. */
@@ -118,14 +117,14 @@ export function sanitizeFilename(name: string): string {
  */
 async function storeInbound(
   containerName: string,
-  items: Array<{ name: string; get: () => Promise<Buffer> }>,
+  items: Array<{ name: string; sizeBytes?: number; get: () => Promise<Buffer> }>,
   channel: Channel,
   opts?: IngestOptions,
 ): Promise<IngestResult> {
-  // The effective cap is the lower of the operator's setting (or an explicit
+  // The effective cap is the lower of the console's limit (or an explicit
   // per-call override) and this channel's platform ceiling.
-  const channelBytes = effectiveMaxMb(channel) * 1024 * 1024;
-  const maxBytes = Math.min(opts?.maxBytes ?? DEFAULT_MAX_BYTES, channelBytes);
+  const channelBytes = effectiveMaxMb(channel) * MB;
+  const maxBytes = Math.min(opts?.maxBytes ?? fileLimitMb() * MB, channelBytes);
   const now = opts?.now ?? (() => Date.now());
   const stamp = now();
 
@@ -134,6 +133,16 @@ async function storeInbound(
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     const relPath = `uploads/${stamp}-${i}/${sanitizeFilename(item.name)}`;
+    // The channel said how large the file is: one over the cap is refused
+    // before a byte of it is downloaded.
+    if (item.sizeBytes !== undefined && item.sizeBytes > maxBytes) {
+      logger.warn(
+        { containerName, name: item.name, size: item.sizeBytes },
+        "inbound attachment over cap — refused before download",
+      );
+      rejected.push({ name: item.name, sizeBytes: item.sizeBytes, reason: "oversize" });
+      continue;
+    }
     try {
       const bytes = await item.get();
       if (bytes.length > maxBytes) {
@@ -164,7 +173,7 @@ export async function ingestInboundAttachments(
   const fetcher = opts?.fetcher ?? realFetcher;
   return storeInbound(
     containerName,
-    files.map((f) => ({ name: f.name, get: () => fetcher(f.url, opts?.headers) })),
+    files.map((f) => ({ name: f.name, sizeBytes: f.sizeBytes, get: () => fetcher(f.url, opts?.headers) })),
     channel,
     opts,
   );
@@ -221,10 +230,10 @@ export function buildOversizeNotice(
     return undefined;
   }
   // Report the EFFECTIVE per-channel cap, so the user sees the real ceiling
-  // that bound (e.g. 25 MB on Discord), not just the global setting.
+  // that bound (e.g. 25 MB on Discord), not just the console's limit.
   const cap = effectiveMaxMb(channel);
   return oversizeUploadNotice(
-    oversize.map((r) => r.name),
+    oversize.map((r) => ({ name: r.name, sizeBytes: r.sizeBytes })),
     cap,
     lang,
   );

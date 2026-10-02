@@ -9,6 +9,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { isSafeWorkspacePath } from "./attachment.js";
+import { fileLimitBytes } from "./file-limit.js";
 
 export interface WorkspaceFile {
   name: string;
@@ -19,8 +20,6 @@ export interface WorkspaceFile {
 export type FileFetcher = (argv: string[], maxBytes: number) => Promise<Buffer>;
 
 const DEFAULT_WORKSPACE_ROOT = process.env.CERASE_AGENT_WORKSPACE_ROOT ?? "/home/agent/cerase/workspace";
-// Discord free-tier upload ceiling; the largest common denominator.
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 
 const realFetcher: FileFetcher = (argv, maxBytes) =>
   new Promise<Buffer>((resolve, reject) => {
@@ -120,7 +119,9 @@ export async function readAgentWorkspaceFile(
     throw new Error(`unsafe workspace path: ${relPath}`);
   }
   const root = opts?.workspaceRoot ?? DEFAULT_WORKSPACE_ROOT;
-  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+  // The console's limit, which the channel's own may undercut when the file is
+  // sent; it was the bridge's own 8 MB until the console's reached it.
+  const maxBytes = opts?.maxBytes ?? fileLimitBytes();
   const fetcher = opts?.fetcher ?? realFetcher;
   // execFile (no shell) → the path is a single argv member, so spaces /
   // metacharacters can't inject. `--` stops cat option parsing.
@@ -201,7 +202,7 @@ export async function writeAgentWorkspaceFile(
     throw new Error(`unsafe workspace path (quote): ${relPath}`);
   }
   const root = opts?.workspaceRoot ?? DEFAULT_WORKSPACE_ROOT;
-  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+  const maxBytes = opts?.maxBytes ?? fileLimitBytes();
   const writer = opts?.writer ?? realWriter;
   if (bytes.length > maxBytes) {
     throw new Error(`workspace file too large (${bytes.length} > ${maxBytes} bytes): ${relPath}`);

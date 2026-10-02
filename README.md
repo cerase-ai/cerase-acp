@@ -286,7 +286,7 @@ made once and nobody can find — not because you normally set them.
 | `CERASE_CONTROL_PLANE_URL` | `http://cerase-control-plane:8000` | Where the bridge reaches the control-plane. The compose hostname; change it only outside the appliance network. |
 | `CERASE_INTERNAL_SECRET` | *(unset)* | The bearer the bridge presents **to** the control-plane. Distinct from `CERASE_ACP_INTERNAL_SECRET`, which is the bearer the bridge **demands**. Two directions, two secrets — confusing them is why the appliance keeps them separately named. |
 | `CERASE_AGENT_WORKSPACE_ROOT` | `/home/agent/cerase/workspace` | Root the workspace-file broker serves from, inside the agent slot. |
-| `CERASE_MAX_ATTACHMENT_MB` | `64` | Ceiling on an inbound attachment. Anything larger is refused with a message the user can read, not truncated. |
+| `CERASE_MAX_ATTACHMENT_MB` | `64` | The file-size limit when `agents.yaml` carries no `max_file_mb`. The control-plane writes the console's limit there, and it wins. An inbound attachment over it is refused before it is downloaded, from the size the channel reports, with a message that names the size, the limit and what to send instead; an outbound one is read up to it. |
 | `WORKSPACE_CHAT_PORT` | `7475` | Port the Workspace Chat webhook listener binds. Google's events arrive on `POST /chat/event`. |
 
 `BRIDGE_E2E_TEST=1` also exists and is **not** an operational knob: it enables a

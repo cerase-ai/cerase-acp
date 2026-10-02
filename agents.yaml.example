@@ -52,3 +52,8 @@ session:
   idle_timeout_minutes: 60
   # Safety ceiling on concurrent (user, agent) sessions per appliance.
   max_concurrent: 16
+
+# The console's file-size limit, in MB, written by the control-plane. An
+# attachment over it is refused before it is downloaded. Optional: without it
+# the bridge uses CERASE_MAX_ATTACHMENT_MB, then 64.
+max_file_mb: 64
