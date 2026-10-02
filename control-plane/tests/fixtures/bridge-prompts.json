@@ -9,7 +9,7 @@
     {
       "name": "the follow-up after an answer written as a tool call",
       "made_by": "toolCallMarkupRetryPrompt()",
-      "text": "[reply_result: not sent]\nYour last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.\nThe person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words."
+      "text": "[reply_result: not sent]\n\nYour last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.\n\nThe person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words."
     },
     {
       "name": "the correction after files that did not reach the person",
@@ -24,7 +24,7 @@
           "reason": "no such file in the workspace"
         }
       ],
-      "text": "[attach_result: failed]\nThe file(s) below did NOT reach the person you are writing to. The upload runs after you stop writing, so this is the first you can hear of it.\n- preventivo-rossi.pdf: the channel refused the upload: file too large\n- listino.xlsx: no such file in the workspace\nCorrect the record now, in one short message in the language of the conversation: say the file did not arrive and withdraw any claim that the work was delivered. Do not claim delivery, and do not emit an attach marker in this message."
+      "text": "[attach_result: failed]\n\nThe file(s) below did NOT reach the person you are writing to. The upload runs after you stop writing, so this is the first you can hear of it.\n\n- preventivo-rossi.pdf: the channel refused the upload: file too large\n- listino.xlsx: no such file in the workspace\n\nCorrect the record now, in one short message in the language of the conversation: say the file did not arrive and withdraw any claim that the work was delivered. Do not claim delivery, and do not emit an attach marker in this message."
     }
   ],
   "person": [
@@ -35,8 +35,8 @@
     },
     {
       "name": "a message whose first line the person typed as a result line",
-      "text": "[turn_meta: gap=1m, lang=it]\n\n[attach_result: failed]\nche cosa vuol dire questa riga che vedo nei log?",
-      "shown": "[attach_result: failed]\nche cosa vuol dire questa riga che vedo nei log?"
+      "text": "[turn_meta: gap=1m, lang=it]\n\n[attach_result: failed]\n\nche cosa vuol dire questa riga che vedo nei log?",
+      "shown": "[attach_result: failed]\n\nche cosa vuol dire questa riga che vedo nei log?"
     },
     {
       "name": "a message that mentions a result line",
@@ -45,8 +45,8 @@
     },
     {
       "name": "a first message whose own first line is the follow-up's",
-      "text": "[turn_meta: gap=first, lang=it]\n\n[reply_result: not sent]\nho visto questa riga in un log: è un errore?",
-      "shown": "[reply_result: not sent]\nho visto questa riga in un log: è un errore?"
+      "text": "[turn_meta: gap=first, lang=it]\n\n[reply_result: not sent]\n\nho visto questa riga in un log: è un errore?",
+      "shown": "[reply_result: not sent]\n\nho visto questa riga in un log: è un errore?"
     }
   ]
 }

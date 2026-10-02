@@ -56,6 +56,10 @@ export class AttachOutcomeTracker {
  * turn ends. Written in English like every other block the bridge prepends,
  * and it names the files rather than the paths for the same reason the user
  * notices do. Its first line marks it as the bridge's: see bridge-prompt.ts.
+ *
+ * Every block is one line, the list one line per file, with a blank line
+ * between blocks: the rule for every prompt Cerase ships, which cerase-core
+ * checks on this prompt's copy in bridge-prompts.json.
  */
 export function attachFailurePrompt(failures: AttachFailure[]): string {
   const lines = failures.map((f) => `- ${f.fileName}: ${f.reason}`).join("\n");
@@ -64,7 +68,7 @@ export function attachFailurePrompt(failures: AttachFailure[]): string {
     "The file(s) below did NOT reach the person you are writing to. The upload runs after you stop writing, so this is the first you can hear of it.",
     lines,
     "Correct the record now, in one short message in the language of the conversation: say the file did not arrive and withdraw any claim that the work was delivered. Do not claim delivery, and do not emit an attach marker in this message.",
-  ].join("\n");
+  ].join("\n\n");
 }
 
 /** The turn's own result: it delivered less than it said it did. */

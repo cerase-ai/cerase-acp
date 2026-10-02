@@ -112,11 +112,14 @@ export const MARKUP_RETRY_MARKER = bridgePromptLine("reply", "not sent");
  * an email sent, a record written — that never happened, and an assistant that
  * believes it did would report work that was not done. It names no tag: a
  * model shown the syntax is a model given it to copy.
+ *
+ * One line per paragraph with a blank line between them, as in the attach
+ * correction (attachFailurePrompt).
  */
 export function toolCallMarkupRetryPrompt(): string {
   return [
     MARKUP_RETRY_MARKER,
     "Your last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.",
     "The person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words.",
-  ].join("\n");
+  ].join("\n\n");
 }
