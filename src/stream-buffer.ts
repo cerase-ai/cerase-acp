@@ -123,6 +123,21 @@ export class StreamBuffer {
     if (held.length > 0) this.onHeld(held);
   }
 
+  /**
+   * End without sending: whatever is buffered or held is dropped, and nothing
+   * pushed later is taken. For a reply that will be written again from the
+   * start, where flushing the rest of the first one would send half of it.
+   */
+  discard(): void {
+    this.ended = true;
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
+    }
+    this.buffer = "";
+    this.holding = false;
+  }
+
   end(): void {
     this.ended = true;
     if (this.idleTimer) {

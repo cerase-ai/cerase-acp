@@ -7,6 +7,7 @@ import { type CanonicalFetcher, defaultEndpointForAgent, defaultFetcher, type Re
 import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { reconcile, type SeenState } from "./reconciler.js";
+import { dockerSlotRestartProbe, type SlotRestartProbe } from "./restart-hold.js";
 import {
   decideSessionMode,
   type ModeAdvertisement,
@@ -117,6 +118,12 @@ export interface SessionManagerOptions {
    * saying the work ran past its limit — never as silence.
    */
   turnCeilingMs?: number;
+  /**
+   * Asked, when a session's connection closes under a turn the bridge did not
+   * close itself, whether the agent's slot restarted. Tests pass one; the
+   * default reads the slot container's state through the docker proxy.
+   */
+  slotRestarted?: SlotRestartProbe;
 }
 
 /**
@@ -152,6 +159,42 @@ const watchdogTick = (silenceMs: number, ceilingMs: number) =>
   Math.max(10, Math.min(WATCHDOG_TICK_MAX_MS, silenceMs, ceilingMs));
 
 /**
+ * A turn that lost its session to a restart: the slot's container stopped or
+ * restarted under it, or the bridge closed that session itself. The session
+ * comes back on the next prompt, so the dispatcher holds the turn and sends it
+ * again rather than telling the person it failed.
+ *
+ * `reachedAgent` says the assistant had started on the prompt — it had sent
+ * at least one update — so opencode had already stored the person's message.
+ */
+export class SessionRestartError extends Error {
+  constructor(
+    readonly reachedAgent: boolean,
+    readonly cause: unknown,
+  ) {
+    super(
+      `the assistant's session restarted under this turn (${cause instanceof Error ? cause.message : String(cause)})`,
+    );
+    this.name = "SessionRestartError";
+  }
+}
+
+/**
+ * A handshake whose child went away before it finished, with the moment the
+ * child was spawned. Internal: `prompt()` turns it into a SessionRestartError
+ * when the slot restarted, and into the handshake's own error when not.
+ */
+class SessionStartLost extends Error {
+  constructor(
+    readonly cause: unknown,
+    readonly spawnedAt: number,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "SessionStartLost";
+  }
+}
+
+/**
  * Optional injection point so tests can swap real `child_process.spawn`
  * for a custom spawner. Production code uses the default.
  */
@@ -172,6 +215,14 @@ interface SessionEntry {
   onUpdate?: SessionUpdateHandler;
   /** Set true once the child has exited (cleanup is in progress). */
   closed: boolean;
+  /** When the child was spawned: a slot that started after it outlived it. */
+  spawnedAt: number;
+  /**
+   * Set when the bridge itself kills the child: idle, eviction, a reload, the
+   * watchdog. A turn that then finds the connection closed lost it to the
+   * bridge, which needs no probe to know.
+   */
+  closedByBridge: boolean;
 }
 
 const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
@@ -231,6 +282,10 @@ export class SessionManager {
   private onTelemetry?: (t: TurnTelemetry) => void;
   private canonicalFetcher: CanonicalFetcher;
   private endpointResolver: (containerName: string) => RestEndpoint | null;
+  private slotRestarted: SlotRestartProbe;
+  // Turns the dispatcher is holding through a restart, per agent. They have no
+  // session to sit in while they wait, and they are still outstanding.
+  private heldTurns = new Map<string, number>();
 
   constructor(
     private config: BridgeConfig,
@@ -243,6 +298,7 @@ export class SessionManager {
     this.onTelemetry = options?.onTelemetry;
     this.canonicalFetcher = options?.canonicalFetcher ?? defaultFetcher;
     this.endpointResolver = options?.endpointResolver ?? defaultEndpointForAgent;
+    this.slotRestarted = options?.slotRestarted ?? dockerSlotRestartProbe();
     // The file's value, then the default, and options override both because
     // only tests pass them. A mail assistant and one carrying a project do not
     // want the same ceiling, which is why the file gets to say.
@@ -316,7 +372,7 @@ export class SessionManager {
    * is most likely to be reported as the assistant simply never answering.
    */
   turnsInFlight(agentId: string): number {
-    let n = 0;
+    let n = this.heldTurns.get(agentId) ?? 0;
     for (const entry of this.entries.values()) {
       if (entry.agentId === agentId) n += entry.queue.size();
     }
@@ -324,6 +380,43 @@ export class SessionManager {
       if (key.startsWith(`${agentId}:`)) n += 1;
     }
     return n;
+  }
+
+  /**
+   * Count a turn as in flight until the returned function is called, for the
+   * moments it sits in no queue: between the tries of a turn held through a
+   * restart, and while the slot is asked whether it restarted. A control-plane
+   * that read the agent as idle then would restart the slot again under it.
+   */
+  holdTurn(agentId: string): () => void {
+    this.heldTurns.set(agentId, (this.heldTurns.get(agentId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const n = (this.heldTurns.get(agentId) ?? 1) - 1;
+      if (n > 0) this.heldTurns.set(agentId, n);
+      else this.heldTurns.delete(agentId);
+    };
+  }
+
+  /**
+   * Whether a session whose connection closed lost it to a restart. The bridge
+   * closing it is enough; otherwise the slot has to have stopped or restarted
+   * since `since`. A probe that throws answers no, which keeps the turn's own
+   * failure.
+   */
+  private async lostToRestart(agent: AgentConfig, since: number, closedByBridge: boolean): Promise<boolean> {
+    if (closedByBridge) return true;
+    try {
+      return await this.slotRestarted(agent, since);
+    } catch (err) {
+      logger.warn(
+        { err, agentId: agent.id },
+        "could not read the slot's state — treating the closed session as a failure",
+      );
+      return false;
+    }
   }
 
   /**
@@ -417,6 +510,7 @@ export class SessionManager {
     for (const [key, entry] of this.entries) {
       if (entry.agentId !== agentId) continue;
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
+      entry.closedByBridge = true;
       if (!entry.closed && !entry.child.killed) {
         try {
           entry.child.kill("SIGTERM");
@@ -466,6 +560,14 @@ export class SessionManager {
 
     const key = sessionKey(agentId, userId);
     let entry = this.entries.get(key);
+    // A session the bridge is killing, or whose connection already closed, is
+    // not one to queue a turn on: the child's exit handler has not run yet. Its
+    // id is kept now, because the spawn below wants to resume it.
+    if (entry && (entry.closed || entry.closedByBridge || entry.connection.signal.aborted)) {
+      this.entries.delete(key);
+      this.rememberResumableSession(key, entry.sessionId);
+      entry = undefined;
+    }
     if (!entry) {
       // Dedup concurrent first prompts. Without memoizing the
       // in-flight spawn, two near-simultaneous DMs both pass the
@@ -489,7 +591,23 @@ export class SessionManager {
           })
           .catch(() => {});
       }
-      entry = await pending;
+      try {
+        entry = await pending;
+      } catch (err) {
+        // The spawn no longer counts the turn and no queue holds it yet, so it
+        // is counted here while the slot is asked.
+        const asking = this.holdTurn(agentId);
+        const restarted = err instanceof SessionStartLost && (await this.lostToRestart(agent, err.spawnedAt, false));
+        asking();
+        if (restarted) {
+          logger.warn(
+            { agentId, userId },
+            "the slot was down or restarting when the session started — the turn can be sent again",
+          );
+          throw new SessionRestartError(false, (err as SessionStartLost).cause);
+        }
+        throw err instanceof SessionStartLost ? err.cause : err;
+      }
       this.evictForCapacity(key);
       this.entries.set(key, entry);
     }
@@ -569,6 +687,7 @@ export class SessionManager {
                   ? "turn watchdog fired — the turn passed its ceiling while still running"
                   : "turn watchdog fired — killing the silent opencode child",
               );
+              entry!.closedByBridge = true;
               try {
                 entry!.child.kill("SIGTERM");
               } catch {
@@ -596,6 +715,22 @@ export class SessionManager {
             }),
             watchdog,
           ]);
+        } catch (err) {
+          // The connection closing is the child going away, not an answer from
+          // the agent: an error the agent returns leaves it open. The watchdog's
+          // own kill keeps its own error.
+          if (
+            !(err instanceof TurnWatchdogError) &&
+            entry!.connection.signal.aborted &&
+            (await this.lostToRestart(agent, entry!.spawnedAt, entry!.closedByBridge))
+          ) {
+            logger.warn(
+              { agentId: agent.id, userId, chunksReceived, closedByBridge: entry!.closedByBridge },
+              "the session closed under this turn because it restarted — the turn can be sent again",
+            );
+            throw new SessionRestartError(chunksReceived > 0, err);
+          }
+          throw err;
         } finally {
           // clearInterval, not clearTimeout: the watchdog above repeats, and a
           // timeout cleared with the wrong call would go on ticking for the
@@ -736,6 +871,7 @@ export class SessionManager {
 
   private async spawnAndInit(agent: AgentConfig, userId: string): Promise<SessionEntry> {
     logger.info({ agentId: agent.id, userId, command: agent.spawn.command }, "spawning ACP child");
+    const spawnedAt = Date.now();
     const child = this.spawnFn(agent.spawn.command, agent.spawn.args);
     if (!child.stdin || !child.stdout) {
       throw new Error(`spawned ACP child for "${agent.id}" has no stdin/stdout — check spawn.command + stdio config`);
@@ -970,6 +1106,10 @@ export class SessionManager {
       } catch {
         // already gone
       }
+      // The child went away before the handshake finished, which is what a
+      // `docker exec` into a stopped or restarting slot does. Whether that is
+      // what happened is the caller's question to the slot.
+      if (connection.signal.aborted) throw new SessionStartLost(err, spawnedAt);
       throw err;
     }
 
@@ -982,6 +1122,8 @@ export class SessionManager {
       queue: new PromptQueue(),
       lastTurnAt: Date.now(),
       closed: false,
+      spawnedAt,
+      closedByBridge: false,
     };
     entryRef = entry;
 
@@ -1051,6 +1193,7 @@ export class SessionManager {
         "max_concurrent reached — evicting least-recently-used ACP session",
       );
       if (victim.idleTimer) clearTimeout(victim.idleTimer);
+      victim.closedByBridge = true;
       if (!victim.closed && !victim.child.killed) {
         try {
           victim.child.kill("SIGTERM");
@@ -1066,6 +1209,7 @@ export class SessionManager {
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     entry.idleTimer = setTimeout(() => {
       logger.info({ agentId: entry.agentId, userId: entry.userId }, "killing idle ACP child");
+      entry.closedByBridge = true;
       try {
         entry.child.kill("SIGTERM");
       } catch {

@@ -69,7 +69,8 @@ export function defaultEndpointForAgent(containerName: string): RestEndpoint | n
   return { containerName };
 }
 
-const dockerExec: SlotExec = (args, timeoutMs) =>
+/** Runs the `docker` CLI through the bridge's docker proxy, as every turn does. */
+export const dockerExec: SlotExec = (args, timeoutMs) =>
   new Promise((resolve) => {
     execFile(
       "docker",

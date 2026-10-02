@@ -117,6 +117,23 @@ export function deliveryFailureNotice(lang: SupportedLang): string {
 }
 
 /**
+ * A message that waited for the assistant to come back from a restart, and
+ * waited past the bound. The person is told it was not taken, and that the
+ * cause passes: sending it again in a few minutes is what works.
+ */
+export function restartOutlastedNotice(lang: SupportedLang): string {
+  return pick(
+    {
+      it: "Mi sto riavviando e non sono riuscita a prendere in carico il tuo messaggio. Rimandamelo tra qualche minuto.",
+      en: "I am restarting and could not take on your message. Send it to me again in a few minutes.",
+      es: "Me estoy reiniciando y no he podido atender tu mensaje. Vuelve a enviármelo dentro de unos minutos.",
+      fr: "Je suis en train de redémarrer et je n'ai pas pu prendre en charge ton message. Renvoie-le-moi dans quelques minutes.",
+    },
+    lang,
+  );
+}
+
+/**
  * A message to the assistant written in a group space rather than a direct
  * message. The answer would be read by everyone in the space, and an assistant
  * answers with its own user's memory and connectors, so it answers nowhere but

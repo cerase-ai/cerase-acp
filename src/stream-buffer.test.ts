@@ -82,6 +82,25 @@ describe("StreamBuffer", () => {
     expect(out).toEqual(["trailing without period"]);
   });
 
+  it("discard() drops what is buffered, cancels the idle flush and takes nothing more", () => {
+    const out: string[] = [];
+    const held: string[] = [];
+    const buf = new StreamBuffer({
+      onFlush: (s) => out.push(s),
+      onHeld: (s) => held.push(s),
+      holdFrom: (piece) => piece.indexOf("HOLD"),
+      sentenceMinChars: 1_000_000,
+      idleMs: 20,
+    });
+    buf.push("not sent yet, and then HOLD this");
+    buf.discard();
+    buf.push("pushed after");
+    buf.end();
+    vi.advanceTimersByTime(100);
+    expect(out).toEqual([]);
+    expect(held).toEqual([]);
+  });
+
   it("end() is a no-op when the buffer is empty", () => {
     const out: string[] = [];
     const buf = new StreamBuffer({

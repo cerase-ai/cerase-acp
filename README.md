@@ -55,6 +55,20 @@ For each configured agent template:
   are cerase-core's `control-plane/tests/fixtures/bridge-prompts.json`,
   copied here by `cerase-core/scripts/sync-tooling.sh` and pinned in
   `scripts/TOOLING.sha256`: change them there and re-sync.
+- Holds a message that meets the assistant while its slot restarts, and
+  sends it again, as the person wrote it, once the session is back. That
+  covers a turn the restart cuts off, whose `docker exec` child dies with
+  the container, and a turn that arrives while the container is down.
+  The ACP connection closing is not enough to hold a turn: the bridge
+  must have closed the session itself, or `docker inspect` must show the
+  slot stopped, restarting, or started after the child was spawned.
+  Any other failure fails the turn as before. A held turn tries every
+  2 s for up to 60 s (`RESTART_HOLD_MS`, sized from measured slot
+  restarts), counts in `turnsInFlight` so the control-plane does not
+  restart the slot again under it, and keeps its place: a later message
+  of the same conversation waits for it. Past the bound the person is
+  told the assistant is restarting and to send the message again. Code:
+  `src/restart-hold.ts`, `Dispatcher.promptThroughRestarts`.
 
 ## Architecture (PoC v0.1)
 

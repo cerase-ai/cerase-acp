@@ -64,8 +64,24 @@
 //                              is on when the prompt arrives. The only way a
 //                              test can see which model a turn ran on, rather
 //                              than which calls were made before it.
+//   FAKE_SLOT_DOWN_FILE     — while this file exists, exit 1 at start without
+//                              writing a byte: what `docker exec` does against
+//                              a slot that is stopped or restarting.
+//   FAKE_RESTART_MID_PROMPT_FILE — when this file exists at session/prompt,
+//                              remove it, send one thought chunk and exit 137:
+//                              what a `docker exec` child does when its slot
+//                              restarts under a turn the assistant has started.
+//                              With FAKE_SLOT_DOWN_FILE set too, the slot stays
+//                              down after it: that file is created first.
+//   FAKE_RESTART_SAYS       — what that dying child had started to answer: sent
+//                              as a message chunk instead of the thought chunk.
 
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
+
+const SLOT_DOWN_FILE = process.env.FAKE_SLOT_DOWN_FILE;
+const RESTART_MID_PROMPT_FILE = process.env.FAKE_RESTART_MID_PROMPT_FILE;
+if (SLOT_DOWN_FILE && existsSync(SLOT_DOWN_FILE)) process.exit(1);
 
 const REPLY = process.env.FAKE_REPLY ?? "hello world";
 const CHUNKS = parseInt(process.env.FAKE_CHUNKS ?? "3", 10);
@@ -279,6 +295,17 @@ rl.on("line", async (line) => {
     // forever).
     if (process.env.FAKE_HANG_PROMPT === "1") return;
     const sessionId = msg.params?.sessionId;
+    if (RESTART_MID_PROMPT_FILE && existsSync(RESTART_MID_PROMPT_FILE)) {
+      rmSync(RESTART_MID_PROMPT_FILE);
+      if (SLOT_DOWN_FILE) writeFileSync(SLOT_DOWN_FILE, "");
+      const says = process.env.FAKE_RESTART_SAYS;
+      const update = says
+        ? { sessionUpdate: "agent_message_chunk", content: { type: "text", text: says } }
+        : { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "…" } };
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
+      await sleep(20);
+      process.exit(137);
+    }
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.
     const reply = ECHO_MODEL

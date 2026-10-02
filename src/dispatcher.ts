@@ -15,9 +15,15 @@ import type { DeliveryResult, WholeAnswers } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { makeLogger } from "./logger.js";
-import { deliveryFailureNotice } from "./platform-notices.js";
+import { deliveryFailureNotice, restartOutlastedNotice } from "./platform-notices.js";
+import { RESTART_HOLD_MS, RESTART_RETRY_MS } from "./restart-hold.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
-import { type SessionManager, type SessionUpdateHandler, TurnWatchdogError } from "./session-manager.js";
+import {
+  type SessionManager,
+  SessionRestartError,
+  type SessionUpdateHandler,
+  TurnWatchdogError,
+} from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import {
   fenceOpenAfter,
@@ -81,6 +87,12 @@ export interface DispatcherDeps {
    * ingresses get.
    */
   wholeAnswers?: (agentId: string) => WholeAnswers | undefined;
+  /**
+   * How long a turn that lost its session to a restart waits for it, and how
+   * often it tries again. Only tests pass it; the bridge runs on the measured
+   * RESTART_HOLD_MS and RESTART_RETRY_MS.
+   */
+  restartHold?: { boundMs: number; retryMs: number };
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -204,15 +216,34 @@ export function isCreditExhaustedError(err: unknown): boolean {
   return /cerase credit gate|BudgetExceeded|credits? exhausted/i.test(text);
 }
 
+/** A turn being held through a restart: see `Dispatcher.promptThroughRestarts`. */
+interface RestartHold {
+  /** Settles when the turns of this conversation held before this one are done. */
+  before: Promise<void>;
+  /** Whether another turn of this conversation was being held when this one started. */
+  afterAnother: boolean;
+  heldAt: number;
+  deadline: number;
+  retryMs: number;
+  end: () => void;
+}
+
 /** One prompt's reply on its way from the ACP stream to the send queue: see `Dispatcher.replyStream`. */
 interface ReplyStream {
   push: (update: Parameters<SessionUpdateHandler>[0]) => boolean;
   end: () => void;
+  /** Drop whatever is held and not yet queued, and take nothing more. */
+  discard: () => void;
   endedInMarkup: () => boolean;
   delivered: () => number;
 }
 
 export class Dispatcher {
+  // Per conversation, the end of the turns being held through a restart. A
+  // turn held after another waits for it, and a message that arrives meanwhile
+  // waits for both, so the assistant answers them in the order they were sent.
+  private holds = new Map<string, Promise<void>>();
+
   constructor(private deps: DispatcherDeps) {}
 
   /**
@@ -292,7 +323,10 @@ export class Dispatcher {
       }
     }
 
-    const { queue, reply } = this.openReply(agentId, userId, send, text);
+    // Behind any turn of this conversation still waiting out a restart.
+    await this.holds.get(`${agentId}:${userId}`);
+
+    let { queue, reply } = this.openReply(agentId, userId, send, text);
 
     // One call, two facts, and neither is worth failing a turn over. The
     // resolver inside is consulted only when this process has no memory of the
@@ -322,6 +356,7 @@ export class Dispatcher {
     let produced = false;
     let failed = false;
     let creditExhausted = false;
+    let restartOutlasted = false;
     let turnError: Error | undefined;
     // The streamed-reply delivery outcome (from the queue).
     let drainResult: DrainResult = { ok: true };
@@ -329,20 +364,36 @@ export class Dispatcher {
     // earlier one left behind.
     this.deps.attachOutcomes?.begin(agentId, userId);
     try {
-      await this.deps.sessionManager.prompt(agentId, userId, promptText, (update) => {
-        if (reply.push(update)) produced = true;
-      });
+      await this.promptThroughRestarts(
+        agentId,
+        userId,
+        promptText,
+        (update) => {
+          if (reply.push(update)) produced = true;
+        },
+        async () => {
+          // The try a restart cut off. What it already sent stays sent; what
+          // it held back is dropped, because the next try answers in full.
+          reply.discard();
+          const cut = await queue.drain();
+          if (!cut.ok) drainResult = cut;
+          produced = false;
+          ({ queue, reply } = this.openReply(agentId, userId, send, text));
+        },
+      );
     } catch (err) {
       failed = true;
       turnError = err instanceof Error ? err : new Error(String(err));
       creditExhausted = isCreditExhaustedError(err);
+      restartOutlasted = err instanceof SessionRestartError;
       logger.error({ err, agentId, userId, creditExhausted }, "agent turn failed");
     } finally {
       // A failed or aborted turn ends here too, so text held back in it is
       // judged the same way and either delivered or withheld, never dropped
       // unread and never carried into the next turn.
       reply.end();
-      drainResult = await queue.drain();
+      const last = await queue.drain();
+      if (drainResult.ok) drainResult = last;
     }
     // An answer that ended as a tool call written out as text was held back,
     // not sent. The assistant gets one more try on the same session; when that
@@ -367,9 +418,11 @@ export class Dispatcher {
       const lang = this.noticeLang(agentId, userId, text);
       const copy = creditExhausted
         ? TURN_NO_CREDITS[lang]
-        : isTurnCeilingError(turnError)
-          ? TURN_TOO_LONG[lang]
-          : TURN_ERROR[lang];
+        : restartOutlasted
+          ? restartOutlastedNotice(lang)
+          : isTurnCeilingError(turnError)
+            ? TURN_TOO_LONG[lang]
+            : TURN_ERROR[lang];
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
       if (!r.ok) deliveryOk = false;
     } else if (answerUnsent) {
@@ -413,6 +466,105 @@ export class Dispatcher {
       return { ok: false, error: this.deliveryError(drainResult.ok ? retryDrain : drainResult) };
     }
     return { ok: true };
+  }
+
+  /**
+   * Send a turn, and when it loses its session to a restart, hold it and send
+   * it again until the session is back or the bound has passed.
+   *
+   * Every try sends the person's message as it came. When the restart cut the
+   * assistant off after it had started, opencode already stored that message,
+   * and the resumed session holds it twice; what the assistant did before the
+   * restart is in the session too, between the two.
+   *
+   * `onCut` runs after each try a restart cut off, before the next one. Any
+   * other failure, on any try, is the turn's failure as it always was. Past
+   * the bound the last SessionRestartError is thrown, which the caller tells
+   * the person about in words of its own.
+   */
+  private async promptThroughRestarts(
+    agentId: string,
+    userId: string,
+    promptText: string,
+    onUpdate: SessionUpdateHandler,
+    onCut: () => Promise<void>,
+  ): Promise<void> {
+    let hold: RestartHold | undefined;
+    try {
+      for (;;) {
+        try {
+          await this.deps.sessionManager.prompt(agentId, userId, promptText, onUpdate);
+          if (hold) {
+            logger.info(
+              { agentId, userId, heldMs: Date.now() - hold.heldAt },
+              "a turn held through a restart was sent",
+            );
+          }
+          return;
+        } catch (err) {
+          if (!(err instanceof SessionRestartError)) throw err;
+          // Between tries the turn is in no queue, so the agent counts it here;
+          // during a try the session manager counts it as any other.
+          const waiting = this.deps.sessionManager.holdTurn(agentId);
+          try {
+            await onCut();
+            if (!hold) {
+              hold = this.beginHold(agentId, userId, err);
+              await hold.before;
+              // The turn held before this one got its session back or gave up;
+              // either way this one tries now rather than a retry later.
+              if (hold.afterAnother) continue;
+            }
+            const wait = Math.min(hold.retryMs, hold.deadline - Date.now());
+            if (wait <= 0) {
+              logger.error(
+                { agentId, userId, heldMs: Date.now() - hold.heldAt },
+                "the assistant's session did not come back within the bound — telling the person",
+              );
+              throw err;
+            }
+            await new Promise((r) => setTimeout(r, wait));
+          } finally {
+            waiting();
+          }
+        }
+      }
+    } finally {
+      hold?.end();
+    }
+  }
+
+  /**
+   * Start holding a turn of this conversation: it goes after any turn of it
+   * already held, and a message arriving before `end()` goes after it.
+   */
+  private beginHold(agentId: string, userId: string, lost: SessionRestartError): RestartHold {
+    const key = `${agentId}:${userId}`;
+    const earlier = this.holds.get(key);
+    const before = earlier ?? Promise.resolve();
+    let release: () => void = () => {};
+    const mine = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = before.then(() => mine);
+    this.holds.set(key, tail);
+    const boundMs = this.deps.restartHold?.boundMs ?? RESTART_HOLD_MS;
+    const heldAt = Date.now();
+    logger.warn(
+      { agentId, userId, reachedAgent: lost.reachedAgent, boundMs },
+      "the assistant's session restarted under this turn — holding it until the session is back",
+    );
+    return {
+      before,
+      afterAnother: earlier !== undefined,
+      heldAt,
+      deadline: heldAt + boundMs,
+      retryMs: this.deps.restartHold?.retryMs ?? RESTART_RETRY_MS,
+      end: () => {
+        release();
+        if (this.holds.get(key) === tail) this.holds.delete(key);
+      },
+    };
   }
 
   /**
@@ -621,6 +773,10 @@ export class Dispatcher {
       end: () => {
         buffer.end();
         sendAnswer();
+      },
+      discard: () => {
+        buffer.discard();
+        answer = [];
       },
       endedInMarkup: () => endedInMarkup,
       delivered: () => delivered,
