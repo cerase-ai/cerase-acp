@@ -228,8 +228,29 @@ export function isCompactionOverflow(err: unknown): boolean {
   return errorName === "ContextOverflowError" && /too large to compact/i.test(err.message);
 }
 
+/**
+ * A turn refused before it reached the assistant because the bridge is
+ * stopping. Nothing was sent, so the message can be kept and answered by the
+ * next bridge without the assistant seeing it twice.
+ */
+export class BridgeStoppingError extends Error {
+  constructor() {
+    super("the bridge is stopping and starts no new turn");
+    this.name = "BridgeStoppingError";
+  }
+}
+
 /** What a prompt carries besides the person's text. */
 export interface PromptOptions {
+  /**
+   * The prompt starts a turn: it carries a message to the assistant for the
+   * first time. Once the bridge is stopping such a prompt is refused with
+   * BridgeStoppingError before it reaches the assistant, also when it was
+   * already waiting for its session to start or queued behind another turn of
+   * the same conversation. A prompt that continues a turn already running
+   * leaves it unset and is sent.
+   */
+  opensTurn?: boolean;
   /**
    * Text for the assistant alone, sent in the same prompt ahead of the
    * person's: a content block whose audience is the assistant, which opencode
@@ -354,6 +375,8 @@ export class SessionManager {
   // Turns the dispatcher is holding through a restart, per agent. They have no
   // session to sit in while they wait, and they are still outstanding.
   private heldTurns = new Map<string, number>();
+  // Set when the bridge starts to stop: see PromptOptions.opensTurn.
+  private stopping = false;
 
   constructor(
     private config: BridgeConfig,
@@ -421,6 +444,14 @@ export class SessionManager {
 
   activeSessionCount(): number {
     return this.entries.size;
+  }
+
+  /**
+   * Refuse every prompt that would start a turn from now on, while the turns
+   * already running go on. Called once, when the bridge starts to stop.
+   */
+  stopStartingTurns(): void {
+    this.stopping = true;
   }
 
   /**
@@ -635,6 +666,7 @@ export class SessionManager {
   ): Promise<PromptResult> {
     const agent = this.agentsById.get(agentId);
     if (!agent) throw new Error(`unknown agent id "${agentId}"`);
+    if (options?.opensTurn && this.stopping) throw new BridgeStoppingError();
 
     const key = sessionKey(agentId, userId);
     let entry = this.entries.get(key);
@@ -691,6 +723,10 @@ export class SessionManager {
     }
 
     return entry.queue.enqueue(async () => {
+      // Waiting, when the bridge started to stop, for its session to start or
+      // for the turn ahead of it: this one has not reached the assistant, and
+      // does not now.
+      if (options?.opensTurn && this.stopping) throw new BridgeStoppingError();
       // Queued behind a turn whose session outgrew its summary: that session
       // is gone, and the turn goes to the one that replaces it, as a turn held
       // through a restart does.

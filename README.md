@@ -78,6 +78,27 @@ For each configured agent template:
   of the same conversation waits for it. Past the bound the person is
   told the assistant is restarting and to send the message again. Code:
   `src/restart-hold.ts`, `Dispatcher.promptThroughRestarts`.
+- Lets the turns in flight finish when it is stopped. On SIGTERM the
+  bridge sends no new message to the assistant and waits up to three
+  minutes (`STOP_DRAIN_MS`; `CERASE_ACP_STOP_DRAIN_MS` overrides it, for
+  tests) for the turns the assistant is working on, with the adapters and
+  the internal server still up, so their answers go out. A message that
+  arrives meanwhile, or that arrived earlier and has not reached the
+  assistant (its session still starting, queued behind another turn, held
+  through a slot restart), is acknowledged as usual and kept in
+  `pending-messages.json` under `CERASE_ACP_STATE_DIR`, in the order it
+  was received; with no state directory the person is told to send it
+  again. A turn still running at the limit is ended, and its person told
+  in their language that an update interrupted the answer and to write
+  the request again. It is not sent again, because the assistant may
+  already have acted on it. The next bridge answers each kept message
+  once, as soon as the agent's adapter is up, in the session the person
+  was in: a message is taken out of the file before it is dispatched, and
+  one person's messages go in order. The stop logs how many turns it
+  waited for, for how long, how many it interrupted and how many messages
+  it kept. The container needs longer than `STOP_DRAIN_MS` plus
+  `STOP_NOTICE_MS` (20 s) to stop. Code: `Dispatcher.stop`,
+  `src/pending-messages.ts`.
 - Starts a new session when the runtime refuses a turn because the
   session has grown past what it can summarise. opencode checks its
   compaction trigger after every model step; when the summary call fails

@@ -153,6 +153,24 @@ export function restartOutlastedNotice(lang: SupportedLang): string {
 }
 
 /**
+ * An answer the assistant was still working on when an update stopped the
+ * bridge, after the bridge had waited as long as it waits for one. The request
+ * is not sent again on the person's behalf, because the assistant may already
+ * have acted on part of it; writing it again reaches the same conversation.
+ */
+export function updateInterruptedNotice(lang: SupportedLang): string {
+  return pick(
+    {
+      it: "Un aggiornamento ha interrotto la risposta che ti stavo preparando. Scrivimi di nuovo la richiesta, per favore.",
+      en: "An update interrupted the answer I was preparing for you. Please write your request to me again.",
+      es: "Una actualización ha interrumpido la respuesta que te estaba preparando. Escríbeme de nuevo tu petición, por favor.",
+      fr: "Une mise à jour a interrompu la réponse que je te préparais. Écris-moi de nouveau ta demande, s'il te plaît.",
+    },
+    lang,
+  );
+}
+
+/**
  * The conversation grew past what the assistant can summarise, and a new one
  * was started in its place. `fromSummary` says whether the new one starts from
  * a summary of the old one or from nothing, because the person should know how

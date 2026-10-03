@@ -32,10 +32,11 @@ import { type ConfigDiff, diffConfigs } from "./config-diff.js";
 import { ConfigReloader } from "./config-reloader.js";
 import { type CredentialRejection, classifyCredentialRejection } from "./credential-rejection.js";
 import { checkTenantCredit } from "./credit-check.js";
-import { Dispatcher } from "./dispatcher.js";
+import { Dispatcher, STOP_DRAIN_MS, STOP_NOTICE_MS } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
 import { type AgentFailure, type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
 import { makeLogger } from "./logger.js";
+import { PendingMessages, replayPending } from "./pending-messages.js";
 import {
   attachmentFailedNotice,
   attachmentsUnsupportedNotice,
@@ -263,6 +264,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // it in memory.
   const stateDir = process.env.CERASE_ACP_STATE_DIR;
   const sessionManager = new SessionManager(config, undefined, { stateDir });
+  // Messages that arrive while the bridge stops, kept for the next one.
+  const pendingMessages = new PendingMessages(stateDir);
   const turnMeta = new TurnMetaTracker();
   // Shared by the send path (which records) and the production dispatcher
   // (which reads at the end of the turn). Only the production dispatcher has
@@ -353,6 +356,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // Asked of the adapter at every turn rather than once, because a reload
     // replaces an agent's adapter in the map this reads.
     wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,
+    pendingMessages,
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {
@@ -496,6 +500,23 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
   }
 
+  // The messages the previous bridge kept while it stopped are answered by
+  // this one, an agent's as soon as its adapter is up, because the answer goes
+  // out through it: at boot, on a reload, and when a retry brings it back. A
+  // message for an agent that never comes up stays in the file.
+  const answerKept = (agentId: string): void => {
+    void replayPending(
+      pendingMessages,
+      agentId,
+      // Received when the person sent it, so that kept once more by a stop
+      // that comes before it reaches the assistant, it keeps its place.
+      (m) => productionDispatcher.handleMessage(m.agentId, m.userId, m.text, Date.parse(m.receivedAt)),
+      () => productionDispatcher.isStopping(),
+    ).catch((err) => {
+      logger.error({ err, agentId }, "answering the kept messages failed");
+    });
+  };
+
   // agentIds whose most recent start() rejected.
   // Tracked so getAgentStatus reports them ready:false (not null) even for
   // adapters that expose no ready() signal of their own, and so the
@@ -524,6 +545,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         onRecovered: (agentId) => {
           startFailures.delete(agentId);
           credentialRejections.delete(agentId);
+          answerKept(agentId);
         },
         onStillFailing: (agentId) => startFailures.add(agentId),
         onTerminal: (agentId, rejection) => {
@@ -544,6 +566,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       startFailures.delete(agentId);
       credentialRejections.delete(agentId);
       supervisor?.noteStarted(agentId);
+      answerKept(agentId);
       return undefined;
     }
     startFailures.add(agentId);
@@ -814,20 +837,41 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     logger.info({ configPath: opts.configPath }, "auto-reload: ConfigReloader started");
   }
 
+  // How long the stop waits for the turns in flight. The variable is for
+  // tests, which cannot wait three minutes.
+  const drainEnv = process.env.CERASE_ACP_STOP_DRAIN_MS?.trim();
+  const stopDrainMs =
+    drainEnv && Number.isFinite(Number(drainEnv)) && Number(drainEnv) >= 0 ? Number(drainEnv) : STOP_DRAIN_MS;
+
+  // Order: stop reloader + self-heal supervisor → let the turns in flight
+  // end → stop discord clients → close test server → kill ACP children.
+  // Reverse of startup so dependents go first; stopping the supervisor first
+  // prevents a retry racing the teardown. The adapters and the internal server
+  // stay up while the turns end, because the answers go out through them and
+  // a message arriving meanwhile has to be received to be kept.
+  const stop = async (): Promise<void> => {
+    if (reloader) reloader.stop();
+    supervisor?.stop();
+    await productionDispatcher.stop({
+      limitMs: stopDrainMs,
+      noticeMs: STOP_NOTICE_MS,
+      endSessions: () => sessionManager.shutdown(),
+    });
+    await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
+    if (testServer) await testServer.close();
+    if (internalServer) await internalServer.close();
+    await sessionManager.shutdown();
+  };
+  // A second signal while the first stop is still waiting gets the same stop,
+  // not a second one tearing down under it.
+  let stopping: Promise<void> | undefined;
+
   return {
     testInjectionUrl: testServer?.url(),
     internalUrl: internalServer ? `http://127.0.0.1:${internalServer.port()}` : undefined,
-    async shutdown() {
-      // Order: stop reloader + self-heal supervisor → stop discord clients →
-      // close test server → kill ACP children. Reverse of startup so
-      // dependents go first; stopping the supervisor first prevents a retry
-      // racing the teardown.
-      if (reloader) reloader.stop();
-      supervisor?.stop();
-      await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
-      if (testServer) await testServer.close();
-      if (internalServer) await internalServer.close();
-      await sessionManager.shutdown();
+    shutdown() {
+      stopping ??= stop();
+      return stopping;
     },
   };
 }

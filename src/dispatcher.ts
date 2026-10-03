@@ -15,10 +15,17 @@ import type { DeliveryResult, WholeAnswers } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { makeLogger } from "./logger.js";
-import { deliveryFailureNotice, restartOutlastedNotice, startedOverNotice } from "./platform-notices.js";
+import type { PendingMessages } from "./pending-messages.js";
+import {
+  deliveryFailureNotice,
+  restartOutlastedNotice,
+  startedOverNotice,
+  updateInterruptedNotice,
+} from "./platform-notices.js";
 import { RESTART_HOLD_MS, RESTART_RETRY_MS } from "./restart-hold.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
 import {
+  BridgeStoppingError,
   type PromptOptions,
   type SessionManager,
   SessionOutgrownError,
@@ -103,6 +110,45 @@ export interface DispatcherDeps {
    * RESTART_HOLD_MS and RESTART_RETRY_MS.
    */
   restartHold?: { boundMs: number; retryMs: number };
+  /**
+   * Where a message that arrives while the bridge is stopping is kept for the
+   * next bridge to answer. Optional for the same reason as the others: the CLI
+   * and test ingresses never hand a message on. Absent, or failing to keep
+   * one, the person is told to send it again.
+   */
+  pendingMessages?: PendingMessages;
+}
+
+/**
+ * How long a stopping bridge waits for the turns in flight to end. A turn
+ * that ends within it is answered in full; one still running at the end is
+ * interrupted and the person told so. The release that recreates the bridge
+ * waits this long at most, and the container must be given longer than this
+ * and STOP_NOTICE_MS together to stop, or it is killed before the notices go
+ * out. The bridge reads CERASE_ACP_STOP_DRAIN_MS in its place, for tests.
+ */
+export const STOP_DRAIN_MS = 180_000;
+
+/**
+ * How long a stopping bridge waits, once it has ended the sessions of the
+ * turns still running, for those turns to tell their person. Each first asks
+ * whether the slot restarted, two looks at the container a second apart with
+ * up to five seconds each, and then sends one message.
+ */
+export const STOP_NOTICE_MS = 20_000;
+
+/** What a stopping bridge did with the turns in flight, for its log. */
+export interface StopReport {
+  /** Turns running when the bridge started to stop. */
+  turnsAtStop: number;
+  /** How long it waited for them, in ms. */
+  waitedMs: number;
+  /** Turns still running at the limit, ended with the notice. */
+  turnsInterrupted: number;
+  /** Turns still running once the notices had their time. */
+  turnsUnfinished: number;
+  /** Messages kept for the next bridge to answer. */
+  messagesKept: number;
 }
 
 const REFUSAL: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
@@ -258,6 +304,14 @@ export class Dispatcher {
   // them: an adapter, a scheduled message, a platform note.
   private running = new Map<string, Set<Promise<DeliveryResult>>>();
 
+  // Set when the bridge starts to stop. From then on a message is kept for the
+  // next bridge rather than sent to the assistant.
+  private stopping = false;
+  // Set when the stop has waited as long as it waits. A turn that fails from
+  // then on was cut off by the stop, and its person is told that.
+  private interrupting = false;
+  private kept = 0;
+
   constructor(private deps: DispatcherDeps) {}
 
   /**
@@ -270,6 +324,118 @@ export class Dispatcher {
     const turns = this.running.get(`${agentId}:${userId}`);
     if (!turns || turns.size === 0) return null;
     return Promise.allSettled([...turns]).then(() => undefined);
+  }
+
+  /** Whether the bridge has started to stop: see `stop`. */
+  isStopping(): boolean {
+    return this.stopping;
+  }
+
+  /**
+   * Stop taking turns, for a bridge that is going away.
+   *
+   * From the call on, a message is kept for the next bridge instead of being
+   * sent to the assistant. So is every message received earlier whose prompt
+   * has not been sent yet: one whose session is still starting, one queued
+   * behind a turn of its conversation, one held through a slot restart. The
+   * turns the assistant is already working on go on, for up to `limitMs`. The
+   * ones still running then are cut off: their sessions are ended through
+   * `endSessions`, and each tells its person that an update interrupted the
+   * answer. Such a turn is not kept, because the assistant may already have
+   * acted on it; only a message the assistant never saw is answered again.
+   */
+  async stop(opts: { limitMs: number; noticeMs: number; endSessions: () => Promise<void> }): Promise<StopReport> {
+    this.stopping = true;
+    this.deps.sessionManager.stopStartingTurns();
+    const startedAt = Date.now();
+    const turnsAtStop = this.turnsInFlight().length;
+    logger.info(
+      { turnsInFlight: turnsAtStop, limitMs: opts.limitMs },
+      "the bridge is stopping — waiting for the turns in flight to end; a message arriving meanwhile is kept for the next bridge",
+    );
+    let still = await this.turnsEnd(opts.limitMs);
+    const waitedMs = Date.now() - startedAt;
+    const turnsInterrupted = still;
+    if (still > 0) {
+      this.interrupting = true;
+      logger.warn(
+        { turnsInterrupted: still, waitedMs },
+        "turns still running at the limit — ending their sessions and telling each person an update interrupted the answer",
+      );
+      await opts.endSessions();
+      still = await this.turnsEnd(opts.noticeMs);
+    }
+    const report: StopReport = {
+      turnsAtStop,
+      waitedMs,
+      turnsInterrupted,
+      turnsUnfinished: still,
+      messagesKept: this.kept,
+    };
+    logger.info(report, "the bridge has stopped taking turns");
+    return report;
+  }
+
+  private turnsInFlight(): Promise<DeliveryResult>[] {
+    return [...this.running.values()].flatMap((turns) => [...turns]);
+  }
+
+  /**
+   * Settles when no turn is running, or after `ms`, with how many still are.
+   * A turn that starts meanwhile is waited for too; while stopping, every one
+   * that does is a message being kept, which takes no time.
+   */
+  private async turnsEnd(ms: number): Promise<number> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const turns = this.turnsInFlight();
+      const left = deadline - Date.now();
+      if (turns.length === 0 || left <= 0) return turns.length;
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        Promise.allSettled(turns),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, left);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Keep a message the assistant has not seen for the next bridge, and report
+   * it delivered: the adapter acknowledged it on arrival as it does every
+   * message, and the answer comes from the next bridge. A message that cannot
+   * be kept is answered with the notice a message gets when the assistant is
+   * restarting, which asks the person to send it again.
+   */
+  private async keepForNextBridge(
+    agentId: string,
+    userId: string,
+    text: string,
+    receivedAt: number,
+  ): Promise<DeliveryResult> {
+    const kept = this.deps.pendingMessages?.keep({ agentId, userId, text, receivedAt });
+    if (kept) {
+      this.kept += 1;
+      logger.info(
+        { agentId, userId, textLen: text.length },
+        "the bridge is stopping — message kept for the next bridge to answer",
+      );
+      return { ok: true };
+    }
+    logger.error(
+      { agentId, userId, textLen: text.length },
+      "the bridge is stopping and the message could not be kept — telling the person to send it again",
+    );
+    const r = await this.safeSend(
+      this.deps.resolveSendTarget(agentId, userId),
+      restartOutlastedNotice(this.noticeLang(agentId, userId, text)),
+      agentId,
+      userId,
+      "message-not-kept notice",
+    );
+    return r.ok ? { ok: false, error: new Error("the bridge was stopping and the message could not be kept") } : r;
   }
 
   private trackTurn(agentId: string, userId: string, turn: Promise<DeliveryResult>): void {
@@ -324,13 +490,13 @@ export class Dispatcher {
    * pre-existing behaviour (localized error/empty copy, credit-exhausted copy,
    * allowlist refusal, the delivery-failure marker) is preserved.
    */
-  handleMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
-    const turn = this.runTurn(agentId, userId, text);
+  handleMessage(agentId: string, userId: string, text: string, receivedAt = Date.now()): Promise<DeliveryResult> {
+    const turn = this.runTurn(agentId, userId, text, receivedAt);
     this.trackTurn(agentId, userId, turn);
     return turn;
   }
 
-  private async runTurn(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
+  private async runTurn(agentId: string, userId: string, text: string, receivedAt: number): Promise<DeliveryResult> {
     // Allowlist gate. isAllowed throws on unknown agent id — let that
     // propagate so the adapter logs it as a wiring bug.
     if (!isAllowed(this.deps.config, agentId, userId)) {
@@ -339,6 +505,10 @@ export class Dispatcher {
       // The refusal is the whole response — its delivery outcome IS the result.
       return this.safeSend(send, REFUSAL[this.noticeLang(agentId, userId, text)], agentId, userId, "refusal message");
     }
+
+    // Before anything is asked of the control-plane, and before the send
+    // target is made: the next bridge does both for this message.
+    if (this.stopping) return this.keepForNextBridge(agentId, userId, text, receivedAt);
 
     const send = this.deps.resolveSendTarget(agentId, userId);
 
@@ -405,6 +575,8 @@ export class Dispatcher {
     let failed = false;
     let creditExhausted = false;
     let restartOutlasted = false;
+    // The turn never reached the assistant because the bridge started to stop.
+    let keep = false;
     let turnError: Error | undefined;
     // The streamed-reply delivery outcome (from the queue).
     let drainResult: DrainResult = { ok: true };
@@ -428,7 +600,7 @@ export class Dispatcher {
     };
     try {
       try {
-        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut);
+        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, { opensTurn: true });
       } catch (err) {
         if (!(err instanceof SessionOutgrownError)) throw err;
         // The session grew past what the runtime can summarise, and the
@@ -450,11 +622,15 @@ export class Dispatcher {
         await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, { context: note });
       }
     } catch (err) {
-      failed = true;
-      turnError = err instanceof Error ? err : new Error(String(err));
-      creditExhausted = isCreditExhaustedError(err);
-      restartOutlasted = err instanceof SessionRestartError;
-      logger.error({ err, agentId, userId, creditExhausted }, "agent turn failed");
+      if (err instanceof BridgeStoppingError) {
+        keep = true;
+      } else {
+        failed = true;
+        turnError = err instanceof Error ? err : new Error(String(err));
+        creditExhausted = isCreditExhaustedError(err);
+        restartOutlasted = err instanceof SessionRestartError;
+        logger.error({ err, agentId, userId, creditExhausted }, "agent turn failed");
+      }
     } finally {
       // A failed or aborted turn ends here too, so text held back in it is
       // judged the same way and either delivered or withheld, never dropped
@@ -462,6 +638,10 @@ export class Dispatcher {
       reply.end();
       const last = await queue.drain();
       if (drainResult.ok) drainResult = last;
+    }
+    if (keep) {
+      this.deps.attachOutcomes?.take(agentId, userId);
+      return this.keepForNextBridge(agentId, userId, text, receivedAt);
     }
     // An answer that ended as a tool call written out as text was held back,
     // not sent. The assistant gets one more try on the same session; when that
@@ -484,19 +664,24 @@ export class Dispatcher {
     let deliveryOk = drainResult.ok && retryDrain.ok && startedOver.ok;
     if (failed) {
       const lang = this.noticeLang(agentId, userId, text);
-      const copy = creditExhausted
-        ? TURN_NO_CREDITS[lang]
-        : restartOutlasted
-          ? restartOutlastedNotice(lang)
-          : isTurnCeilingError(turnError)
-            ? TURN_TOO_LONG[lang]
-            : TURN_ERROR[lang];
+      const copy = this.interrupting
+        ? updateInterruptedNotice(lang)
+        : creditExhausted
+          ? TURN_NO_CREDITS[lang]
+          : restartOutlasted
+            ? restartOutlastedNotice(lang)
+            : isTurnCeilingError(turnError)
+              ? TURN_TOO_LONG[lang]
+              : TURN_ERROR[lang];
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
       if (!r.ok) deliveryOk = false;
     } else if (answerUnsent) {
+      // The one more try a stop cut off did not fail for the reason it was
+      // asked for, and the person is told what did happen.
+      const lang = this.noticeLang(agentId, userId, text);
       const r = await this.safeSend(
         send,
-        TURN_UNSENT[this.noticeLang(agentId, userId, text)],
+        this.interrupting ? updateInterruptedNotice(lang) : TURN_UNSENT[lang],
         agentId,
         userId,
         "unsent-answer message",
@@ -606,7 +791,10 @@ export class Dispatcher {
           }
           return;
         } catch (err) {
-          if (!(err instanceof SessionRestartError)) throw err;
+          // A session the stopping bridge ended is not coming back in this
+          // process, and the turn is not one to keep: it had reached the
+          // assistant. It fails here and its person is told why.
+          if (!(err instanceof SessionRestartError) || this.interrupting) throw err;
           // Between tries the turn is in no queue, so the agent counts it here;
           // during a try the session manager counts it as any other.
           const waiting = this.deps.sessionManager.holdTurn(agentId);

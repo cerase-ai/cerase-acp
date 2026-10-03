@@ -92,8 +92,18 @@
 //                              down after it: that file is created first.
 //   FAKE_RESTART_SAYS       — what that dying child had started to answer: sent
 //                              as a message chunk instead of the thought chunk.
+//   FAKE_ECHO_SESSION       — set to "1" to open the reply with a line
+//                              `session=<id>` naming the session the prompt
+//                              was sent to. A bridge restart is the one place
+//                              the session cannot be read off the manager,
+//                              because the manager is a different object after
+//                              it.
+//   FAKE_PROMPT_LOG         — a file each session/prompt appends one line to:
+//                              the JSON of the prompt's last text block, the
+//                              person's message. What the assistant was sent,
+//                              counted across every child and every bridge.
 
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const SLOT_DOWN_FILE = process.env.FAKE_SLOT_DOWN_FILE;
@@ -328,8 +338,12 @@ rl.on("line", async (line) => {
     // M-ACP-2: simulate a hung opencode child — never answer the prompt
     // RPC (the watchdog must kill us; without it the user's queue blocks
     // forever).
-    if (process.env.FAKE_HANG_PROMPT === "1") return;
     const sessionId = msg.params?.sessionId;
+    if (process.env.FAKE_PROMPT_LOG) {
+      const blocks = msg.params?.prompt ?? [];
+      appendFileSync(process.env.FAKE_PROMPT_LOG, `${JSON.stringify(blocks[blocks.length - 1]?.text ?? "")}\n`);
+    }
+    if (process.env.FAKE_HANG_PROMPT === "1") return;
     if (RESTART_MID_PROMPT_FILE && existsSync(RESTART_MID_PROMPT_FILE)) {
       rmSync(RESTART_MID_PROMPT_FILE);
       if (SLOT_DOWN_FILE) writeFileSync(SLOT_DOWN_FILE, "");
@@ -358,7 +372,7 @@ rl.on("line", async (line) => {
     }
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.
-    const reply = ECHO_MODEL
+    const answer = ECHO_MODEL
       ? (currentModel ?? "<no-model>")
       : ECHO_MODE
         ? (currentMode ?? "<no-mode>")
@@ -369,6 +383,7 @@ rl.on("line", async (line) => {
           : ECHO_PROMPT
             ? (msg.params?.prompt?.[0]?.text ?? "")
             : REPLY;
+    const reply = process.env.FAKE_ECHO_SESSION === "1" ? `session=${sessionId}\n${answer}` : answer;
     const pieces = [];
     const chunkLen = Math.max(1, Math.ceil(reply.length / CHUNKS));
     for (let i = 0; i < reply.length; i += chunkLen) {
