@@ -1,12 +1,13 @@
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   type FileFetcher,
   type FileWriter,
   readAgentWorkspaceFile,
+  WORKSPACE_WRITE_SCRIPT,
   writeAgentWorkspaceFile,
 } from "./workspace-files.js";
 
@@ -116,17 +117,25 @@ describe("readAgentWorkspaceFile — case resolution against a real workspace", 
 });
 
 describe("writeAgentWorkspaceFile", () => {
-  it("runs docker exec -i sh -c 'mkdir -p … && cat > …' and pipes the bytes", async () => {
+  it("runs the write script in the container with the root and path as arguments, and pipes the bytes", async () => {
     const writer = vi.fn<FileWriter>(async () => {});
     await writeAgentWorkspaceFile("cerase-agent-3", "uploads/7-0/voice.ogg", Buffer.from("OGG"), {
       writer,
       workspaceRoot: "/home/agent/cerase/workspace",
     });
     const [argv, bytes] = writer.mock.calls[0]!;
-    expect(argv.slice(0, 5)).toEqual(["docker", "exec", "-i", "cerase-agent-3", "sh"]);
-    expect(argv[6]).toBe(
-      "mkdir -p '/home/agent/cerase/workspace/uploads/7-0' && cat > '/home/agent/cerase/workspace/uploads/7-0/voice.ogg'",
-    );
+    expect(argv).toEqual([
+      "docker",
+      "exec",
+      "-i",
+      "cerase-agent-3",
+      "sh",
+      "-c",
+      WORKSPACE_WRITE_SCRIPT,
+      "cerase-write",
+      "/home/agent/cerase/workspace",
+      "uploads/7-0/voice.ogg",
+    ]);
     expect(bytes.toString()).toBe("OGG");
   });
 
@@ -142,5 +151,112 @@ describe("writeAgentWorkspaceFile", () => {
       writeAgentWorkspaceFile("c", "uploads/1-0/big.bin", Buffer.alloc(10), { writer, maxBytes: 4 }),
     ).rejects.toThrow(/too large/);
     expect(writer).not.toHaveBeenCalled();
+  });
+});
+
+// The writer these cases use drops the `docker exec -i <container>` head of the
+// argv and runs the rest as a real process with the bytes on stdin, so the
+// script is measured against what a real filesystem does with a symbolic link.
+// A writer that only records the argv cannot see where the bytes would land.
+const localWriter: FileWriter = (argv, bytes) =>
+  new Promise<void>((resolve, reject) => {
+    const [bin, ...args] = argv.slice(4);
+    const child = spawn(bin!, args, { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    // A refused write exits without reading stdin; its exit code reports it.
+    child.stdin.on("error", () => {});
+    child.on("error", reject);
+    child.on("close", (code: number | null) => {
+      if (code === 0) resolve();
+      else reject(new Error(`exit ${code}: ${stderr.trim()}`));
+    });
+    child.stdin.end(bytes);
+  });
+
+describe("writeAgentWorkspaceFile — symbolic links in a real workspace", () => {
+  const dirs = async (): Promise<{ root: string; outside: string }> => ({
+    root: await mkdtemp(join(tmpdir(), "cerase-ws-")),
+    outside: await mkdtemp(join(tmpdir(), "cerase-outside-")),
+  });
+
+  it("refuses a link at uploads, writes nothing where it points, and names it", async () => {
+    const { root, outside } = await dirs();
+    await symlink(outside, join(root, "uploads"));
+
+    await expect(
+      writeAgentWorkspaceFile("cerase-agent-1", "uploads/7-0/voice.ogg", Buffer.from("OGG"), {
+        writer: localWriter,
+        workspaceRoot: root,
+      }),
+    ).rejects.toThrow(/symbolic link: uploads$/);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("refuses a target that is itself a link, and leaves the file it points to unchanged", async () => {
+    const { root, outside } = await dirs();
+    await mkdir(join(root, "uploads", "7-0"), { recursive: true });
+    await writeFile(join(outside, "keep.txt"), "original");
+    await symlink(join(outside, "keep.txt"), join(root, "uploads", "7-0", "voice.ogg"));
+
+    await expect(
+      writeAgentWorkspaceFile("cerase-agent-1", "uploads/7-0/voice.ogg", Buffer.from("OGG"), {
+        writer: localWriter,
+        workspaceRoot: root,
+      }),
+    ).rejects.toThrow(/symbolic link: voice\.ogg$/);
+    expect(await readFile(join(outside, "keep.txt"), "utf8")).toBe("original");
+  });
+
+  it("creates the missing folders and the file, readable by all, with no temporary file left beside it", async () => {
+    const { root } = await dirs();
+
+    await writeAgentWorkspaceFile("cerase-agent-1", "uploads/7-0/voice.ogg", Buffer.from("OGG bytes"), {
+      writer: localWriter,
+      workspaceRoot: root,
+    });
+    const file = join(root, "uploads", "7-0", "voice.ogg");
+    expect(await readFile(file, "utf8")).toBe("OGG bytes");
+    expect((await stat(file)).mode & 0o777).toBe(0o644);
+    expect(await readdir(join(root, "uploads", "7-0"))).toEqual(["voice.ogg"]);
+  });
+
+  it("replaces the content of a regular file already at the path", async () => {
+    const { root } = await dirs();
+    await mkdir(join(root, "uploads", "7-0"), { recursive: true });
+    await writeFile(join(root, "uploads", "7-0", "note.txt"), "old content");
+
+    await writeAgentWorkspaceFile("cerase-agent-1", "uploads/7-0/note.txt", Buffer.from("new"), {
+      writer: localWriter,
+      workspaceRoot: root,
+    });
+    expect(await readFile(join(root, "uploads", "7-0", "note.txt"), "utf8")).toBe("new");
+  });
+
+  // The default writer, through a stand-in for the docker CLI on PATH. The CLI
+  // spends a moment reaching the daemon before the script runs, and a refusal
+  // then exits without reading what was sent; for a file larger than the pipe
+  // holds, the unread rest fails with EPIPE on the bridge's side of the pipe.
+  it("reports a refusal of a file larger than the pipe as a failed write, without an unhandled pipe error", async () => {
+    const { root, outside } = await dirs();
+    await symlink(outside, join(root, "uploads"));
+    const bin = await mkdtemp(join(tmpdir(), "cerase-bin-"));
+    await writeFile(join(bin, "docker"), '#!/bin/sh\nsleep 0.2\nshift 3\nexec "$@"\n', { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${path ?? ""}`;
+    try {
+      await expect(
+        writeAgentWorkspaceFile("cerase-agent-1", "uploads/7-0/voice.ogg", Buffer.alloc(4 * 1024 * 1024), {
+          workspaceRoot: root,
+          maxBytes: 8 * 1024 * 1024,
+        }),
+      ).rejects.toThrow(/exit 3\): refusing to write through a symbolic link: uploads$/);
+    } finally {
+      if (path === undefined) delete process.env.PATH;
+      else process.env.PATH = path;
+    }
+    expect(await readdir(outside)).toEqual([]);
   });
 });

@@ -145,13 +145,46 @@ export async function readAgentWorkspaceFile(
   }
 }
 
-// C4-1 — WRITE side: persist an inbound chat attachment into the agent's
-// workspace so the `message-attachment-receiver` skill (which routes files to
-// the OCR / transcribe / docreader recipes) can read it. Symmetric to the read
-// above: `docker exec -i <container> sh -c 'mkdir -p <dir> && cat > <full>'`
-// with the bytes on stdin. The relPath is bridge-built (`uploads/<ts>/<name>`
-// with a sanitised name), so it is traversal-safe AND shell-safe (no quotes /
-// metacharacters can appear) — re-checked here as a hard boundary.
+// The write side: an inbound chat attachment goes into the agent's workspace so
+// the `message-attachment-receiver` skill (which routes files to the OCR /
+// transcribe / docreader recipes) can read it. The bytes go on stdin to
+// `docker exec -i <container> sh -c WORKSPACE_WRITE_SCRIPT cerase-write <root>
+// <relPath>`, the command the control-plane's WorkspaceFileWriter runs. The
+// container is the agent's own, so a symbolic link it made anywhere along the
+// path would carry the write wherever the link points; the script refuses one.
+
+/**
+ * Run as `sh -c WORKSPACE_WRITE_SCRIPT cerase-write <workspace root> <relative path>`,
+ * the same bytes as the control-plane's `WorkspaceFileWriter::SCRIPT`.
+ *
+ * It walks the path one folder at a time from the root, creating what is
+ * missing and stopping at the first symbolic link. The bytes go to a
+ * temporary file in the target folder, which is then renamed over the
+ * target: a rename replaces a link planted after the check instead of
+ * writing through it. Globbing is off, so no character of the path is
+ * expanded. A refusal exits 3 with one line on stderr naming the segment.
+ */
+export const WORKSPACE_WRITE_SCRIPT = `set -euf
+root=$1
+rest=$2
+dir=$root
+while :; do
+  case $rest in
+    */*) seg=\${rest%%/*}; rest=\${rest#*/} ;;
+    *) break ;;
+  esac
+  case $seg in ''|.) continue ;; esac
+  dir=$dir/$seg
+  if [ -L "$dir" ]; then printf 'refusing to write through a symbolic link: %s\\n' "$seg" >&2; exit 3; fi
+  [ -d "$dir" ] || mkdir "$dir"
+done
+target=$dir/$rest
+if [ -L "$target" ]; then printf 'refusing to write through a symbolic link: %s\\n' "$rest" >&2; exit 3; fi
+if [ -d "$target" ]; then printf 'a folder already has this name: %s\\n' "$rest" >&2; exit 3; fi
+tmp=$(mktemp "$dir/.cerase-write.XXXXXX")
+if ! cat > "$tmp"; then rm -f "$tmp"; exit 1; fi
+chmod 0644 "$tmp"
+mv -f "$tmp" "$target"`;
 
 /** Injectable for tests: writes `bytes` to the process spawned for `argv`. */
 export type FileWriter = (argv: string[], bytes: Buffer) => Promise<void>;
@@ -168,10 +201,18 @@ const realWriter: FileWriter = (argv, bytes) =>
     child.stderr.on("data", (d: Buffer) => {
       stderr += d.toString();
     });
+    // A refusal exits without reading stdin, so the part of a file the pipe
+    // could not hold fails here with EPIPE. Unhandled, that error would end
+    // the bridge's process; the exit code and stderr report the refusal.
+    let stdinError: Error | undefined;
+    child.stdin.on("error", (err: Error) => {
+      stdinError = err;
+    });
     child.on("error", reject);
     child.on("close", (code: number | null) => {
-      if (code === 0) resolve();
-      else reject(new Error(`workspace write failed (exit ${code}): ${stderr.trim()}`));
+      if (code !== 0) reject(new Error(`workspace write failed (exit ${code}): ${stderr.trim()}`));
+      else if (stdinError) reject(new Error(`workspace write failed: ${stdinError.message}`));
+      else resolve();
     });
     child.stdin.write(bytes);
     child.stdin.end();
@@ -184,10 +225,16 @@ export interface WriteWorkspaceOptions {
 }
 
 /**
- * Write `bytes` to `relPath` inside `containerName`'s workspace, creating the
- * parent dir. Throws on an unsafe path, a path with a single-quote (would break
- * the `sh -c` quoting — never happens for a sanitised `uploads/…` path, guarded
- * anyway), or a file over the cap.
+ * Write `bytes` to `relPath` inside `containerName`'s workspace with
+ * WORKSPACE_WRITE_SCRIPT, creating the folders along the path. The path reaches
+ * the shell as an argument and never inside the script.
+ *
+ * Throws before touching docker on a path that is empty, absolute, climbs with
+ * `..` or holds a single quote (the paths the control-plane's writer refuses
+ * too), and on a file over the cap. Throws after it when the script refuses a
+ * symbolic link along the path or a folder at the target's name, with the
+ * script's line in the message. The caller turns a throw into a skipped
+ * attachment, never a crash.
  */
 export async function writeAgentWorkspaceFile(
   containerName: string,
@@ -207,8 +254,17 @@ export async function writeAgentWorkspaceFile(
   if (bytes.length > maxBytes) {
     throw new Error(`workspace file too large (${bytes.length} > ${maxBytes} bytes): ${relPath}`);
   }
-  const full = `${root}/${relPath}`;
-  const dir = full.slice(0, full.lastIndexOf("/"));
-  const argv = ["docker", "exec", "-i", containerName, "sh", "-c", `mkdir -p '${dir}' && cat > '${full}'`];
+  const argv = [
+    "docker",
+    "exec",
+    "-i",
+    containerName,
+    "sh",
+    "-c",
+    WORKSPACE_WRITE_SCRIPT,
+    "cerase-write",
+    root,
+    relPath,
+  ];
   await writer(argv, bytes);
 }
