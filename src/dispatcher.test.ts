@@ -732,3 +732,70 @@ describe("a summary streamed inside a turn", () => {
     expect(h.withheld).toEqual([SUMMARY]);
   });
 });
+
+describe("Dispatcher.turnsRunning", () => {
+  // A platform note waits for the turns of its conversation that are running
+  // when it arrives, so the dispatcher, which runs every turn whoever sent it,
+  // is what says which those are.
+  it("names the turns a conversation is running and settles when they end", async () => {
+    const cfg = makeConfig("never used");
+    const mgr = new SessionManager(cfg);
+    let release!: () => void;
+    const sending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: mgr,
+      turnMeta: new TurnMetaTracker(),
+      // An unauthorised user is answered with a refusal, which is a turn that
+      // runs until its send does.
+      resolveSendTarget: () => async () => {
+        await sending;
+        return { ok: true };
+      },
+    });
+
+    expect(d.turnsRunning("doc-qa", "999")).toBeNull();
+    const turn = d.handleMessage("doc-qa", "999", "ciao");
+    const running = d.turnsRunning("doc-qa", "999");
+
+    expect(running).not.toBeNull();
+    expect(d.turnsRunning("doc-qa", "111")).toBeNull();
+
+    let settled = false;
+    void running?.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    release();
+    await turn;
+    await running;
+    expect(settled).toBe(true);
+    expect(d.turnsRunning("doc-qa", "999")).toBeNull();
+    await mgr.shutdown();
+  });
+
+  it("settles for a turn that failed as well", async () => {
+    const cfg = makeConfig("never used");
+    const mgr = new SessionManager(cfg);
+    const d = new Dispatcher({
+      config: cfg,
+      sessionManager: mgr,
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async () => {
+        throw new Error("the channel is gone");
+      },
+    });
+
+    const turn = d.handleMessage("doc-qa", "999", "ciao");
+    const running = d.turnsRunning("doc-qa", "999");
+    await turn.catch(() => undefined);
+
+    await expect(running).resolves.toBeUndefined();
+    expect(d.turnsRunning("doc-qa", "999")).toBeNull();
+    await mgr.shutdown();
+  });
+});

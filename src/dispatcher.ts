@@ -244,7 +244,39 @@ export class Dispatcher {
   // waits for both, so the assistant answers them in the order they were sent.
   private holds = new Map<string, Promise<void>>();
 
+  // Per conversation, the turns `handleMessage` is running now, whoever sent
+  // them: an adapter, a scheduled message, a platform note.
+  private running = new Map<string, Set<Promise<DeliveryResult>>>();
+
   constructor(private deps: DispatcherDeps) {}
+
+  /**
+   * Settles when every turn of this conversation that is running now has
+   * ended, whether it worked or not; null when none is running. A platform
+   * note that arrives during a turn waits on this to join the notes that
+   * arrive with it (see note-coalescer.ts).
+   */
+  turnsRunning(agentId: string, userId: string): Promise<void> | null {
+    const turns = this.running.get(`${agentId}:${userId}`);
+    if (!turns || turns.size === 0) return null;
+    return Promise.allSettled([...turns]).then(() => undefined);
+  }
+
+  private trackTurn(agentId: string, userId: string, turn: Promise<DeliveryResult>): void {
+    const key = `${agentId}:${userId}`;
+    let turns = this.running.get(key);
+    if (!turns) {
+      turns = new Set();
+      this.running.set(key, turns);
+    }
+    const set = turns;
+    set.add(turn);
+    const forget = () => {
+      set.delete(turn);
+      if (set.size === 0 && this.running.get(key) === set) this.running.delete(key);
+    };
+    turn.then(forget, forget);
+  }
 
   /**
    * SCHED-2 — post a plain, deterministic message to the agent's
@@ -282,7 +314,13 @@ export class Dispatcher {
    * pre-existing behaviour (localized error/empty copy, credit-exhausted copy,
    * allowlist refusal, the delivery-failure marker) is preserved.
    */
-  async handleMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
+  handleMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
+    const turn = this.runTurn(agentId, userId, text);
+    this.trackTurn(agentId, userId, turn);
+    return turn;
+  }
+
+  private async runTurn(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
     // Allowlist gate. isAllowed throws on unknown agent id — let that
     // propagate so the adapter logs it as a wiring bug.
     if (!isAllowed(this.deps.config, agentId, userId)) {

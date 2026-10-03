@@ -6,7 +6,10 @@
 //     { agent_id, user_id, text, surface_in_chat?, label?, system_message_only? }  → 202
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
-// user had sent it, optionally posting a deterministic heads-up first.
+// user had sent it, optionally posting a deterministic heads-up first. A
+// platform note that arrives while a turn of its conversation runs waits for
+// that turn with the other notes, and they share the next one
+// (note-coalescer.ts).
 // The 202 means accepted (validation + allowlist passed), not "turn
 // completed" — the caller (AcpInjector) uses a 15s fire-and-forget timeout,
 // and awaiting the full model turn made every >15s turn throw
@@ -26,6 +29,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Dispatcher } from "./dispatcher.js";
 import { makeLogger } from "./logger.js";
+import { NoteCoalescer } from "./note-coalescer.js";
 
 const logger = makeLogger("cerase-acp.internal-server");
 
@@ -244,8 +248,11 @@ export async function startInternalServer(opts: InternalServerOptions): Promise<
   // One tracker per server instance, shared by every
   // request so /internal/status reports the aggregate detached-turn outcome.
   const injects = new InjectTracker();
+  // The platform notes injected while a turn of their conversation runs share
+  // the next turn, rather than one turn each (see note-coalescer.ts).
+  const notes = new NoteCoalescer(opts.dispatcher);
   const server = createServer((req, res) => {
-    handleRequest(req, res, opts, injects).catch((err) => {
+    handleRequest(req, res, opts, injects, notes).catch((err) => {
       logger.error({ err }, "unhandled error in internal-server handler");
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal" });
@@ -274,6 +281,7 @@ async function handleRequest(
   res: ServerResponse,
   opts: InternalServerOptions,
   injects: InjectTracker,
+  notes: NoteCoalescer,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -421,7 +429,7 @@ async function handleRequest(
   // `runInjectTurn` never rejects by construction (it catches everything and
   // records the outcome); the trailing catch is unhandled-rejection insurance
   // so a detached-task bug can't crash the process.
-  runInjectTurn(opts, injects, { agentId, userId, text, surfaceInChat, headsUp }).catch((err) => {
+  runInjectTurn(opts, injects, notes, { agentId, userId, text, surfaceInChat, headsUp }).catch((err) => {
     logger.error({ err, agentId, userId }, "detached inject task rejected unexpectedly");
     injects.fail(agentId, userId, err);
   });
@@ -436,6 +444,7 @@ async function handleRequest(
 async function runInjectTurn(
   opts: InternalServerOptions,
   injects: InjectTracker,
+  notes: NoteCoalescer,
   p: { agentId: string; userId: string; text: string; surfaceInChat: boolean; headsUp: string },
 ): Promise<void> {
   const { agentId, userId, text, surfaceInChat, headsUp } = p;
@@ -457,7 +466,10 @@ async function runInjectTurn(
     // failure returns `{ ok: false }`. The HTTP ack is already gone, so the
     // truth surfaces through the log + the /internal/status inject block
     // (and the dispatcher has already sent the user-facing error copy).
-    const result = await opts.dispatcher.handleMessage(agentId, userId, text);
+    // A platform note that arrives during a turn of its conversation waits
+    // for it with the other notes, and they run as one turn; anything else
+    // goes straight to the dispatcher, as it always did.
+    const result = await notes.submit(agentId, userId, text);
     if (!result.ok) {
       logger.error({ err: result.error, agentId, userId }, "detached inject turn/delivery failed");
       injects.fail(agentId, userId, result.error);

@@ -337,6 +337,89 @@ describe("internal-server /internal/inject acks before the turn (M-ACP-INJECT-AC
   });
 });
 
+// Five approvals decided while the assistant answered the first were five
+// platform notes, five turns and five replies, each repeating what was still
+// waiting. The notes that arrive while a turn of the conversation runs now
+// reach the assistant together, in its next turn.
+describe("internal-server /internal/inject gives the notes that wait one turn", () => {
+  let server: InternalServer;
+  let base: string;
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const post = (body: unknown) =>
+    fetch(`${base}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify(body),
+    });
+
+  const note = (n: number) =>
+    `[platform_note sig=000000000000000${n}: Fatto: modifica ${n}.]\n\nNota della piattaforma, non scritta dalla persona: esito ${n}`;
+
+  /**
+   * A dispatcher whose first turn runs until the test lets it end, and which
+   * says which turns of a conversation are running, as the real one does.
+   */
+  function busyDispatcher() {
+    const handled: string[] = [];
+    let release!: () => void;
+    const firstTurn = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const running = new Set<Promise<unknown>>();
+    const dispatcher = {
+      handleMessage(_a: string, _u: string, text: string) {
+        handled.push(text);
+        const turn =
+          handled.length === 1 ? firstTurn.then(() => ({ ok: true as const })) : Promise.resolve({ ok: true as const });
+        running.add(turn);
+        void turn.then(() => running.delete(turn));
+        return turn;
+      },
+      turnsRunning() {
+        return running.size === 0 ? null : Promise.allSettled([...running]).then(() => undefined);
+      },
+      async sendSystemMessage() {
+        return { ok: true as const };
+      },
+    } as unknown as import("./dispatcher.js").Dispatcher;
+    return { dispatcher, handled, release: () => release() };
+  }
+
+  it("runs the notes that arrive during a turn once, together, when that turn ends", async () => {
+    const { dispatcher, handled, release } = busyDispatcher();
+    server = await startInternalServer({ dispatcher, internalSecret: SECRET, port: 0, host: "127.0.0.1" });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    expect(
+      (await post({ agent_id: "a1", user_id: "u1", text: "aggiorna le cinque opportunità", surface_in_chat: false }))
+        .status,
+    ).toBe(202);
+    await vi.waitFor(() => expect(handled).toHaveLength(1));
+    expect((await post({ agent_id: "a1", user_id: "u1", text: note(1), surface_in_chat: false })).status).toBe(202);
+    expect((await post({ agent_id: "a1", user_id: "u1", text: note(2), surface_in_chat: false })).status).toBe(202);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handled).toHaveLength(1);
+
+    release();
+
+    await vi.waitFor(() => expect(handled).toEqual(["aggiorna le cinque opportunità", `${note(1)}\n\n${note(2)}`]));
+  });
+
+  it("runs a note at once when the conversation is idle", async () => {
+    const { dispatcher, handled } = busyDispatcher();
+    server = await startInternalServer({ dispatcher, internalSecret: SECRET, port: 0, host: "127.0.0.1" });
+    base = `http://127.0.0.1:${server.port()}`;
+
+    expect((await post({ agent_id: "a1", user_id: "u1", text: note(1), surface_in_chat: false })).status).toBe(202);
+
+    await vi.waitFor(() => expect(handled).toEqual([note(1)]));
+  });
+});
+
 // GET /internal/status surfaces the real per-agent runtime liveness (attached
 // + client-ready) so the control-plane can show "Attivo ma disconnesso"
 // instead of a green badge over a down bridge.
