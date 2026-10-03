@@ -24,7 +24,24 @@
 //                              parent sent instead of FAKE_REPLY. The only
 //                              way a test can read what the bridge told the
 //                              assistant, which is what the attach-failure
-//                              correction has to be checked on.
+//                              correction has to be checked on. Set to
+//                              "blocks" to reply with every block of the
+//                              prompt, each as `<audience>: <text>`, where
+//                              the audience is the block's annotation or
+//                              `everyone` without one.
+//   FAKE_OUTGROWN_FILE      — a file of session ids, one per line, where `*`
+//                              lists every session. A prompt
+//                              on a listed session is refused the way
+//                              opencode 1.18.18 refuses a session too large
+//                              to summarise: JSON-RPC -32603 "Internal error:
+//                              Session too large to compact - …" with data
+//                              { service: "session", errorName:
+//                              "ContextOverflowError" }.
+//   FAKE_OUTGROWN_ERROR_NAME — the errorName that refusal carries instead,
+//                              for a test of what is not matched.
+//   FAKE_EXIT_DELAY_MS      — on SIGTERM, wait this long before exiting: a
+//                              child that outlives the kill for a while, as a
+//                              `docker exec` child does while it tears down.
 //   FAKE_MESSAGE_ID         — when set, attach this messageId to every
 //                              agent_message_chunk / agent_thought_chunk
 //                              update. Production opencode-acp always
@@ -76,12 +93,19 @@
 //   FAKE_RESTART_SAYS       — what that dying child had started to answer: sent
 //                              as a message chunk instead of the thought chunk.
 
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const SLOT_DOWN_FILE = process.env.FAKE_SLOT_DOWN_FILE;
 const RESTART_MID_PROMPT_FILE = process.env.FAKE_RESTART_MID_PROMPT_FILE;
 if (SLOT_DOWN_FILE && existsSync(SLOT_DOWN_FILE)) process.exit(1);
+
+const EXIT_DELAY_MS = parseInt(process.env.FAKE_EXIT_DELAY_MS ?? "0", 10);
+if (EXIT_DELAY_MS > 0) {
+  process.on("SIGTERM", () => {
+    setTimeout(() => process.exit(0), EXIT_DELAY_MS);
+  });
+}
 
 const REPLY = process.env.FAKE_REPLY ?? "hello world";
 const CHUNKS = parseInt(process.env.FAKE_CHUNKS ?? "3", 10);
@@ -98,6 +122,17 @@ const LATE_BURST_TEXT = process.env.FAKE_LATE_BURST_TEXT;
 const LATE_BURST_INTERVAL_MS = parseInt(process.env.FAKE_LATE_BURST_INTERVAL_MS ?? "100", 10);
 const MESSAGE_ID = process.env.FAKE_MESSAGE_ID;
 const ECHO_PROMPT = process.env.FAKE_ECHO_PROMPT === "1";
+const ECHO_BLOCKS = process.env.FAKE_ECHO_PROMPT === "blocks";
+const OUTGROWN_FILE = process.env.FAKE_OUTGROWN_FILE;
+const OUTGROWN_ERROR_NAME = process.env.FAKE_OUTGROWN_ERROR_NAME ?? "ContextOverflowError";
+
+/** Whether this session id is listed as too large to summarise. */
+function outgrown(sessionId) {
+  if (!OUTGROWN_FILE || !existsSync(OUTGROWN_FILE)) return false;
+  return readFileSync(OUTGROWN_FILE, "utf8")
+    .split("\n")
+    .some((line) => line.trim() === sessionId || line.trim() === "*");
+}
 // Session resume. Off by default so every existing test keeps exercising the
 // cold-start path; the real slot answers true (measured against the running
 // binary, which also offers close/fork/list/resume).
@@ -306,15 +341,34 @@ rl.on("line", async (line) => {
       await sleep(20);
       process.exit(137);
     }
+    if (outgrown(sessionId)) {
+      // Verbatim what opencode 1.18.18's ACP layer sends when the summary
+      // call failed as too large: RequestError.internalError(data, message).
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: {
+          code: -32603,
+          message:
+            "Internal error: Session too large to compact - context exceeds model limit even after stripping media",
+          data: { service: "session", errorName: OUTGROWN_ERROR_NAME },
+        },
+      });
+      return;
+    }
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.
     const reply = ECHO_MODEL
       ? (currentModel ?? "<no-model>")
       : ECHO_MODE
         ? (currentMode ?? "<no-mode>")
-        : ECHO_PROMPT
-          ? (msg.params?.prompt?.[0]?.text ?? "")
-          : REPLY;
+        : ECHO_BLOCKS
+          ? (msg.params?.prompt ?? [])
+              .map((b) => `${b.annotations?.audience?.join(",") ?? "everyone"}: ${b.text ?? ""}`)
+              .join("\n\n")
+          : ECHO_PROMPT
+            ? (msg.params?.prompt?.[0]?.text ?? "")
+            : REPLY;
     const pieces = [];
     const chunkLen = Math.max(1, Math.ceil(reply.length / CHUNKS));
     for (let i = 0; i < reply.length; i += chunkLen) {

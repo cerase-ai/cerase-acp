@@ -31,6 +31,7 @@ function makeConfig(overrides?: {
   loadedModel?: string;
   setModelFails?: boolean;
   echoModel?: boolean;
+  exitDelayMs?: number;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -50,6 +51,7 @@ function makeConfig(overrides?: {
   if (overrides?.loadedModel !== undefined) env.push(`FAKE_LOADED_MODEL=${overrides.loadedModel}`);
   if (overrides?.setModelFails) env.push("FAKE_SET_MODEL_FAILS=1");
   if (overrides?.echoModel) env.push("FAKE_ECHO_MODEL=1");
+  if (overrides?.exitDelayMs !== undefined) env.push(`FAKE_EXIT_DELAY_MS=${overrides.exitDelayMs}`);
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -202,6 +204,19 @@ describe("SessionManager", () => {
 
     const r = await mgr.prompt("doc-qa", "user-A", "second");
     expect(r.stopReason).toBe("end_turn");
+    expect(mgr.currentSessionId("doc-qa", "user-A")).toBe(before);
+  });
+
+  it("resumes it too when the next message arrives before the old child has exited", async () => {
+    // The kill removes the session at once and the child exits when it exits:
+    // a `docker exec` child takes its time. A message in between must still
+    // find the id to resume.
+    mgr = new SessionManager(makeConfig({ reply: "x", loadSession: true, exitDelayMs: 1_000 }));
+    await mgr.prompt("doc-qa", "user-A", "first");
+    const before = mgr.currentSessionId("doc-qa", "user-A");
+
+    mgr.killAgentSessions("doc-qa");
+    await mgr.prompt("doc-qa", "user-A", "second");
     expect(mgr.currentSessionId("doc-qa", "user-A")).toBe(before);
   });
 

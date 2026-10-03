@@ -69,6 +69,24 @@ For each configured agent template:
   of the same conversation waits for it. Past the bound the person is
   told the assistant is restarting and to send the message again. Code:
   `src/restart-hold.ts`, `Dispatcher.promptThroughRestarts`.
+- Starts a new session when the runtime refuses a turn because the
+  session has grown past what it can summarise. opencode checks its
+  compaction trigger after every model step; when the summary call fails
+  as too large it ends the turn with a JSON-RPC -32603 whose `data.errorName`
+  is `ContextOverflowError` and whose message says "too large to compact",
+  and every later turn of that session fails the same way. The bridge
+  matches both halves and nothing looser, lets the session go and forgets
+  its id, so neither a restart nor the console's «Riavvia» loads it back.
+  The person is told the conversation started over, in their language,
+  and their message is sent once more to a new session, preceded by a
+  block addressed to the assistant alone (opencode stores it as a synthetic
+  part) that opens `[session_result: started over]` and carries the
+  assistant's last rolling summary, read from the control-plane's
+  `GET /api/internal/session-summary/{agent}`. Without a summary the block
+  says there is none and the notice says so too. A second failure is the
+  turn's failure, with the usual message. Code: `isCompactionOverflow` and
+  `SessionOutgrownError` in `src/session-manager.ts`,
+  `Dispatcher.startOver`, `src/session-summary.ts`.
 
 ## Architecture (PoC v0.1)
 

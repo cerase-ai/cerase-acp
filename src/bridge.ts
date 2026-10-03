@@ -43,7 +43,7 @@ import {
   displayFileName,
 } from "./platform-notices.js";
 import { SessionManager } from "./session-manager.js";
-import { postSessionSummary } from "./session-summary.js";
+import { fetchSessionSummary, postSessionSummary } from "./session-summary.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { fetchTurnContext, formatWallClock } from "./turn-context.js";
 import { TurnMetaTracker } from "./turn-meta.js";
@@ -341,6 +341,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         }
       : undefined,
     onSummaryWithheld: captureSummary,
+    // What a session that replaces one too large to summarise starts from.
+    // Wired on the same condition as the gate above.
+    lastSummary: controlPlaneSecret
+      ? (agentId) => fetchSessionSummary(agentId, { controlPlaneUrl, internalSecret: controlPlaneSecret })
+      : undefined,
     // Asked of the adapter at every turn rather than once, because a reload
     // replaces an agent's adapter in the map this reads.
     wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,

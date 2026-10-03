@@ -15,15 +15,18 @@ import type { DeliveryResult, WholeAnswers } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { makeLogger } from "./logger.js";
-import { deliveryFailureNotice, restartOutlastedNotice } from "./platform-notices.js";
+import { deliveryFailureNotice, restartOutlastedNotice, startedOverNotice } from "./platform-notices.js";
 import { RESTART_HOLD_MS, RESTART_RETRY_MS } from "./restart-hold.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
 import {
+  type PromptOptions,
   type SessionManager,
+  SessionOutgrownError,
   SessionRestartError,
   type SessionUpdateHandler,
   TurnWatchdogError,
 } from "./session-manager.js";
+import { type LastSummary, startedOverNote } from "./session-summary.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import {
   fenceOpenAfter,
@@ -80,6 +83,13 @@ export interface DispatcherDeps {
    * above: the CLI and test ingresses have nowhere to keep it.
    */
   onSummaryWithheld?: (agentId: string, summary: string) => void;
+  /**
+   * The assistant's last rolling summary, from the side that stores it. Read
+   * when a session grew past what the runtime can summarise, to start the one
+   * replacing it. Optional for the same reason as the others; absent, or
+   * throwing, the new session starts without it.
+   */
+  lastSummary?: (agentId: string) => Promise<LastSummary | undefined>;
   /**
    * The agent's channel, when it takes each answer as one message: see
    * `ChatAdapter.wholeAnswers`. Absent, or answering undefined, a reply goes
@@ -398,27 +408,47 @@ export class Dispatcher {
     let turnError: Error | undefined;
     // The streamed-reply delivery outcome (from the queue).
     let drainResult: DrainResult = { ok: true };
+    // The delivery of the notice saying the conversation started over, when it did.
+    let startedOver: DeliveryResult = { ok: true };
     // A turn owns the attach outcomes recorded while it streams and nothing an
     // earlier one left behind.
     this.deps.attachOutcomes?.begin(agentId, userId);
+    const onUpdate: SessionUpdateHandler = (update) => {
+      if (reply.push(update)) produced = true;
+    };
+    // A try that ended without its answer, cut off by a restart or refused by
+    // a session that outgrew its summary. What it already sent stays sent;
+    // what it held back is dropped, because the next try answers in full.
+    const cut = async () => {
+      reply.discard();
+      const drained = await queue.drain();
+      if (!drained.ok) drainResult = drained;
+      produced = false;
+      ({ queue, reply } = this.openReply(agentId, userId, send, text));
+    };
     try {
-      await this.promptThroughRestarts(
-        agentId,
-        userId,
-        promptText,
-        (update) => {
-          if (reply.push(update)) produced = true;
-        },
-        async () => {
-          // The try a restart cut off. What it already sent stays sent; what
-          // it held back is dropped, because the next try answers in full.
-          reply.discard();
-          const cut = await queue.drain();
-          if (!cut.ok) drainResult = cut;
-          produced = false;
-          ({ queue, reply } = this.openReply(agentId, userId, send, text));
-        },
-      );
+      try {
+        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut);
+      } catch (err) {
+        if (!(err instanceof SessionOutgrownError)) throw err;
+        // The session grew past what the runtime can summarise, and the
+        // session manager has let it go. The message is sent once more, to a
+        // new session that starts from the last summary, after the person is
+        // told. Any failure of that try is the turn's failure: it is never
+        // sent a third time. Until it is queued again the turn is in no
+        // queue, so the agent counts it here, as it does a held turn.
+        const waiting = this.deps.sessionManager.holdTurn(agentId);
+        let note: string;
+        try {
+          await cut();
+          const fresh = await this.startOver(agentId, userId, send, text);
+          startedOver = fresh.delivery;
+          note = fresh.note;
+        } finally {
+          waiting();
+        }
+        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, { context: note });
+      }
     } catch (err) {
       failed = true;
       turnError = err instanceof Error ? err : new Error(String(err));
@@ -451,7 +481,7 @@ export class Dispatcher {
     // After any partial output has been flushed, tell the user what
     // happened. Best-effort: a failure here is logged + folded into the
     // delivery outcome, never rethrown.
-    let deliveryOk = drainResult.ok && retryDrain.ok;
+    let deliveryOk = drainResult.ok && retryDrain.ok && startedOver.ok;
     if (failed) {
       const lang = this.noticeLang(agentId, userId, text);
       const copy = creditExhausted
@@ -501,9 +531,44 @@ export class Dispatcher {
       return { ok: false, error: new Error("the answer came out as tool-call markup twice and was not sent") };
     }
     if (!deliveryOk) {
+      if (!startedOver.ok && drainResult.ok && retryDrain.ok) return startedOver;
       return { ok: false, error: this.deliveryError(drainResult.ok ? retryDrain : drainResult) };
     }
     return { ok: true };
+  }
+
+  /**
+   * Tell the person their conversation is starting over, and build what the
+   * new session is told ahead of their message: the assistant's last summary,
+   * or that there is none. A summary that cannot be read is logged and the
+   * conversation starts over without it.
+   */
+  private async startOver(
+    agentId: string,
+    userId: string,
+    send: SendTarget,
+    text: string,
+  ): Promise<{ note: string; delivery: DeliveryResult }> {
+    let summary: LastSummary | undefined;
+    if (this.deps.lastSummary) {
+      try {
+        summary = await this.deps.lastSummary(agentId);
+      } catch (err) {
+        logger.warn({ err, agentId, userId }, "the last summary could not be read — the new session starts without it");
+      }
+    }
+    logger.warn(
+      { agentId, userId, fromSummary: summary !== undefined },
+      "the conversation outgrew its summary — sending the message again to a new session",
+    );
+    const delivery = await this.safeSend(
+      send,
+      startedOverNotice(this.noticeLang(agentId, userId, text), summary !== undefined),
+      agentId,
+      userId,
+      "started-over notice",
+    );
+    return { note: startedOverNote(summary), delivery };
   }
 
   /**
@@ -518,7 +583,7 @@ export class Dispatcher {
    * `onCut` runs after each try a restart cut off, before the next one. Any
    * other failure, on any try, is the turn's failure as it always was. Past
    * the bound the last SessionRestartError is thrown, which the caller tells
-   * the person about in words of its own.
+   * the person about in words of its own. `options` go with every try.
    */
   private async promptThroughRestarts(
     agentId: string,
@@ -526,12 +591,13 @@ export class Dispatcher {
     promptText: string,
     onUpdate: SessionUpdateHandler,
     onCut: () => Promise<void>,
+    options?: PromptOptions,
   ): Promise<void> {
     let hold: RestartHold | undefined;
     try {
       for (;;) {
         try {
-          await this.deps.sessionManager.prompt(agentId, userId, promptText, onUpdate);
+          await this.deps.sessionManager.prompt(agentId, userId, promptText, onUpdate, options);
           if (hold) {
             logger.info(
               { agentId, userId, heldMs: Date.now() - hold.heldAt },

@@ -153,6 +153,34 @@ export function restartOutlastedNotice(lang: SupportedLang): string {
 }
 
 /**
+ * The conversation grew past what the assistant can summarise, and a new one
+ * was started in its place. `fromSummary` says whether the new one starts from
+ * a summary of the old one or from nothing, because the person should know how
+ * much of what they said earlier they may need to say again.
+ */
+export function startedOverNotice(lang: SupportedLang, fromSummary: boolean): string {
+  return fromSummary
+    ? pick(
+        {
+          it: "La nostra conversazione era diventata troppo lunga per continuare, quindi ne ho iniziata una nuova partendo da un riassunto di quella precedente. Se mi manca un dettaglio che ti serve, ripetimelo.",
+          en: "Our conversation had grown too long to continue, so I started a new one from a summary of the previous one. If I am missing a detail you need, tell me again.",
+          es: "Nuestra conversación se había vuelto demasiado larga para continuar, así que he empezado una nueva a partir de un resumen de la anterior. Si me falta algún detalle que necesitas, repítemelo.",
+          fr: "Notre conversation était devenue trop longue pour continuer, alors j'en ai commencé une nouvelle à partir d'un résumé de la précédente. S'il me manque un détail dont tu as besoin, redis-le-moi.",
+        },
+        lang,
+      )
+    : pick(
+        {
+          it: "La nostra conversazione era diventata troppo lunga per continuare, quindi ne ho iniziata una nuova e di quella precedente non ho un riassunto. Se ti serve qualcosa di cui abbiamo parlato, ripetimelo.",
+          en: "Our conversation had grown too long to continue, so I started a new one, and I have no summary of the previous one. If you need something we talked about, tell me again.",
+          es: "Nuestra conversación se había vuelto demasiado larga para continuar, así que he empezado una nueva y no tengo un resumen de la anterior. Si necesitas algo de lo que hablamos, repítemelo.",
+          fr: "Notre conversation était devenue trop longue pour continuer, alors j'en ai commencé une nouvelle et je n'ai pas de résumé de la précédente. Si tu as besoin de quelque chose dont nous avons parlé, redis-le-moi.",
+        },
+        lang,
+      );
+}
+
+/**
  * A message to the assistant written in a group space rather than a direct
  * message. The answer would be read by everyone in the space, and an assistant
  * answers with its own user's memory and connectors, so it answers nowhere but

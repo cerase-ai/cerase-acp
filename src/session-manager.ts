@@ -180,6 +180,59 @@ export class SessionRestartError extends Error {
 }
 
 /**
+ * A turn the runtime refused because the session has grown past what it can
+ * summarise. Every later turn of that session would be refused the same way,
+ * so the session manager has already let it go: the next prompt for the pair
+ * starts a new session instead of resuming this one.
+ */
+export class SessionOutgrownError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly cause: unknown,
+  ) {
+    super(
+      `the assistant's session ${sessionId} is too large to summarise and was let go (${cause instanceof Error ? cause.message : String(cause)})`,
+    );
+    this.name = "SessionOutgrownError";
+  }
+}
+
+/**
+ * Whether a failed prompt is the runtime refusing to summarise a session.
+ *
+ * opencode 1.18.18 checks its compaction trigger after every model step. The
+ * summary call carries the whole history in one message, and when that call
+ * fails as too large the runtime ends the turn with a `ContextOverflowError`,
+ * which its ACP layer sends as a JSON-RPC internal error: code -32603, message
+ * `Internal error: Session too large to compact - context exceeds model limit
+ * even after stripping media` (or `Conversation history too large to compact`
+ * when it had already set the last message aside), data
+ * `{ service: "session", errorName: "ContextOverflowError" }`.
+ *
+ * Both halves are required: the error name the runtime put in `data`, and the
+ * words "too large to compact" in the message. Anything else, an overflow the
+ * runtime reports for another reason included, fails the turn as it always
+ * did.
+ */
+export function isCompactionOverflow(err: unknown): boolean {
+  if (!(err instanceof acp.RequestError)) return false;
+  const data = err.data;
+  const errorName = typeof data === "object" && data !== null ? (data as { errorName?: unknown }).errorName : undefined;
+  return errorName === "ContextOverflowError" && /too large to compact/i.test(err.message);
+}
+
+/** What a prompt carries besides the person's text. */
+export interface PromptOptions {
+  /**
+   * Text for the assistant alone, sent in the same prompt ahead of the
+   * person's: a content block whose audience is the assistant, which opencode
+   * stores as a synthetic part. The model reads it; the runtime's own views
+   * leave it out of the person's message.
+   */
+  context?: string;
+}
+
+/**
  * A handshake whose child went away before it finished, with the moment the
  * child was spawned. Internal: `prompt()` turns it into a SessionRestartError
  * when the slot restarted, and into the handshake's own error when not.
@@ -223,6 +276,12 @@ interface SessionEntry {
    * bridge, which needs no probe to know.
    */
   closedByBridge: boolean;
+  /**
+   * Set when the session grew past what the runtime can summarise. Its id is
+   * never kept for a resume, and a turn still queued on it is sent again to
+   * the session that replaces it.
+   */
+  outgrown: boolean;
 }
 
 const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
@@ -519,6 +578,9 @@ export class SessionManager {
         }
       }
       this.entries.delete(key);
+      // Kept now, not when the child exits: a message arriving in between
+      // would find no session and no id, and start the conversation over.
+      if (!entry.outgrown) this.rememberResumableSession(key, entry.sessionId);
     }
   }
 
@@ -554,7 +616,13 @@ export class SessionManager {
     agent.allowed_users = [...allowedUsers];
   }
 
-  async prompt(agentId: string, userId: string, text: string, onUpdate?: SessionUpdateHandler): Promise<PromptResult> {
+  async prompt(
+    agentId: string,
+    userId: string,
+    text: string,
+    onUpdate?: SessionUpdateHandler,
+    options?: PromptOptions,
+  ): Promise<PromptResult> {
     const agent = this.agentsById.get(agentId);
     if (!agent) throw new Error(`unknown agent id "${agentId}"`);
 
@@ -565,7 +633,7 @@ export class SessionManager {
     // id is kept now, because the spawn below wants to resume it.
     if (entry && (entry.closed || entry.closedByBridge || entry.connection.signal.aborted)) {
       this.entries.delete(key);
-      this.rememberResumableSession(key, entry.sessionId);
+      if (!entry.outgrown) this.rememberResumableSession(key, entry.sessionId);
       entry = undefined;
     }
     if (!entry) {
@@ -613,6 +681,12 @@ export class SessionManager {
     }
 
     return entry.queue.enqueue(async () => {
+      // Queued behind a turn whose session outgrew its summary: that session
+      // is gone, and the turn goes to the one that replaces it, as a turn held
+      // through a restart does.
+      if (entry!.outgrown) {
+        throw new SessionRestartError(false, new Error("the session was let go because it outgrew its summary"));
+      }
       // Track when the last sessionUpdate landed so we can drain
       // post-resolve chunks. Workaround for opencode upstream issue
       // #17505 / #25421: ACP `agent_message_chunk` frames sometimes
@@ -707,11 +781,15 @@ export class SessionManager {
           watchdogId.unref?.();
         });
         let response: Awaited<ReturnType<NonNullable<typeof entry>["connection"]["prompt"]>>;
+        const prompt: acp.ContentBlock[] = [{ type: "text", text }];
+        if (options?.context) {
+          prompt.unshift({ type: "text", text: options.context, annotations: { audience: ["assistant"] } });
+        }
         try {
           response = await Promise.race([
             entry!.connection.prompt({
               sessionId: entry!.sessionId,
-              prompt: [{ type: "text", text }],
+              prompt,
             }),
             watchdog,
           ]);
@@ -729,6 +807,17 @@ export class SessionManager {
               "the session closed under this turn because it restarted — the turn can be sent again",
             );
             throw new SessionRestartError(chunksReceived > 0, err);
+          }
+          // Every later turn of this session would be refused the same way,
+          // and resuming it after a restart brings the refusal back with it.
+          // So it is let go here, and its id with it.
+          if (isCompactionOverflow(err)) {
+            this.letGo(entry!);
+            logger.warn(
+              { agentId: agent.id, userId, sessionId: entry!.sessionId, chunksReceived },
+              "the session is too large to summarise — let go, the next prompt starts a new one",
+            );
+            throw new SessionOutgrownError(entry!.sessionId, err);
           }
           throw err;
         } finally {
@@ -818,7 +907,7 @@ export class SessionManager {
         const t2 = Date.now();
         entry!.onUpdate = undefined;
         entry!.lastTurnAt = t2;
-        this.resetIdleTimer(entry!);
+        if (!entry!.outgrown) this.resetIdleTimer(entry!);
         const telemetry: TurnTelemetry = {
           agentId: agent.id,
           userId,
@@ -1124,6 +1213,7 @@ export class SessionManager {
       closed: false,
       spawnedAt,
       closedByBridge: false,
+      outgrown: false,
     };
     entryRef = entry;
 
@@ -1135,7 +1225,7 @@ export class SessionManager {
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
       const key = sessionKey(agent.id, userId);
       if (this.entries.get(key) === entry) this.entries.delete(key);
-      this.rememberResumableSession(key, entry.sessionId);
+      if (!entry.outgrown) this.rememberResumableSession(key, entry.sessionId);
     });
 
     this.resetIdleTimer(entry);
@@ -1164,6 +1254,28 @@ export class SessionManager {
   /** Test seam: how many dead sessions are currently resumable. */
   resumableSessionCount(): number {
     return this.resumableSessions.size;
+  }
+
+  /**
+   * Let go of a session the runtime can no longer summarise: end its child and
+   * forget its id, so the next prompt for the pair starts a new session rather
+   * than loading this one. Loading it is what the console's restart and every
+   * slot restart would otherwise do, and each brought the same refusal back.
+   */
+  private letGo(entry: SessionEntry): void {
+    const key = sessionKey(entry.agentId, entry.userId);
+    entry.outgrown = true;
+    entry.closedByBridge = true;
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    if (this.entries.get(key) === entry) this.entries.delete(key);
+    if (this.resumableSessions.get(key) === entry.sessionId) this.resumableSessions.delete(key);
+    if (!entry.closed && !entry.child.killed) {
+      try {
+        entry.child.kill("SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
   }
 
   /**
@@ -1202,6 +1314,8 @@ export class SessionManager {
         }
       }
       this.entries.delete(lruKey);
+      // As in killAgentSessions: the id is kept before the child has exited.
+      if (!victim.outgrown) this.rememberResumableSession(lruKey, victim.sessionId);
     }
   }
 
