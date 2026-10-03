@@ -25,8 +25,17 @@ For each configured agent template:
   `(user, agent)` pair; unauthorised → polite refusal.
 - Spawns `opencode acp` lazily on first DM via the configured spawn
   command (PoC: `docker exec -i cerase-agent-<id> opencode acp`); the
-  child persists across multiple DMs from the same user and survives
-  bridge restarts via mem0 + the persisted workspace.
+  child persists across multiple DMs from the same user.
+- Keeps the conversation across restarts, the slot's and its own. The
+  opencode session each `(user, agent)` pair talks through is recorded when
+  the session starts, in memory and in `resumable-sessions.json` under
+  `CERASE_ACP_STATE_DIR` (written through a temporary file and a rename,
+  at most 500 pairs, least recently used dropped first), and the next child
+  for the pair loads it with `session/load`. A session the bridge lets go,
+  one that outgrew its summary or whose load the slot refused, is removed
+  from the file as well. A file that cannot be read starts every
+  conversation over and is replaced on the next write. Code:
+  `src/resumable-sessions.ts`.
 - Prepends a `[turn_meta: gap=…, lang=…]` block to each
   `session/prompt`. The agent reads this per the system-prompt rules
   in `cerase-core/agent-runtime/slots/slot-default/srv/AGENTS.md`.

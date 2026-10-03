@@ -258,7 +258,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   const { config, bridgeE2eTest } = opts;
   const createAdapter = opts.createAdapter ?? createChatAdapter;
 
-  const sessionManager = new SessionManager(config);
+  // The state directory the image sets, where the bridge keeps what it needs
+  // across a restart of its own. Unset outside the image, which keeps all of
+  // it in memory.
+  const stateDir = process.env.CERASE_ACP_STATE_DIR;
+  const sessionManager = new SessionManager(config, undefined, { stateDir });
   const turnMeta = new TurnMetaTracker();
   // Shared by the send path (which records) and the production dispatcher
   // (which reads at the end of the turn). Only the production dispatcher has

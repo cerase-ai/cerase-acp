@@ -8,6 +8,7 @@ import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { reconcile, type SeenState } from "./reconciler.js";
 import { dockerSlotRestartProbe, type SlotRestartProbe } from "./restart-hold.js";
+import { ResumableSessions } from "./resumable-sessions.js";
 import {
   decideSessionMode,
   type ModeAdvertisement,
@@ -124,6 +125,12 @@ export interface SessionManagerOptions {
    * default reads the slot container's state through the docker proxy.
    */
   slotRestarted?: SlotRestartProbe;
+  /**
+   * Where the session each pair is talking through is written, so a bridge
+   * that restarts resumes it. The bridge passes its state directory; without
+   * one the record lives in memory and survives slot restarts only.
+   */
+  stateDir?: string;
 }
 
 /**
@@ -303,10 +310,10 @@ function currentModelOf(res: { configOptions?: unknown } | undefined): string | 
   return undefined;
 }
 
-// How many dead sessions stay resumable. One short string per (agent,user)
-// that has ever talked, so the map would otherwise grow for the life of the
-// process; the oldest are dropped first and the only cost of dropping one is
-// that a very old conversation restarts cold.
+// How many sessions stay resumable. One short string per (agent,user) that has
+// ever talked, so the map would otherwise grow for the life of the process and
+// the file with it; the oldest are dropped first and the only cost of dropping
+// one is that a very old conversation restarts cold.
 const RESUMABLE_SESSIONS_MAX = 500;
 
 /**
@@ -320,15 +327,17 @@ export class SessionManager {
   // In-flight spawn promises, keyed by session key, so
   // concurrent first prompts share one spawn instead of double-spawning.
   private inFlightSpawns = new Map<string, Promise<SessionEntry>>();
-  // The opencode session id of the last child for each (agent,user), kept
-  // AFTER that child dies. It is what makes a restart survivable: the slot
-  // restarts for many ordinary reasons — a skill install rewrites AGENTS.md
-  // and the entrypoint watcher SIGTERMs opencode, the idle killer fires, the
-  // image is updated — and every one of them used to start the next message
-  // from zero while the user saw no explanation. opencode keeps the session
-  // in its own SQLite on a named volume, so the id stays valid across the
-  // container's death; the state lives there, not here.
-  private resumableSessions = new Map<string, string>();
+  // The opencode session id each (agent,user) is talking through, recorded
+  // when the session starts and kept AFTER its child dies. It is what makes a
+  // restart survivable: the slot restarts for many ordinary reasons — a skill
+  // install rewrites AGENTS.md and the entrypoint watcher SIGTERMs opencode,
+  // the idle killer fires, the image is updated — and every one of them used
+  // to start the next message from zero while the user saw no explanation.
+  // opencode keeps the session in its own SQLite on a named volume, so the id
+  // stays valid across the container's death; the state lives there, not
+  // here. The record is written to the state directory as well, because the
+  // bridge restarts too, and a bridge that is killed lets no child exit first.
+  private resumableSessions: ResumableSessions;
   // Agents whose slot does not offer the Cerase mode, so no session for them
   // can start. Kept here rather than in the caller because this is where the
   // absence is seen and where the recovery is seen too, and a report that
@@ -358,6 +367,7 @@ export class SessionManager {
     this.canonicalFetcher = options?.canonicalFetcher ?? defaultFetcher;
     this.endpointResolver = options?.endpointResolver ?? defaultEndpointForAgent;
     this.slotRestarted = options?.slotRestarted ?? dockerSlotRestartProbe();
+    this.resumableSessions = new ResumableSessions(options?.stateDir, RESUMABLE_SESSIONS_MAX);
     // The file's value, then the default, and options override both because
     // only tests pass them. A mail assistant and one carrying a project do not
     // want the same ceiling, which is why the file gets to say.
@@ -1066,8 +1076,9 @@ export class SessionManager {
         } catch (loadErr) {
           // Expected, not a fault: the slot entrypoint wipes `opencode.db`
           // whenever the opencode version changes, so an image upgrade takes
-          // every session id on the box with it. Forget it and start clean.
-          this.resumableSessions.delete(resumeKey);
+          // every session id on the box with it. Forget it and start clean,
+          // on disk too, or the next bridge would try it again.
+          this.resumableSessions.forget(resumeKey, previousSessionId);
           logger.info(
             { err: loadErr, agentId: agent.id, userId, sessionId: previousSessionId },
             "previous ACP session could not be loaded — starting a new one",
@@ -1102,7 +1113,7 @@ export class SessionManager {
               `the resumed session's model ${restored ?? "(not reported)"} was set back to ${agent.model}`,
             );
           } catch (modelErr) {
-            this.resumableSessions.delete(resumeKey);
+            this.resumableSessions.forget(resumeKey, resumed);
             logger.warn(
               {
                 err: modelErr,
@@ -1216,6 +1227,9 @@ export class SessionManager {
       outgrown: false,
     };
     entryRef = entry;
+    // Recorded now, while the session is alive, and not only when its child
+    // exits: a bridge that is stopped or killed does not wait for that.
+    this.rememberResumableSession(sessionKey(agent.id, userId), sessionId);
 
     // Crash listener: remove from map on exit so the next prompt
     // respawns transparently.
@@ -1233,25 +1247,14 @@ export class SessionManager {
   }
 
   /**
-   * Record the session a dead child was holding, so the next spawn for the
-   * same pair can load it instead of starting cold.
-   *
-   * Re-inserting moves the key to the end, which makes the eviction below
-   * least-recently-used rather than first-ever-seen: the pair that talked
-   * most recently is the one most likely to talk again.
+   * Record the session a pair is in, so the next spawn for the same pair can
+   * load it instead of starting cold: see ResumableSessions.
    */
   private rememberResumableSession(key: string, sessionId: string): void {
-    if (!sessionId) return;
-    this.resumableSessions.delete(key);
-    this.resumableSessions.set(key, sessionId);
-    while (this.resumableSessions.size > RESUMABLE_SESSIONS_MAX) {
-      const oldest = this.resumableSessions.keys().next();
-      if (oldest.done) break;
-      this.resumableSessions.delete(oldest.value);
-    }
+    this.resumableSessions.remember(key, sessionId);
   }
 
-  /** Test seam: how many dead sessions are currently resumable. */
+  /** Test seam: how many sessions are currently resumable. */
   resumableSessionCount(): number {
     return this.resumableSessions.size;
   }
@@ -1268,7 +1271,7 @@ export class SessionManager {
     entry.closedByBridge = true;
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     if (this.entries.get(key) === entry) this.entries.delete(key);
-    if (this.resumableSessions.get(key) === entry.sessionId) this.resumableSessions.delete(key);
+    this.resumableSessions.forget(key, entry.sessionId);
     if (!entry.closed && !entry.child.killed) {
       try {
         entry.child.kill("SIGTERM");
