@@ -48,13 +48,7 @@ import {
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
-import {
-  Dispatcher,
-  pickEmptyMessage,
-  pickErrorMessage,
-  pickRefusalMessage,
-  pickTooLongMessage,
-} from "./dispatcher.js";
+import { Dispatcher, pickErrorMessage, pickRefusalMessage, pickSlowMessage, pickTooLongMessage } from "./dispatcher.js";
 import { directMessagesOnlyNotice } from "./platform-notices.js";
 import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
@@ -1033,13 +1027,33 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     expect(google.shown()).toEqual([ELLIPSIS, pickTooLongMessage(IT)]);
   });
 
-  it("turns into an ellipsis when the turn ends with an empty reply, and the notice saying so follows it", async () => {
+  // An empty turn is asked again on the same session, and the line saying the
+  // assistant is writing stays up through every try: nothing is edited or
+  // posted until one of them answers.
+  it("stays up while an empty turn is tried again, and turns into an ellipsis when the answer comes", async () => {
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     turns[0]!.end();
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    turns[1]!.end();
+    await vi.waitFor(() => expect(turns).toHaveLength(3));
+    await settle();
+    expect(google.edits).toEqual([]);
+    expect(texts(google.posts)).toEqual([BALLOON]);
+    turns[2]!.end("Ecco il riepilogo.");
     await expectEachEndedOnce(google.posts[0]!);
-    expect(google.shown()).toEqual([ELLIPSIS, pickEmptyMessage(IT)]);
+    expect(google.shown()).toEqual([ELLIPSIS, "Ecco il riepilogo."]);
+  });
+
+  it("turns into an ellipsis after a fourth empty answer, and the notice that it is taking longer follows it", async () => {
+    await write();
+    for (let n = 1; n <= 4; n++) {
+      await vi.waitFor(() => expect(turns).toHaveLength(n));
+      turns[n - 1]!.end();
+    }
+    await expectEachEndedOnce(google.posts[0]!);
+    expect(google.shown()).toEqual([ELLIPSIS, pickSlowMessage(IT)]);
   });
 
   // The one ending in which nothing at all is posted: all the turn wrote was

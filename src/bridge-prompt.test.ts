@@ -13,6 +13,7 @@ import { type AttachFailure, AttachOutcomeTracker, attachFailurePrompt } from ".
 import { bridgePromptLine, isBridgePrompt } from "./bridge-prompt.js";
 import type { BridgeConfig } from "./config.js";
 import { Dispatcher } from "./dispatcher.js";
+import { emptyTurnRetryPrompt } from "./empty-turn.js";
 import type { SessionManager, SessionUpdateHandler } from "./session-manager.js";
 import { toolCallMarkupRetryPrompt } from "./tool-call-markup.js";
 import { TurnMetaTracker } from "./turn-meta.js";
@@ -30,6 +31,7 @@ const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE), "utf8")) as Fix
 /** What makes each prompt the bridge sends on its own, by the name the fixture gives it. */
 const MAKERS: Record<string, (entry: Fixture["bridge"][number]) => string> = {
   "toolCallMarkupRetryPrompt()": () => toolCallMarkupRetryPrompt(),
+  "emptyTurnRetryPrompt()": () => emptyTurnRetryPrompt(),
   "attachFailurePrompt(failures)": (entry) => attachFailurePrompt(entry.failures ?? []),
 };
 
@@ -79,16 +81,19 @@ const CONFIG: BridgeConfig = {
   session: { idle_timeout_minutes: 60, max_concurrent: 4 },
 };
 
-/** A session that answers the n-th prompt with the n-th reply and keeps every prompt it is sent. */
-function recording(replies: string[]) {
+/**
+ * A session that answers the n-th prompt with the n-th reply and keeps every
+ * prompt it is sent. A null reply is a turn that writes nothing at all.
+ */
+function recording(replies: (string | null)[]) {
   const prompts: string[] = [];
   const mgr = {
     async prompt(_agentId: string, _userId: string, text: string, onUpdate?: SessionUpdateHandler) {
       prompts.push(text);
-      onUpdate?.({
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: replies[prompts.length - 1] ?? "" },
-      });
+      const reply = replies[prompts.length - 1];
+      if (reply !== null) {
+        onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply ?? "" } });
+      }
       return { stopReason: "end_turn" };
     },
   } as unknown as SessionManager;
@@ -145,7 +150,22 @@ describe("every prompt the dispatcher sends", () => {
     expect(isBridgePrompt(prompts[1]!)).toBe(true);
   });
 
-  // The two cases above reach every place a prompt leaves from today. One more
+  it("after a turn that wrote nothing: the person's is not the bridge's, the note asking for an answer is", async () => {
+    const { mgr, prompts } = recording([null, "Ecco cosa vuol dire quella riga."]);
+    const d = new Dispatcher({
+      config: CONFIG,
+      sessionManager: mgr,
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async () => ({ ok: true }),
+    });
+    await d.handleMessage("a", "u", TYPED);
+
+    expect(prompts).toHaveLength(2);
+    expect(isBridgePrompt(prompts[0]!)).toBe(false);
+    expect(isBridgePrompt(prompts[1]!)).toBe(true);
+  });
+
+  // The three cases above reach every place a prompt leaves from today. One more
   // place is one more prompt the console has to recognise, so it is counted.
   it("leaves from the places counted here, and a new one has to be added to the cases above and the examples", () => {
     const calls: Record<string, number> = {};
@@ -154,8 +174,9 @@ describe("every prompt the dispatcher sends", () => {
       const n = (readFileSync(join(src, file), "utf8").match(/\b(?:sessionManager|mgr)\.prompt\(/g) ?? []).length;
       if (n > 0) calls[file] = n;
     }
-    // The dispatcher's three: the person's message, the follow-up, the
-    // correction. The CLI's one sends what its operator typed, behind turn_meta.
-    expect(calls).toEqual({ "dispatcher.ts": 3, "cli.ts": 1 });
+    // The dispatcher's four: the person's message, the note after an empty
+    // turn, the follow-up, the correction. The CLI's one sends what its
+    // operator typed, behind turn_meta.
+    expect(calls).toEqual({ "dispatcher.ts": 4, "cli.ts": 1 });
   });
 });

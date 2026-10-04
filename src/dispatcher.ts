@@ -14,6 +14,7 @@ import {
 import type { DeliveryResult, WholeAnswers } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
+import { EMPTY_TURN_RETRIES, emptyTurnRetryPrompt } from "./empty-turn.js";
 import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
 import {
@@ -181,6 +182,18 @@ const TURN_EMPTY: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   unknown: "I didn't produce a reply. Try again or rephrase.",
 };
 
+// A turn that ended with no text and no tool call, tried again three times
+// (see empty-turn.ts) and still without an answer. The model is not failing:
+// it keeps ending on its reasoning, so the person is told it is taking longer,
+// not that something broke.
+const TURN_SLOW: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
+  it: "Ci sto mettendo più del previsto a risponderti. Riprova tra qualche minuto.",
+  en: "This is taking me longer than expected. Please try again in a few minutes.",
+  es: "Me está llevando más tiempo de lo previsto responderte. Inténtalo de nuevo en unos minutos.",
+  fr: "Cela me prend plus de temps que prévu pour te répondre. Réessaie dans quelques minutes.",
+  unknown: "This is taking me longer than expected. Please try again in a few minutes.",
+};
+
 // A turn whose answer came out as a tool call written as text, twice: the
 // first was held back and the assistant was given one more try, and the second
 // was held back too. The person has been sent nothing that answers them, and
@@ -210,6 +223,11 @@ export function pickErrorMessage(text: string): string {
 /** Localized "the turn produced nothing" copy (see TURN_EMPTY). */
 export function pickEmptyMessage(text: string): string {
   return TURN_EMPTY[detectLanguage(text)];
+}
+
+/** Localized "this is taking longer" copy (see TURN_SLOW). */
+export function pickSlowMessage(text: string): string {
+  return TURN_SLOW[detectLanguage(text)];
 }
 
 // Dedicated copy for the 402/overquota chain: the credit
@@ -572,6 +590,9 @@ export class Dispatcher {
     // Track whether the turn emitted anything and whether it
     // failed, so we can surface a user-facing message instead of silence.
     let produced = false;
+    // Whether the turn started a tool. A turn with neither text nor a tool
+    // call ended on its reasoning alone, and is tried again below.
+    let acted = false;
     let failed = false;
     let creditExhausted = false;
     let restartOutlasted = false;
@@ -586,6 +607,7 @@ export class Dispatcher {
     // earlier one left behind.
     this.deps.attachOutcomes?.begin(agentId, userId);
     const onUpdate: SessionUpdateHandler = (update) => {
+      if (update.sessionUpdate === "tool_call") acted = true;
       if (reply.push(update)) produced = true;
     };
     // A try that ended without its answer, cut off by a restart or refused by
@@ -643,6 +665,32 @@ export class Dispatcher {
       this.deps.attachOutcomes?.take(agentId, userId);
       return this.keepForNextBridge(agentId, userId, text, receivedAt);
     }
+    // A turn that ended with no text and no tool call is asked again at once,
+    // on the same session, with a note telling the assistant to answer. Nothing
+    // is sent to the person between tries, so the typing indicator the adapter
+    // holds for the turn stays on; only a fourth empty answer reaches them.
+    let emptyTries = 0;
+    while (!failed && !produced && !acted && emptyTries < EMPTY_TURN_RETRIES && !this.stopping) {
+      emptyTries += 1;
+      logger.warn(
+        { agentId, userId, attempt: emptyTries, of: EMPTY_TURN_RETRIES },
+        "the turn ended with no text and no tool call — asking the assistant again",
+      );
+      ({ queue, reply } = this.openReply(agentId, userId, send, text));
+      try {
+        await this.deps.sessionManager.prompt(agentId, userId, emptyTurnRetryPrompt(), onUpdate);
+      } catch (err) {
+        failed = true;
+        turnError = err instanceof Error ? err : new Error(String(err));
+        creditExhausted = isCreditExhaustedError(err);
+        restartOutlasted = err instanceof SessionRestartError;
+        logger.error({ err, agentId, userId, creditExhausted }, "the try after an empty turn failed");
+      } finally {
+        reply.end();
+        const drained = await queue.drain();
+        if (drainResult.ok) drainResult = drained;
+      }
+    }
     // An answer that ended as a tool call written out as text was held back,
     // not sent. The assistant gets one more try on the same session; when that
     // one ends the same way the person is told, because nothing they were sent
@@ -688,12 +736,15 @@ export class Dispatcher {
       );
       if (!r.ok) deliveryOk = false;
     } else if (!produced) {
+      // A turn that ran a tool and wrote nothing did something, and is not
+      // asked again; one that did neither was, and every try came back empty.
+      const lang = this.noticeLang(agentId, userId, text);
       const r = await this.safeSend(
         send,
-        TURN_EMPTY[this.noticeLang(agentId, userId, text)],
+        acted ? TURN_EMPTY[lang] : TURN_SLOW[lang],
         agentId,
         userId,
-        "empty-reply message",
+        acted ? "empty-reply message" : "taking-longer message",
       );
       if (!r.ok) deliveryOk = false;
     }

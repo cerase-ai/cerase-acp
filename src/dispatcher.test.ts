@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { AttachOutcomeTracker } from "./attach-outcome.js";
+import { isBridgePrompt } from "./bridge-prompt.js";
 import type { BridgeConfig } from "./config.js";
 import {
   Dispatcher,
@@ -8,8 +9,10 @@ import {
   pickEmptyMessage,
   pickErrorMessage,
   pickNoCreditsMessage,
+  pickSlowMessage,
 } from "./dispatcher.js";
 import { isInternalSummaryBlock } from "./egress-redaction.js";
+import { emptyTurnRetryPrompt } from "./empty-turn.js";
 import { SessionManager, type SessionUpdateHandler } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import { TurnMetaTracker } from "./turn-meta.js";
@@ -160,13 +163,17 @@ describe("Dispatcher", () => {
     expect(sent[0]).toMatch(/riprova|errore/i);
   });
 
-  it("M-ACP-1: a turn that produced zero text chunks sends an empty-reply fallback", async () => {
+  it("M-ACP-1: a turn that called a tool and wrote nothing sends the empty-reply notice, and is not tried again", async () => {
     const cfg = makeConfig("x");
     const sent: string[] = [];
+    let prompts = 0;
     const d = new Dispatcher({
       config: cfg,
-      // resolve without ever emitting an agent_message_chunk
-      sessionManager: makeStubMgr(async () => ({ stopReason: "end_turn" })),
+      sessionManager: makeStubMgr(async (_a, _u, _t, onUpdate) => {
+        prompts += 1;
+        onUpdate?.({ sessionUpdate: "tool_call", toolCallId: "t1", title: "create_task", status: "pending" });
+        return { stopReason: "end_turn" };
+      }),
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: () => async (text) => {
         sent.push(text);
@@ -174,8 +181,8 @@ describe("Dispatcher", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ping");
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toBe(pickEmptyMessage("ping"));
+    expect(prompts).toBe(1);
+    expect(sent).toEqual([pickEmptyMessage("ping")]);
   });
 
   it("M-ACP-1: a normal turn sends neither error nor empty fallback", async () => {
@@ -198,6 +205,135 @@ describe("Dispatcher", () => {
     expect(joined).not.toBe(pickErrorMessage("ping"));
     expect(joined).not.toBe(pickEmptyMessage("ping"));
     expect(joined).toContain("hi");
+  });
+});
+
+// A turn can end on reasoning alone: no text and no tool call. The model ended
+// without answering, the service was not busy, so the same session is asked
+// again at once, three times at most, with a note telling the assistant to
+// answer. Nothing is sent meanwhile, which is what keeps the typing indicator
+// on: a message in the channel is what takes it down. Only a fourth empty
+// answer reaches the person, and it reads as taking longer, not as an error.
+describe("a turn that ends with nothing to say", () => {
+  function makeStubMgr(prompt: SessionManager["prompt"]): SessionManager {
+    return { prompt } as unknown as SessionManager;
+  }
+  const thinking: Parameters<SessionUpdateHandler>[0] = {
+    sessionUpdate: "agent_thought_chunk",
+    content: { type: "text", text: "Let me think about how to answer this." },
+  } as Parameters<SessionUpdateHandler>[0];
+
+  function harness(answerOn: number | null) {
+    const sent: string[] = [];
+    const calls: { agentId: string; userId: string; text: string; sentBefore: number }[] = [];
+    const d = new Dispatcher({
+      config: makeConfig("x"),
+      sessionManager: makeStubMgr(async (agentId, userId, text, onUpdate) => {
+        calls.push({ agentId, userId, text, sentBefore: sent.length });
+        onUpdate?.(thinking);
+        if (calls.length === answerOn) {
+          onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Ecco il riepilogo." } });
+        }
+        return { stopReason: "end_turn" };
+      }),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    return { d, sent, calls };
+  }
+
+  it("is tried again at once in the same session, with a note telling the assistant to answer, and the answer is all the person gets", async () => {
+    const { d, sent, calls } = harness(2);
+    await expect(d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?")).resolves.toEqual({
+      ok: true,
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ agentId: "doc-qa", userId: "111", text: emptyTurnRetryPrompt(), sentBefore: 0 });
+    expect(sent.join("").replace(/ ⏎$/u, "")).toBe("Ecco il riepilogo.");
+  });
+
+  it("is tried again up to three times, sending nothing to the person until the last try ends", async () => {
+    const { d, sent, calls } = harness(4);
+    await d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?");
+    expect(calls.map((c) => c.text.startsWith("[reply_result: empty]"))).toEqual([false, true, true, true]);
+    expect(calls.map((c) => c.sentBefore)).toEqual([0, 0, 0, 0]);
+    expect(sent.join("")).toBe("Ecco il riepilogo.");
+  });
+
+  it("reaches the person only on a fourth empty answer, worded as taking longer than expected", async () => {
+    const { d, sent, calls } = harness(null);
+    await expect(d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?")).resolves.toEqual({
+      ok: true,
+    });
+    expect(calls).toHaveLength(4);
+    expect(sent).toEqual([pickSlowMessage("mi fai il riepilogo della riunione?")]);
+    expect(sent[0]).not.toBe(pickEmptyMessage("mi fai il riepilogo della riunione?"));
+    expect(sent[0]).toMatch(/più del previsto/);
+    expect(sent[0]).not.toMatch(/errore|riformula/i);
+  });
+
+  it("is not tried again when it failed: a provider error keeps the runtime's own backoff", async () => {
+    const sent: string[] = [];
+    let prompts = 0;
+    const d = new Dispatcher({
+      config: makeConfig("x"),
+      sessionManager: makeStubMgr(async () => {
+        prompts += 1;
+        throw new Error("429 rate limited by the provider");
+      }),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    await d.handleMessage("doc-qa", "111", "ciao, come va?");
+    expect(prompts).toBe(1);
+    expect(sent).toEqual([pickErrorMessage("ciao, come va?")]);
+  });
+
+  it("ends as a failed turn when a try fails, with the error notice and nothing else", async () => {
+    const sent: string[] = [];
+    let prompts = 0;
+    const d = new Dispatcher({
+      config: makeConfig("x"),
+      sessionManager: makeStubMgr(async () => {
+        prompts += 1;
+        if (prompts === 2) throw new Error("opencode child crashed");
+        return { stopReason: "end_turn" };
+      }),
+      turnMeta: new TurnMetaTracker(),
+      resolveSendTarget: () => async (text) => {
+        sent.push(text);
+        return { ok: true };
+      },
+    });
+    const result = await d.handleMessage("doc-qa", "111", "ciao, come va?");
+    expect(result.ok).toBe(false);
+    expect(prompts).toBe(2);
+    expect(sent).toEqual([pickErrorMessage("ciao, come va?")]);
+  });
+
+  it("carries a note the console recognises as the bridge's, one line per paragraph", () => {
+    const note = emptyTurnRetryPrompt();
+    expect(isBridgePrompt(note)).toBe(true);
+    expect(note.split("\n\n").every((p) => p.length > 0 && !p.includes("\n"))).toBe(true);
+    expect(note).toMatch(/answer/i);
+  });
+
+  it("has its notice in every language, without emoji", () => {
+    for (const text of [
+      "ciao come stai grazie",
+      "hello how are you please",
+      "hola cómo estás gracias",
+      "bonjour comment ça va merci",
+    ]) {
+      expect(pickSlowMessage(text)).not.toMatch(/\p{Extended_Pictographic}/u);
+      expect(pickSlowMessage(text).length).toBeGreaterThan(0);
+    }
   });
 });
 

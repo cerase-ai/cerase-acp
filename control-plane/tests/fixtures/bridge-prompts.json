@@ -12,6 +12,11 @@
       "text": "[reply_result: not sent]\n\nYour last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.\n\nThe person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words."
     },
     {
+      "name": "the follow-up after a turn that ended with no text and no tool call",
+      "made_by": "emptyTurnRetryPrompt()",
+      "text": "[reply_result: empty]\n\nYour last turn ended without a message to the person and without a tool call, so the person has received nothing yet.\n\nAnswer the person's last message now: make any tool call the request needs through the tool interface, and end with your answer to the person in plain words."
+    },
+    {
       "name": "the correction after files that did not reach the person",
       "made_by": "attachFailurePrompt(failures)",
       "failures": [

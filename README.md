@@ -156,16 +156,23 @@ allowlist gates `/internal/inject`.
    answer did not come out and to ask again, and the turn reports a failure. A
    block inside a code fence, or followed by prose, is a quotation and is sent
    unchanged. Rule and recorded shapes: `src/tool-call-markup.ts`.
-5. **Notices.** A failed turn, a turn that produced nothing, and a chunk the
-   channel refused twice each get a short message in the person's language: the
-   language of their message, else the last one they wrote in, else the
-   organisation's `locale`, else English.
+5. **A turn that says nothing.** A turn that ends with no text and no tool call
+   is asked again at once on the same session, up to three times, with a prompt
+   that opens `[reply_result: empty]` and tells the assistant to answer the
+   person. Nothing is sent between tries, so the typing indicator stays on. A
+   fourth empty answer tells the person it is taking longer than expected. A
+   failed turn is never asked again: provider errors keep the runtime's own
+   backoff. Rule: `src/empty-turn.ts`.
+6. **Notices.** A failed turn, a turn that ran a tool and wrote nothing, a
+   fourth empty answer, and a chunk the channel refused twice each get a short
+   message in the person's language: the language of their message, else the
+   last one they wrote in, else the organisation's `locale`, else English.
 
 Every channel and every injected message runs through this path
 (`Dispatcher.handleMessage`). The debug CLI does not: it talks to the session
 manager directly.
 
-**Prompts the bridge writes on its own** (the retry above, the correction after
+**Prompts the bridge writes on its own** (the two retries above, the correction after
 a file that did not reach the person, the started-over block) open with one line
 `[<what>_result: <outcome>]`, built by `src/bridge-prompt.ts`. opencode stores
 them as user messages, and the console's chat view hides every user message that

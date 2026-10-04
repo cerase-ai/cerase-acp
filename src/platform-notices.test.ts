@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { pickEmptyMessage, pickErrorMessage, pickNoCreditsMessage, pickRefusalMessage } from "./dispatcher.js";
+import {
+  pickEmptyMessage,
+  pickErrorMessage,
+  pickNoCreditsMessage,
+  pickRefusalMessage,
+  pickSlowMessage,
+} from "./dispatcher.js";
 import {
   attachmentFailedNotice,
   attachmentsUnsupportedNotice,
@@ -138,6 +144,7 @@ describe("one register across every platform notice", () => {
         oversizeUploadNotice([{ name: "f", sizeBytes: 11 * 1024 * 1024 }], 10, l),
         pickErrorMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickEmptyMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
+        pickSlowMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickNoCreditsMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickRefusalMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
       ]),
