@@ -29,8 +29,17 @@ describe("web-adapter (C2-0 null-sink channel)", () => {
     await expect(send("hello from the maintainer")).resolves.toEqual({ ok: true });
   });
 
-  it("does not implement sendFile (attachments unsupported on web)", () => {
+  // The console's Chat links each `[[attach:]]` file of a turn from the
+  // transcript and serves it from the workspace, so on this channel a file is
+  // delivered the moment the reply carries its marker. Without a sendFile the
+  // bridge recorded every attachment as one this channel cannot carry, and the
+  // assistant followed each file it had just made with «the file did not reach
+  // you» under the download link.
+  it("reports an attached file delivered: the console links it from the transcript", async () => {
     const a = createWebAdapter(AGENT, DISPATCHER);
-    expect(a.sendFile).toBeUndefined();
+    expect(a.sendFile).toBeTypeOf("function");
+    await expect(a.sendFile?.("maintainer:org-123", { name: "report.docx", bytes: Buffer.from("x") })).resolves.toEqual(
+      { ok: true },
+    );
   });
 });
