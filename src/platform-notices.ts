@@ -153,6 +153,35 @@ export function restartOutlastedNotice(lang: SupportedLang): string {
 }
 
 /**
+ * Messages the person sent while the bridge was restarting, kept for the next
+ * bridge, which came up too long after them to act on them now. They are not
+ * handled, because an instruction left that long ago may be one the person no
+ * longer wants carried out; sending them again is what works. `count` says
+ * whether the person is told about one message or several.
+ */
+export function keptMessagesExpiredNotice(lang: SupportedLang, count: number): string {
+  return count === 1
+    ? pick(
+        {
+          it: "Mi hai scritto mentre mi stavo riavviando e il riavvio è durato troppo perché me ne occupi adesso. Se ti serve ancora, rimandami il messaggio.",
+          en: "You wrote to me while I was restarting, and the restart took too long for me to take your message on now. If you still need it, send it to me again.",
+          es: "Me escribiste mientras me estaba reiniciando y el reinicio ha durado demasiado para que me ocupe de tu mensaje ahora. Si todavía lo necesitas, vuelve a enviármelo.",
+          fr: "Tu m'as écrit pendant que je redémarrais, et le redémarrage a duré trop longtemps pour que je m'occupe de ton message maintenant. Si tu en as encore besoin, renvoie-le-moi.",
+        },
+        lang,
+      )
+    : pick(
+        {
+          it: "Mi hai scritto mentre mi stavo riavviando e il riavvio è durato troppo perché me ne occupi adesso. Se ti servono ancora, rimandami i messaggi.",
+          en: "You wrote to me while I was restarting, and the restart took too long for me to take your messages on now. If you still need them, send them to me again.",
+          es: "Me escribiste mientras me estaba reiniciando y el reinicio ha durado demasiado para que me ocupe de tus mensajes ahora. Si todavía los necesitas, vuelve a enviármelos.",
+          fr: "Tu m'as écrit pendant que je redémarrais, et le redémarrage a duré trop longtemps pour que je m'occupe de tes messages maintenant. Si tu en as encore besoin, renvoie-les-moi.",
+        },
+        lang,
+      );
+}
+
+/**
  * An answer the assistant was still working on when an update stopped the
  * bridge, after the bridge had waited as long as it waits for one. The request
  * is not sent again on the person's behalf, because the assistant may already

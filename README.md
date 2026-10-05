@@ -309,7 +309,10 @@ one.
   language, that an update interrupted the answer; it is not sent again, because
   the assistant may already have acted on it. The next bridge answers each kept
   message once, as soon as that agent's adapter is up, in the session the person
-  was in and in order per person. The stop logs how many turns it waited for, for
+  was in and in order per person. A message the person sent more than 30 minutes
+  before that (`KEPT_MESSAGE_MAX_AGE_MS`) is not answered, since an instruction
+  that old may be one they no longer want carried out: the person is told, once
+  for all of theirs, that it was not handled and to send it again. The stop logs how many turns it waited for, for
   how long, how many it interrupted and how many messages it kept. **Give the
   container more than 200 s to stop** (`STOP_DRAIN_MS` plus `STOP_NOTICE_MS`,
   20 s), or it is killed before the notices go out; the appliance sets 220 s.

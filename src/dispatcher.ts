@@ -20,6 +20,7 @@ import type { PendingMessages } from "./pending-messages.js";
 import { noticeText, type PlatformNotice } from "./platform-notice.js";
 import {
   deliveryFailureNotice,
+  keptMessagesExpiredNotice,
   restartOutlastedNotice,
   startedOverNotice,
   updateInterruptedNotice,
@@ -502,6 +503,21 @@ export class Dispatcher {
     const last = this.deps.turnMeta.languageFor(agentId, userId);
     if (last !== "unknown") return last;
     return this.deps.config.locale ?? "unknown";
+  }
+
+  /**
+   * Tell a person that the messages kept for them across a restart are too
+   * old to be answered now, in the assistant's voice and the language they
+   * wrote them in. No turn runs: the assistant never sees them.
+   */
+  tellKeptMessagesExpired(agentId: string, userId: string, texts: string[]): Promise<DeliveryResult> {
+    return this.safeSend(
+      this.deps.resolveSendTarget(agentId, userId),
+      keptMessagesExpiredNotice(this.noticeLang(agentId, userId, texts.join("\n")), texts.length),
+      agentId,
+      userId,
+      "kept-messages-expired notice",
+    );
   }
 
   async sendSystemMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {

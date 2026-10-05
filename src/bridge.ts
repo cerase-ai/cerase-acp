@@ -520,7 +520,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // The messages the previous bridge kept while it stopped are answered by
   // this one, an agent's as soon as its adapter is up, because the answer goes
   // out through it: at boot, on a reload, and when a retry brings it back. A
-  // message for an agent that never comes up stays in the file.
+  // message for an agent that never comes up stays in the file, and one older
+  // than the age limit by then is not answered: its person is told instead.
   const answerKept = (agentId: string): void => {
     void replayPending(
       pendingMessages,
@@ -529,6 +530,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // that comes before it reaches the assistant, it keeps its place.
       (m) => productionDispatcher.handleMessage(m.agentId, m.userId, m.text, Date.parse(m.receivedAt)),
       () => productionDispatcher.isStopping(),
+      (userId, expired) =>
+        productionDispatcher.tellKeptMessagesExpired(
+          agentId,
+          userId,
+          expired.map((m) => m.text),
+        ),
     ).catch((err) => {
       logger.error({ err, agentId }, "answering the kept messages failed");
     });

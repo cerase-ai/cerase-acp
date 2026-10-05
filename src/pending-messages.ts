@@ -9,6 +9,14 @@ const logger = makeLogger("cerase-acp.pending-messages");
 export const PENDING_MESSAGES_FILE = "pending-messages.json";
 
 /**
+ * How old a kept message may be, from when the person sent it, for the next
+ * bridge to answer it. A release recreates the bridge within minutes; a
+ * message older than this was left while the bridge was down for longer, and
+ * acting on it now could carry out an instruction the person no longer wants.
+ */
+export const KEPT_MESSAGE_MAX_AGE_MS = 30 * 60_000;
+
+/**
  * A message that reached the bridge while it was stopping, as the dispatcher
  * received it: the agent, the person, and the text the adapter built, which
  * already names any file the person attached and the adapter stored in the
@@ -134,7 +142,8 @@ function isPendingMessage(m: unknown): m is PendingMessage {
 }
 
 /**
- * Answer the messages kept for one agent, each at most once.
+ * Answer the messages kept for one agent, each at most once, and only those
+ * the person sent less than KEPT_MESSAGE_MAX_AGE_MS before this call.
  *
  * A message is taken out of the file before it is dispatched, never after: a
  * bridge that dies between the two has lost that message, and one that took it
@@ -147,6 +156,11 @@ function isPendingMessage(m: unknown): m is PendingMessage {
  * where the messages kept by that stop join it in order. Different people do
  * not wait for each other.
  *
+ * An older message is taken out of the file the same way and not dispatched,
+ * and `notAnswered` tells its person, once for all of theirs, before any
+ * recent message of theirs is answered. One that cannot be taken out of the
+ * file is neither answered nor told about, so no bridge tells about it twice.
+ *
  * Resolves to how many messages were dispatched.
  */
 export async function replayPending(
@@ -154,6 +168,7 @@ export async function replayPending(
   agentId: string,
   dispatch: (message: PendingMessage) => Promise<DeliveryResult>,
   stopping: () => boolean,
+  notAnswered: (userId: string, messages: PendingMessage[]) => Promise<unknown>,
 ): Promise<number> {
   const mine = store.list().filter((m) => m.agentId === agentId);
   if (mine.length === 0) return 0;
@@ -168,10 +183,29 @@ export async function replayPending(
     "answering the messages kept while the previous bridge stopped",
   );
   let dispatched = 0;
+  const oldest = Date.now() - KEPT_MESSAGE_MAX_AGE_MS;
+  const tell = async (userId: string, expired: PendingMessage[]) => {
+    if (expired.length === 0) return;
+    logger.warn(
+      { agentId, userId, messages: expired.length, receivedAt: expired.map((m) => m.receivedAt) },
+      "kept messages are older than the age limit — not answered, telling the person",
+    );
+    try {
+      await notAnswered(userId, expired);
+    } catch (err) {
+      logger.error({ agentId, userId, err }, "the person could not be told their kept messages were not answered");
+    }
+  };
   await Promise.all(
-    [...byPerson.values()].map(async (queue) => {
+    [...byPerson.entries()].map(async ([userId, queue]) => {
+      const expired: PendingMessage[] = [];
       for (const m of queue) {
-        if (stopping()) return;
+        if (stopping()) break;
+        if (Date.parse(m.receivedAt) < oldest) {
+          if (store.take(m.id)) expired.push(m);
+          continue;
+        }
+        await tell(userId, expired.splice(0));
         if (!store.take(m.id)) continue;
         dispatched += 1;
         logger.info(
@@ -190,6 +224,7 @@ export async function replayPending(
           logger.error({ agentId, userId: m.userId, err }, "a kept message could not be dispatched");
         }
       }
+      await tell(userId, expired);
     }),
   );
   return dispatched;

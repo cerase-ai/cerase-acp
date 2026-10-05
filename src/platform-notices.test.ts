@@ -13,6 +13,7 @@ import {
   deliveryFailureNotice,
   directMessagesOnlyNotice,
   displayFileName,
+  keptMessagesExpiredNotice,
   oversizeUploadNotice,
 } from "./platform-notices.js";
 import { TurnMetaTracker } from "./turn-meta.js";
@@ -125,6 +126,23 @@ describe("the notices that used to be Italian-only", () => {
   });
 });
 
+describe("the note on messages kept across a restart for too long", () => {
+  it("says they were not handled and asks for them again, for one message and for several, in every language", () => {
+    for (const lang of ["it", "en", "es", "fr"] as const) {
+      const one = keptMessagesExpiredNotice(lang, 1);
+      const several = keptMessagesExpiredNotice(lang, 3);
+      expect(one).not.toBe(several);
+      for (const text of [one, several]) {
+        expect(text).not.toMatch(/\p{Extended_Pictographic}/u);
+        expect(text.trim().startsWith("(")).toBe(false);
+      }
+    }
+    expect(keptMessagesExpiredNotice("en", 1)).toContain("send it to me again");
+    expect(keptMessagesExpiredNotice("en", 2)).toContain("send them to me again");
+    expect(keptMessagesExpiredNotice("unknown", 1)).toBe(keptMessagesExpiredNotice("it", 1));
+  });
+});
+
 describe("the direct-messages-only note", () => {
   it("is in the language of the message it answers, with Italian for an undetermined one", () => {
     expect(directMessagesOnlyNotice("en")).toBe("I only answer in direct messages: write to me there.");
@@ -141,6 +159,8 @@ describe("one register across every platform notice", () => {
         attachmentsUnsupportedNotice("f", l),
         deliveryFailureNotice(l),
         directMessagesOnlyNotice(l),
+        keptMessagesExpiredNotice(l, 1),
+        keptMessagesExpiredNotice(l, 2),
         oversizeUploadNotice([{ name: "f", sizeBytes: 11 * 1024 * 1024 }], 10, l),
         pickErrorMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),
         pickEmptyMessage(l === "it" ? "ciao come stai grazie" : "hello how are you please"),

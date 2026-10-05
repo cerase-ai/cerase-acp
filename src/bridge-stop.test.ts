@@ -18,8 +18,14 @@ import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { Dispatcher, pickErrorMessage } from "./dispatcher.js";
-import { PENDING_MESSAGES_FILE, type PendingMessage, PendingMessages, replayPending } from "./pending-messages.js";
-import { restartOutlastedNotice, updateInterruptedNotice } from "./platform-notices.js";
+import {
+  KEPT_MESSAGE_MAX_AGE_MS,
+  PENDING_MESSAGES_FILE,
+  type PendingMessage,
+  PendingMessages,
+  replayPending,
+} from "./pending-messages.js";
+import { keptMessagesExpiredNotice, restartOutlastedNotice, updateInterruptedNotice } from "./platform-notices.js";
 import { SessionManager } from "./session-manager.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
@@ -257,10 +263,14 @@ describe("a turn still running when the stop stops waiting", () => {
 });
 
 describe("the messages a stopping bridge keeps", () => {
-  const message = (store: PendingMessages, userId: string, text: string): PendingMessage => {
-    const m = store.keep({ agentId: "doc-qa", userId, text, receivedAt: Date.now() });
+  const message = (store: PendingMessages, userId: string, text: string, receivedAt = Date.now()): PendingMessage => {
+    const m = store.keep({ agentId: "doc-qa", userId, text, receivedAt });
     if (!m) throw new Error("not kept");
     return m;
+  };
+  // None of these is old enough to be told about.
+  const noneExpired = async () => {
+    throw new Error("no kept message here is past the age limit");
   };
   const answered = () => {
     const calls: PendingMessage[] = [];
@@ -279,14 +289,14 @@ describe("the messages a stopping bridge keeps", () => {
     const { calls, dispatch } = answered();
 
     const counts = await Promise.all([
-      replayPending(store, "doc-qa", dispatch, () => false),
-      replayPending(new PendingMessages(dir), "doc-qa", dispatch, () => false),
+      replayPending(store, "doc-qa", dispatch, () => false, noneExpired),
+      replayPending(new PendingMessages(dir), "doc-qa", dispatch, () => false, noneExpired),
     ]);
 
     expect(counts[0]! + counts[1]!).toBe(3);
     expect(calls.map((m) => m.id).sort()).toEqual([...ids].sort());
     expect(store.list()).toEqual([]);
-    expect(await replayPending(store, "doc-qa", dispatch, () => false)).toBe(0);
+    expect(await replayPending(store, "doc-qa", dispatch, () => false, noneExpired)).toBe(0);
     expect(calls).toHaveLength(3);
   });
 
@@ -302,6 +312,7 @@ describe("the messages a stopping bridge keeps", () => {
         return { ok: true };
       },
       () => false,
+      noneExpired,
     );
     expect(onDiskDuringDispatch).toEqual([]);
   });
@@ -322,6 +333,7 @@ describe("the messages a stopping bridge keeps", () => {
         return { ok: true };
       },
       () => false,
+      noneExpired,
     );
     expect(events.indexOf(`start ${SECOND}`)).toBeGreaterThan(events.indexOf(`end ${MESSAGE}`));
     // Another person does not wait for the first one's turn.
@@ -343,6 +355,7 @@ describe("the messages a stopping bridge keeps", () => {
         return { ok: true };
       },
       () => stopping,
+      noneExpired,
     );
     expect(calls.map((m) => m.text)).toEqual([MESSAGE]);
     expect(store.list().map((m) => m.text)).toEqual([SECOND]);
@@ -353,7 +366,7 @@ describe("the messages a stopping bridge keeps", () => {
     message(store, "111", MESSAGE);
     chmodSync(dir, 0o500);
     const { calls, dispatch } = answered();
-    expect(await replayPending(store, "doc-qa", dispatch, () => false)).toBe(0);
+    expect(await replayPending(store, "doc-qa", dispatch, () => false, noneExpired)).toBe(0);
     expect(calls).toEqual([]);
     expect(store.list().map((m) => m.text)).toEqual([MESSAGE]);
   });
@@ -362,7 +375,7 @@ describe("the messages a stopping bridge keeps", () => {
     const store = new PendingMessages(dir);
     store.keep({ agentId: "other", userId: "111", text: MESSAGE, receivedAt: Date.now() });
     const { calls, dispatch } = answered();
-    expect(await replayPending(store, "doc-qa", dispatch, () => false)).toBe(0);
+    expect(await replayPending(store, "doc-qa", dispatch, () => false, noneExpired)).toBe(0);
     expect(calls).toEqual([]);
     expect(store.list()).toHaveLength(1);
   });
@@ -378,6 +391,60 @@ describe("the messages a stopping bridge keeps", () => {
     expect(store.list()).toEqual([]);
     message(store, "111", SECOND);
     expect(store.list().map((m) => m.text)).toEqual([SECOND]);
+  });
+
+  // A message kept across a restart is answered only while it is recent: an
+  // instruction left while the box was down for hours can be one the person
+  // no longer wants carried out. An older one is taken out of the file without
+  // reaching the assistant, and its person is told, once for all of theirs.
+  it("are answered only within the age limit, and the person is told once about the older ones", async () => {
+    const store = new PendingMessages(dir);
+    const old = Date.now() - KEPT_MESSAGE_MAX_AGE_MS - 60_000;
+    message(store, "111", MESSAGE, old);
+    message(store, "111", SECOND, old + 1_000);
+    message(store, "111", THIRD, Date.now() - KEPT_MESSAGE_MAX_AGE_MS + 60_000);
+    message(store, "222", MESSAGE, old);
+    const events: string[] = [];
+    const count = await replayPending(
+      store,
+      "doc-qa",
+      async (m) => {
+        events.push(`answer ${m.userId} ${m.text}`);
+        return { ok: true };
+      },
+      () => false,
+      async (userId, expired) => {
+        events.push(`tell ${userId} ${expired.map((m) => m.text).join(" | ")}`);
+      },
+    );
+
+    expect(count).toBe(1);
+    expect(events.filter((e) => e.startsWith("answer"))).toEqual([`answer 111 ${THIRD}`]);
+    // Told before the recent message is answered, so the chat reads in order.
+    expect(events.filter((e) => e.includes(" 111 "))).toEqual([
+      `tell 111 ${MESSAGE} | ${SECOND}`,
+      `answer 111 ${THIRD}`,
+    ]);
+    expect(events).toContain(`tell 222 ${MESSAGE}`);
+    expect(store.list()).toEqual([]);
+  });
+
+  it("are not told about twice when an old one cannot be taken out of the file", async () => {
+    const store = new PendingMessages(dir);
+    message(store, "111", MESSAGE, Date.now() - KEPT_MESSAGE_MAX_AGE_MS - 60_000);
+    chmodSync(dir, 0o500);
+    const told: string[] = [];
+    await replayPending(
+      store,
+      "doc-qa",
+      async () => ({ ok: true }),
+      () => false,
+      async (userId) => {
+        told.push(userId);
+      },
+    );
+    chmodSync(dir, 0o700);
+    if (process.getuid?.() !== 0) expect(told).toEqual([]);
   });
 
   it("are not kept without a state directory", () => {
@@ -477,6 +544,21 @@ describe("a restart of the whole bridge", () => {
     await new Promise((r) => setTimeout(r, 500));
     expect(next.chat()).toBe("");
     expect(timesSent(MESSAGE)).toBe(1);
+  });
+
+  it("does not answer a kept message older than the age limit, and tells the person it was not handled", async () => {
+    new PendingMessages(dir).keep({
+      agentId: "doc-qa",
+      userId: "111",
+      text: MESSAGE,
+      receivedAt: Date.now() - KEPT_MESSAGE_MAX_AGE_MS - 60_000,
+    });
+
+    const next = await start([], 10_000);
+
+    await untilChild(() => expect(next.chat()).toBe(keptMessagesExpiredNotice("it", 1)));
+    expect(timesSent(MESSAGE)).toBe(0);
+    expect(new PendingMessages(dir).list()).toEqual([]);
   });
 
   it("stops once when it is asked twice", async () => {
