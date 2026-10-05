@@ -1,24 +1,23 @@
-// Telegram chat adapter.
+// Telegram chat adapter: one bot per agent, private chats only, through
+// telegraf over long polling, so the appliance exposes no webhook.
 //
-// Minimal DM-only adapter implementing the ChatAdapter contract.
-// Uses telegraf (Node Telegram Bot API client, MIT) — chosen over
-// raw HTTP polling because it handles long-polling reconnect + file
-// download lifecycle out of the box, and because OpenACP's reference
-// telegram adapter (used as a READING reference, not vendored) is
-// also built on telegraf.
+// start() resolves once Telegram has accepted the bot's token and rejects when
+// Telegram refuses it, so the bridge reports the agent down and retries it.
+// While a turn runs the typing action is refreshed every 4 s. The files a
+// person sends (documents, photos, voice, audio and video) are fetched through
+// getFileLink into the slot's workspace. The adapter has no sendFile, so a file
+// the assistant attaches is not sent and the bridge tells the person.
 //
 // A platform notice is a quoted block under a bold heading, in Telegram's HTML,
 // with its link in an inline URL button (platform-notice.ts). Telegram refuses
 // a button whose address it will not open, a host it cannot resolve for one,
 // and the notice is then sent again with the address spelled out.
 //
-// Out of scope per the architecture brief:
-//   - slash commands (Cerase never surfaces a /command UI to end users)
-//   - inline keyboards beyond the notice's link button
-//   - edit-in-place streaming chunks
+// Not handled: group chats and channels, slash commands, buttons other than
+// the notice's link, and editing a message while the answer streams.
 //
-// Allowlist enforcement is the dispatcher's responsibility (same as
-// Discord); this adapter just hands the user id and text to it.
+// Allowlist enforcement is the dispatcher's responsibility, as on every
+// channel; this adapter hands it the user id and the text.
 
 import type { Telegraf } from "telegraf";
 import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
@@ -58,7 +57,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
   }
 
   // Lazy-loaded SDK client. Real Telegraf type — the default Context
-  // generic is fine for the DM-only handlers below (M-AUDIT-acp-2).
+  // generic is fine for the DM-only handlers below.
   let bot: Telegraf | undefined;
   let stopped = false;
 
@@ -81,12 +80,9 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           const userId = String(ctx.from.id);
           const text = ctx.message?.text ?? "";
           if (!text) return;
-          // Telegram shows "typing…" ~5s per sendChatAction —
-          // keep it alive for the duration of the turn, stopping on
-          // every exit path. Slack/Workspace Chat have NO bot-typing
-          // API for non-Socket-Mode... (Slack: typing events are
-          // RTM-only, deprecated; Workspace Chat: no API) — documented
-          // platform limit, no equivalent there.
+          // Telegram shows "typing…" ~5s per sendChatAction — keep it
+          // alive for the duration of the turn, stopping on every exit
+          // path.
           const chatId = ctx.chat.id;
           const stopTyping = startTypingKeepalive(
             { sendTyping: () => bot!.telegram.sendChatAction(chatId, "typing") },
@@ -104,7 +100,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
         }
       });
 
-      // C4-4 — inbound attachments. Telegram delivers media as separate
+      // Inbound attachments. Telegram delivers media as separate
       // update types (document/photo/voice/audio/video), each carrying a
       // file_id we resolve to a download URL via getFileLink, then run through
       // the shared ingest + the [Uploaded files: …] marker the
@@ -235,8 +231,8 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           }
           // telegraf's Telegram API client lives at bot.telegram. The
           // sendMessage method takes a chat_id (string for our purposes)
-          // and the text. No parse_mode → Telegram renders plain text,
-          // which matches the Discord adapter's no-formatting contract.
+          // and the text. No parse_mode, so Telegram shows the text as
+          // written, Markdown marks included.
           await bot.telegram.sendMessage(userId, chunk);
           return { ok: true };
         } catch (err) {

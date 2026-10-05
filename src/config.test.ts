@@ -290,7 +290,7 @@ session:
     expect(() => loadConfig(path, {})).toThrow(/duplicate|unique/i);
   });
 
-  // CHANNEL-1 schema cases (OPT-21 D3). Verifies the per-channel
+  // Channel schema cases. Verifies the per-channel
   // superRefine matrix in config.ts: discord/telegram need bot_token,
   // slack additionally needs slack_app_token; workspace_chat's own app is checked when it starts
   // per agent. Legacy YAMLs without `channel` default to 'discord' for

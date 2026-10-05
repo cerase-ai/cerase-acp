@@ -1,4 +1,4 @@
-// Discord "is typing…" keepalive (M18).
+// "Is typing…" keepalive, used by the Discord and Telegram adapters.
 //
 // Discord's typing indicator auto-stops ~10s after the last
 // `channel.sendTyping()` and immediately when WE send a message in

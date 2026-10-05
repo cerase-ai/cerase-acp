@@ -70,7 +70,7 @@ describe("test-injection server", () => {
     expect(inject.status).toBe(202);
     const reply = await fetchJson(`${url}/_test/last-reply?agent_id=doc-qa&user_id=111`);
     expect(reply.status).toBe(200);
-    // M-ACP-DISCLOSURE-OFF: no disclaimer precedes the reply.
+    // No disclaimer precedes the reply.
     expect((reply.body as { text: string }).text).toContain("salve, è un test");
     expect((reply.body as { text: string }).text).not.toMatch(/assistente AI|AI assistant/);
   });

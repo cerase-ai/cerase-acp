@@ -1,7 +1,8 @@
 // runBridge — wires config → session-manager + turn-meta + per-agent
-// adapter table + dispatcher, and (optionally) the BRIDGE_E2E_TEST
-// HTTP server. Extracted from index.ts so tests can drive it with a
-// fake adapter factory (no real discord.js logins).
+// adapter table + dispatcher + adapter retry supervisor + internal server +
+// config reloader, and (optionally) the BRIDGE_E2E_TEST HTTP server. Kept
+// apart from index.ts so tests can drive it with a fake adapter factory (no
+// real channel logins).
 //
 // Test-mode resilience contract:
 //   - `bridgeE2eTest: true` → start the test-injection server FIRST,
@@ -55,7 +56,7 @@ const logger = makeLogger("cerase-acp.bridge");
 export interface RunBridgeOptions {
   config: BridgeConfig;
   bridgeE2eTest: boolean;
-  /** Port for the test-injection server (only when bridgeE2eTest=true). 7474 in prod, 0 in tests. */
+  /** Port for the test-injection server (only when bridgeE2eTest=true). Defaults to 7474; tests pass 0. */
   testInjectionPort?: number;
   /**
    * Adapter factory for dependency injection in tests. Defaults to the
@@ -67,11 +68,10 @@ export interface RunBridgeOptions {
    */
   createAdapter?: (agent: AgentConfig, dispatcher: Dispatcher) => Promise<ChatAdapter>;
   /**
-   * Path of the agents.yaml the bridge should watch for live updates
-   * (M-auto-reload v0.2). When set, runBridge instantiates a
-   * ConfigReloader; on each successful reload the diff is applied to
-   * the live adapters table + SessionManager. Unset → no watcher
-   * (legacy behaviour, used by the test suite and the CLI prompt mode).
+   * Path of the agents.yaml the bridge should watch for live updates. When
+   * set, runBridge instantiates a ConfigReloader; on each successful reload
+   * the diff is applied to the live adapters table + SessionManager.
+   * Unset → no watcher. index.ts always sets it.
    */
   configPath?: string;
 }
@@ -122,8 +122,8 @@ export interface ApplyConfigDiffDeps {
  * Bounded-retry adapter creation: one agent's bad token / transient
  * platform error must not abort the whole reload — the remaining agents
  * must still be processed. One retry, then give up on THAT agent and
- * continue; the failure is logged loudly (a missing adapter surfaces via
- * the reload-status path).
+ * continue; the failure is logged loudly, and the agent is absent from
+ * /internal/status until a later reload creates its adapter.
  */
 async function createAdapterWithRetry(deps: ApplyConfigDiffDeps, agent: AgentConfig): Promise<ChatAdapter | null> {
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -217,12 +217,10 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
         deps.sessionManager.replaceAgent(fresh);
 
         const adapter = await createAdapterWithRetry(deps, fresh);
-        if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest
+        if (!adapter) continue; // skip this agent, keep reloading the rest
         deps.adapters.set(mod.agentId, adapter);
         // The failure is reported by whoever owns the start: the bridge's
         // version logs it and decides between a retry and a terminal record.
-        // The line that used to be here said the agent would not receive DMs,
-        // which a scheduled retry makes untrue.
         if (await startAdapter(adapter)) {
           logger.info({ agentId: mod.agentId, classification: mod.classification }, "auto-reload: agent respawned");
         }
@@ -235,7 +233,7 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
   for (const agent of diff.added) {
     deps.sessionManager.addAgent(agent);
     const adapter = await createAdapterWithRetry(deps, agent);
-    if (!adapter) continue; // M-ACP-2: skip this agent, keep reloading the rest
+    if (!adapter) continue; // skip this agent, keep reloading the rest
     deps.adapters.set(agent.id, adapter);
     if (await startAdapter(adapter)) {
       logger.info({ agentId: agent.id }, "auto-reload: new agent attached");
@@ -273,27 +271,26 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   const attachOutcomes = new AttachOutcomeTracker();
 
   // Two dispatchers share SessionManager + TurnMetaTracker but differ
-  // in send-target: the discord one routes replies back to a DM
-  // channel; the test-injection one routes replies to the test
-  // server's recordReply table. Without this split, /_test/inject
-  // requests would try to deliver replies through a Discord client
-  // that's not logged in (intentionally, in test mode) — failures get
-  // swallowed by the send-queue's error handler and the test sees
-  // 404 on /_test/last-reply.
+  // in send-target: the production one routes replies through the agent's
+  // channel adapter; the test-injection one records them in the test
+  // server's recordReply table, so /_test/last-reply answers whether or not
+  // the agent's channel has a working login.
 
   // Build the adapter table BEFORE the production dispatcher so
   // resolveSendTarget can look up the right adapter. Map is shared by
   // both dispatchers (production + test-mode) below.
   const adapters = new Map<string, ChatAdapter>();
 
-  // HITL-3/4 — control-plane internal channel for fetching the
-  // server-minted approval link to inject via {{APPROVAL_LINK}}.
+  // The control-plane's internal API: credit check, turn context, approval
+  // link and rolling summaries.
   const controlPlaneUrl = process.env.CERASE_CONTROL_PLANE_URL ?? "http://cerase-control-plane:8000";
   // Two distinct secrets:
   //  - controlPlaneSecret: the CONTROL-PLANE internal bearer (same the
   //    gateway uses) — to CALL control-plane internal endpoints.
-  //  - acpInjectSecret: guards acp's OWN /internal/inject endpoint;
-  //    must match the control-plane's cerase.acp.internal_secret.
+  //  - acpInjectSecret: the bearer the bridge's own internal endpoints
+  //    (/internal/inject, /internal/status) require; unset, the internal
+  //    server does not start. Must match the control-plane's
+  //    cerase.acp.internal_secret.
   const controlPlaneSecret = process.env.CERASE_INTERNAL_SECRET ?? "";
   const acpInjectSecret = process.env.CERASE_ACP_INTERNAL_SECRET ?? "";
 
@@ -320,7 +317,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // Proactive out-of-credits gate. Wired only when the
     // control-plane internal bearer is configured (same secret as
     // session-summary; without it there's nothing to authenticate with).
-    // Unset → the dispatcher's back-compat path proceeds as before.
+    // Unset → turns run without the check.
     // checkTenantCredit throws on any non-402/200 or network error, and the
     // dispatcher fails open on a throw — a control-plane glitch must not block
     // chat.
@@ -375,9 +372,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         throw new Error(`no chat adapter registered for agent "${agentId}"`);
       }
       const inner = adapter.makeSendTarget(userId);
-      // HITL-3: substitute {{APPROVAL_LINK}} in outgoing chunks with the
-      // signed link (fetched over the internal channel — never given to
-      // the agent). Only acts on chunks carrying the placeholder, so the
+      // Substitute {{APPROVAL_LINK}} in outgoing chunks with the signed link
+      // (fetched over the internal channel — never given to the agent). Only acts on chunks carrying the placeholder, so the
       // common path pays no extra HTTP.
       // The wrapper forwards the inner adapter's DeliveryResult so a
       // swallowed send failure can surface. A chunk that was only files
@@ -386,7 +382,6 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // `withheld`, so the dispatcher knows the person received nothing.
       return async (chunk: string): Promise<DeliveryResult> => {
         let text = chunk;
-        // HITL-3: approval link substitution (unchanged).
         if (controlPlaneSecret && needsApprovalLink(text)) {
           try {
             const link = await fetchPendingApprovalLink(agentId, {
@@ -401,7 +396,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             text = applyApprovalLinkFallback(text);
           }
         }
-        // ATTACH-1: upload workspace files referenced by [[attach: <path>]].
+        // Upload workspace files referenced by [[attach: <path>]].
         // The agent emits the marker; we read the file from its slot
         // container's workspace and send it as a channel attachment, never
         // showing the raw marker. Container name follows the cerase-<id>
@@ -424,14 +419,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           const containerName = `cerase-${agentId}`;
           // The upload happens after the model has finished writing, so it
           // cannot report the outcome itself -- the assistant's baseline is
-          // explicit that it must not claim delivery. That makes THIS the only
-          // place the reader can learn an attachment did not arrive, and a
-          // silent log left them with a reply promising a file and no file.
-          //
-          // Every failure below is also recorded against the turn, which is
-          // what stops the same turn from closing as a success: a notice in
-          // the chat is read by the person, and until it was recorded nothing
-          // else in the process knew the file had not gone.
+          // explicit that it must not claim delivery. The person learns here
+          // that an attachment did not arrive. Every failure below is also
+          // recorded against the turn, which is what stops the same turn from
+          // closing as a success.
           const lang = turnMeta.languageFor(agentId, userId);
           const relPaths = parsed.attachments;
           deliverAttachments = async () => {
@@ -488,9 +479,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
 
           return withheldWhole;
         }
-        // Deterministic engine-identity redaction, the last step before the
-        // reply leaves for any channel — never reveal we run on OpenCode,
-        // even if the model ignored the prompt-level rule.
+        // Deterministic engine-identity redaction — never reveal we run on
+        // OpenCode, even if the model ignored the prompt-level rule.
         text = redactEngineIdentifiers(text);
         // A tool call the model spelled out as text (DSML) must never reach
         // the chat. Strip it; if that was the whole reply, withhold it (it is
@@ -543,8 +533,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
 
   // agentIds whose most recent start() rejected.
   // Tracked so getAgentStatus reports them ready:false (not null) even for
-  // adapters that expose no ready() signal of their own, and so the
-  // self-heal supervisor knows which adapters to retry. Cleared on a
+  // adapters that expose no ready() signal of their own. Cleared on a
   // successful (re)start.
   const startFailures = new Set<string>();
 
@@ -610,11 +599,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   /**
    * Start one adapter, and answer its failure. The answer is two decisions —
    * what /internal/status reports, and whether a retry is worth arming — and
-   * both belong to whichever path the adapter came through, boot or config
-   * reload. They came through separate code, so the reload path reported a
-   * failure and then dropped it: no retry, and a token corrected while the
-   * provider was having a bad minute stayed down until someone restarted the
-   * container. This is that code, once, for both callers.
+   * the boot loop and every config reload get both from this one function.
    *
    * Never throws: a caller loops over adapters, and one failure must not stop
    * it starting the rest. Returns whether the adapter came up.
@@ -681,12 +666,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       ...failureBlockFor(id),
       // An adapter whose start() failed is concretely not-ready — report
       // `false`, never `null`, so the control-plane shows it Disconnesso
-      // rather than "stato sconosciuto". Otherwise this was `: true` — a
-      // hard-coded green for every adapter that doesn't implement ready()
-      // (telegram/slack/workspace), so a gateway drop on those channels
-      // showed as healthy. Report `null` (unknown) instead; only adapters
-      // with a real readiness signal (discord.js client.isReady()) report a
-      // concrete boolean.
+      // rather than "stato sconosciuto". An adapter with no readiness signal
+      // of its own (Telegram, Slack, web) reports `null` (unknown); Discord
+      // (client.isReady() and the reachability probe) and Workspace Chat
+      // (route registered, listener bound) report a concrete boolean.
       ready: startFailures.has(id) ? false : adapter.ready ? adapter.ready() : null,
       // How long since the channel provider actually answered this adapter.
       // `ready` above already folds it in, so this is the reader's way of
@@ -696,17 +679,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       lastContactAgeMs: adapter.reachability ? adapter.reachability().ageMs : null,
       // Turns outstanding for this assistant right now. The control-plane asks
       // it before it replaces an AGENTS.md, because that write restarts the
-      // slot; until it could ask, the only answer available on that side was
-      // `conversations.last_msg_ts`, which a cron copies once a minute and
-      // which therefore reports a finished turn as running for as long as the
-      // window it is compared against.
+      // slot.
       turnsInFlight: sessionManager.turnsInFlight(id),
     }));
 
-  // Productionised injection endpoint the control-plane scheduled-message
-  // dispatcher POSTs to (shared-secret). Started when the internal secret is
-  // configured; the read-only GET /internal/status liveness probe runs on
-  // the same server.
+  // The internal server: POST /internal/inject, which the control-plane
+  // calls with scheduled messages, console messages and platform notices
+  // (shared-secret), the read-only GET /internal/status liveness probe and
+  // GET /healthz. Started when the internal secret is configured.
   let internalServer: InternalServer | undefined;
   if (acpInjectSecret) {
     internalServer = await startInternalServer({
@@ -759,10 +739,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // (e.g. a bad Discord token → TokenInvalid) is logged + recorded in
   // `startFailures` but does not tear the bridge down: the internal-server,
   // the panel-only `web` maintainer transport, and the other healthy
-  // adapters all stay up. This holds in both modes — the only historical
-  // difference (test-mode swallowed, production fanned-out-and-rethrew) was
-  // exactly the crash-loop bug that took the web/maintainer chat down
-  // whenever the Discord token was invalid.
+  // adapters all stay up. This holds in both modes.
   //
   // What happens when EVERY adapter failed is decided after the loop; see the
   // total-failure block below. In test-mode nothing is ever thrown (the
@@ -815,7 +792,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     noTransport ? "cerase-acp bridge up with no working chat transport" : "cerase-acp bridge ready",
   );
 
-  // M-auto-reload v0.2: watch agents.yaml for live updates.
+  // Watch agents.yaml for live updates.
   // Snapshot the current config so the next reload can compute a diff
   // against a stable reference (the sessionManager mutates the shared
   // `config` object in place once we apply each diff).
@@ -882,8 +859,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     drainEnv && Number.isFinite(Number(drainEnv)) && Number(drainEnv) >= 0 ? Number(drainEnv) : STOP_DRAIN_MS;
 
   // Order: stop reloader + self-heal supervisor → let the turns in flight
-  // end → let a reload being applied finish → stop the adapters → close test
-  // server → kill ACP children. Reverse of startup so dependents go first;
+  // end → let a reload being applied finish → stop the adapters → close the
+  // test and internal servers → kill ACP children. Reverse of startup so dependents go first;
   // stopping the supervisor first prevents a retry racing the teardown, and
   // waiting for the reload keeps it from starting an adapter after the
   // adapters were stopped. The adapters and the internal server stay up while
@@ -918,10 +895,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
 }
 
 /**
- * Deep clone of BridgeConfig so the auto-reload's "previous snapshot"
- * doesn't share array references with the shared config (which
- * SessionManager mutates in place via updateAllowlist / addAgent /
- * removeAgent).
+ * Copy of the agents and session block of a BridgeConfig, so the
+ * auto-reload's "previous snapshot" doesn't share array references with the
+ * shared config (which SessionManager mutates in place via updateAllowlist /
+ * addAgent / removeAgent). `locale` and `max_file_mb` are left out:
+ * diffConfigs compares agents only.
  */
 function cloneConfig(c: BridgeConfig): BridgeConfig {
   return {

@@ -1,7 +1,7 @@
-// Hot-ops tests for SessionManager (M-auto-reload v0.2):
-// addAgent, removeAgent, killAgentSessions, updateAllowlist.
+// Hot-ops tests for SessionManager: addAgent, removeAgent,
+// killAgentSessions, updateAllowlist.
 //
-// These verify the surface the ConfigReloader will call on every
+// These verify the surface the bridge's reload calls on every
 // agents.yaml change. The shared BridgeConfig is mutated in place so
 // downstream consumers (Dispatcher / allowlist.isAllowed) see the
 // updated state without needing a config-passing refactor.

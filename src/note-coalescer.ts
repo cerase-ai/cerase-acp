@@ -43,7 +43,7 @@ export interface NoteTurns {
   /**
    * Settles when every turn of the conversation that is running now has
    * ended; null when none is. A dispatcher that cannot answer has every note
-   * run at once, as before notes were joined.
+   * run at once.
    */
   turnsRunning?(agentId: string, userId: string): Promise<void> | null;
 }

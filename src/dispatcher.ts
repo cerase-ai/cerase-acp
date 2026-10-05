@@ -1,8 +1,9 @@
 // Core message-handling pipeline. Receives (agentId, userId, text) from
-// whichever ingress is active (Discord adapter, test-injection HTTP
-// endpoint) and orchestrates allowlist → session-manager → stream-
-// buffer → send-queue. Knows nothing about Discord — that's what
-// `resolveSendTarget` is for.
+// every ingress (each channel adapter, /internal/inject, the test-injection
+// endpoint, the replay of messages kept across a stop) and orchestrates
+// allowlist → credit check → turn_meta → session-manager → stream-buffer →
+// send-queue. Knows no channel: `resolveSendTarget` and
+// `resolveNoticeTarget` deliver.
 
 import { isAllowed } from "./allowlist.js";
 import {
@@ -63,8 +64,8 @@ export interface DispatcherDeps {
   resolveSendTarget: (agentId: string, userId: string) => SendTarget;
   /**
    * The function that sends a platform notice in the agent's channel's own box,
-   * or undefined when its adapter draws none. Optional: the CLI and test
-   * ingresses have no channel, and an absent or undefined target sends the
+   * or undefined when its adapter draws none. Optional: the test-injection
+   * dispatcher has no channel, and an absent or undefined target sends the
    * notice spelled out through `resolveSendTarget`.
    */
   resolveNoticeTarget?: (agentId: string, userId: string) => NoticeTarget | undefined;
@@ -72,8 +73,8 @@ export interface DispatcherDeps {
    * Proactive out-of-credits gate. Called BEFORE the
    * ACP child is spawned / `prompt()` is invoked. Resolves `{exhausted:
    * true}` when the tenant is below the credit safety buffer (the
-   * control-plane's 402), `{exhausted: false}` otherwise. Optional so the
-   * CLI/test ingresses stay back-compatible; a bridge that can't reach the
+   * control-plane's 402), `{exhausted: false}` otherwise. Optional because
+   * the test-injection dispatcher has no control-plane; a bridge that can't reach the
    * control-plane MUST fail open (throw here → the dispatcher proceeds),
    * because blocking chat on a control-plane glitch is worse than the rare
    * overspend the reactive catch below still covers.
@@ -81,17 +82,16 @@ export interface DispatcherDeps {
   creditCheck?: (agentId: string) => Promise<{ exhausted: boolean }>;
   /**
    * The organization's wall clock and the pair's last turn, from the side that
-   * persists both. Optional for the same reason `creditCheck` is: the CLI and
-   * test ingresses have no control-plane, and a turn is worth more than a
-   * clock. When it is absent or throws, the turn goes out with the block this
-   * process has always produced.
+   * persists both. Optional for the same reason `creditCheck` is: the
+   * test-injection dispatcher has no control-plane, and a turn is worth more
+   * than a clock. When it is absent or throws, the turn_meta block carries no
+   * clock and its gap comes from this process's memory alone.
    */
   turnContext?: (agentId: string, userId: string) => Promise<{ clock?: string; lastTurnAt?: number }>;
   /**
-   * Where the send path records a file that did not reach the person. Optional
-   * for the same reason the two above are: the CLI and test ingresses have no
-   * attach path at all. When it is absent a turn closes exactly as it always
-   * did — when it is wired, a failed upload denies the turn its success.
+   * Where the send path records a file that did not reach the person.
+   * Optional: the test-injection dispatcher has no attach path. When it is
+   * wired, a failed upload denies the turn its success.
    */
   attachOutcomes?: AttachOutcomeTracker;
   /**
@@ -99,7 +99,7 @@ export interface DispatcherDeps {
    * can be kept rather than lost: the bridge posts it to the control-plane as
    * the assistant's rolling summary, the same capture its send path makes for
    * a summary it withholds there. Optional for the same reason as the three
-   * above: the CLI and test ingresses have nowhere to keep it.
+   * above: the test-injection dispatcher has nowhere to keep it.
    */
   onSummaryWithheld?: (agentId: string, summary: string) => void;
   /**
@@ -112,8 +112,8 @@ export interface DispatcherDeps {
   /**
    * The agent's channel, when it takes each answer as one message: see
    * `ChatAdapter.wholeAnswers`. Absent, or answering undefined, a reply goes
-   * out in pieces as it streams, which is what Discord and the CLI and test
-   * ingresses get.
+   * out in pieces as it streams, which is what Discord, Telegram, Slack, web
+   * and the test-injection dispatcher get.
    */
   wholeAnswers?: (agentId: string) => WholeAnswers | undefined;
   /**
@@ -124,9 +124,9 @@ export interface DispatcherDeps {
   restartHold?: { boundMs: number; retryMs: number };
   /**
    * Where a message that arrives while the bridge is stopping is kept for the
-   * next bridge to answer. Optional for the same reason as the others: the CLI
-   * and test ingresses never hand a message on. Absent, or failing to keep
-   * one, the person is told to send it again.
+   * next bridge to answer. Optional for the same reason as the others: the
+   * test-injection dispatcher never hands a message on. Absent, or failing to
+   * keep one, the person is told to send it again.
    */
   pendingMessages?: PendingMessages;
 }
@@ -219,8 +219,8 @@ const TURN_UNSENT: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
 
 /**
  * Picks the polite-refusal copy matching the language detected in
- * `text`. Exported so the CLI (M7) uses the same source of truth as
- * the Discord adapter / test-injection ingress.
+ * `text`. Exported for the refusals sent outside the dispatcher: the CLI's
+ * and the Workspace Chat listener's.
  */
 export function pickRefusalMessage(text: string): string {
   return REFUSAL[detectLanguage(text)];
@@ -241,10 +241,10 @@ export function pickSlowMessage(text: string): string {
   return TURN_SLOW[detectLanguage(text)];
 }
 
-// Dedicated copy for the 402/overquota chain: the credit
-// gate raises BudgetExceededError → the LLM call fails → opencode
-// errors the turn. Without classification the employee got the generic
-// "something went wrong" and retried forever.
+// The copy for a turn refused for lack of credits: the control-plane's credit
+// check answered 402 before the turn, or the turn failed on the LiteLLM credit
+// gate's error (isCreditExhaustedError). The generic failure copy would invite
+// a retry that cannot succeed.
 const TURN_NO_CREDITS: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
   it: "I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore (può ricaricarli dal pannello).",
   en: "Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
@@ -483,19 +483,11 @@ export class Dispatcher {
   }
 
   /**
-   * SCHED-2 — post a plain, deterministic message to the agent's
-   * channel WITHOUT running a model turn (e.g. the scheduled-message
-   * heads-up "🕐 È scattato un messaggio programmato…"). Uses the same
-   * send target the reply pipeline uses.
-   *
-   * Returns the delivery outcome so the caller (the inject
-   * endpoint) can report a truthful status instead of a blind 202.
-   */
-  /**
    * The language a notice the bridge writes by itself is in. The message's own
    * detection first; on a message too short to say («vedi contatti?»), the
    * last language this person wrote in; before anybody has, the organisation's.
-   * English only when none of the three answers.
+   * When none of the three answers it is "unknown", which this file's own copy
+   * writes in English and platform-notices.ts in Italian.
    */
   private noticeLang(agentId: string, userId: string, text: string): SupportedLang {
     const detected = detectLanguage(text);
@@ -520,6 +512,12 @@ export class Dispatcher {
     );
   }
 
+  /**
+   * Post a plain, deterministic message to the agent's channel without
+   * running a model turn (e.g. the scheduled-message heads-up). Uses the same
+   * send target the reply pipeline uses, and returns the delivery outcome so
+   * the inject endpoint can answer 500 when it fails.
+   */
   async sendSystemMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
     const send = this.deps.resolveSendTarget(agentId, userId);
     return send(text);
@@ -537,12 +535,12 @@ export class Dispatcher {
   }
 
   /**
-   * `ok` iff the turn did NOT fail AND every delivery
-   * succeeded. A turn failure = `prompt()` threw (the existing `failed` flag);
-   * a delivery failure = the SendQueue lost a chunk after its retry, or a
-   * direct send (refusal / error-copy / empty-copy) ultimately failed. Every
-   * pre-existing behaviour (localized error/empty copy, credit-exhausted copy,
-   * allowlist refusal, the delivery-failure marker) is preserved.
+   * Run one message and report it. `ok` iff the turn did not fail, every
+   * delivery succeeded, every file the reply carried reached the person, and
+   * the answer was not held back as tool-call markup twice. A turn failure is
+   * `prompt()` throwing; a delivery failure is a chunk the SendQueue lost
+   * after its retries, or a direct send (refusal, notice, error copy) that
+   * failed.
    */
   handleMessage(agentId: string, userId: string, text: string, receivedAt = Date.now()): Promise<DeliveryResult> {
     const turn = this.runTurn(agentId, userId, text, receivedAt);
@@ -573,7 +571,7 @@ export class Dispatcher {
     // return without starting a turn. The reply is the whole response, so
     // its delivery outcome is the result.
     //
-    // Fail-open: no dep (back-compat) → proceed; a check that THROWS
+    // Fail-open: no dep → proceed; a check that THROWS
     // (control-plane unreachable) → log + proceed. A bridge that can't reach
     // the control-plane must never block chat; the reactive catch stays as a
     // belt for the rare overspend window.
@@ -600,10 +598,9 @@ export class Dispatcher {
 
     let { queue, reply } = this.openReply(agentId, userId, send, text);
 
-    // One call, two facts, and neither is worth failing a turn over. The
-    // resolver inside is consulted only when this process has no memory of the
-    // pair, so a running bridge pays nothing per turn -- it is the restart that
-    // used to tell somebody they had never spoken.
+    // One call, two facts, and neither is worth failing a turn over. The clock
+    // goes into every turn_meta block; the last turn's time is used only when
+    // this process has no memory of the pair, as after a restart.
     let clock: string | undefined;
     let contextLastTurnAt: number | undefined;
     if (this.deps.turnContext) {
@@ -856,7 +853,7 @@ export class Dispatcher {
    * restart is in the session too, between the two.
    *
    * `onCut` runs after each try a restart cut off, before the next one. Any
-   * other failure, on any try, is the turn's failure as it always was. Past
+   * other failure, on any try, is the turn's failure. Past
    * the bound the last SessionRestartError is thrown, which the caller tells
    * the person about in words of its own. `options` go with every try.
    */

@@ -58,7 +58,7 @@ describe("Dispatcher", () => {
       },
     });
     await expect(d.handleMessage("doc-qa", "111", "ping")).resolves.toEqual({ ok: true });
-    // M-ACP-DISCLOSURE-OFF: no AI disclosure is prepended — the reply is all
+    // No AI disclosure is prepended: the reply is all
     // that's sent. Join + trim the streaming marker to reconstruct it.
     expect(sent.length).toBeGreaterThanOrEqual(1);
     const joined = sent.map((s) => s.text.replace(/ ⏎$/u, "")).join("");
@@ -419,7 +419,7 @@ describe("a reply that is only a block the bridge withholds", () => {
   });
 });
 
-// M-ACP-DISCLOSURE-OFF — the AI-Act first-contact disclosure was removed: the
+// No AI-Act first-contact disclosure is sent: the
 // assistant is USER-facing (the employee was given it and knows it's an AI), so
 // Art. 50's "obvious from the context of use" exemption applies. Guard that no
 // AI-disclaimer copy is prepended to the first reply.
@@ -478,7 +478,7 @@ describe("402 overquota copy (M-ACP-2)", () => {
       },
     });
     await d.handleMessage("doc-qa", "111", "ciao, mi aiuti con una cosa?");
-    // M-ACP-DISCLOSURE-OFF: no disclosure — sent[0] is the failure copy.
+    // No disclosure: sent[0] is the failure copy.
     expect(sent[0]).toBe(pickNoCreditsMessage("ciao, mi aiuti con una cosa?"));
     expect(sent[0]).toMatch(/credit/i);
     expect(sent[0]).not.toBe(pickErrorMessage("ciao, mi aiuti con una cosa?"));

@@ -778,7 +778,7 @@ session:
   });
 
   it("test-mode: /_test/inject end-to-end — reply is observable via /_test/last-reply", async () => {
-    // Regression test for a bug caught during the M8 manual smoke:
+    // Regression test for a bug caught in a manual smoke test:
     // bridge.ts wired ONE dispatcher whose send-target was the discord
     // adapter; when the test-injection endpoint drove that dispatcher,
     // replies tried to flow into a not-logged-in Discord client and
@@ -821,7 +821,7 @@ session:
     const replyRes = await fetch(`${url}/_test/last-reply?agent_id=demo&user_id=111`);
     expect(replyRes.status).toBe(200);
     const reply = (await replyRes.json()) as { text: string };
-    // M-ACP-DISCLOSURE-OFF: no disclaimer precedes the reply — it's just the reply.
+    // No disclaimer precedes the reply.
     expect(reply.text).toContain("test injection works!");
     expect(reply.text).not.toMatch(/assistente AI|AI assistant/);
 

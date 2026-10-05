@@ -4,7 +4,7 @@
 // needing real Discord traffic.
 //
 //   POST /_test/inject   { agent_id, user_id, text }   → 202 Accepted
-//   GET  /_test/last-reply?agent_id=…&user_id=…         → { text } | 404
+//   GET  /_test/last-reply?agent_id=…&user_id=…         → { text, chunks } | 404
 //
 // Reply capture is keyed by `(agent_id, user_id)` — sets last seen.
 // Multi-chunk replies are concatenated (with the " ⏎" continuation
@@ -92,11 +92,11 @@ async function handleRequest(
     // only the fresh response.
     replies.delete(replyKey(agentId, userId));
     // Tests need determinism — await the full pipeline so the GET that
-    // follows can read /_test/last-reply without polling. Production
-    // Discord adapter (M5 wiring) does the same.
+    // follows can read /_test/last-reply without polling. The channel
+    // adapters await the turn the same way.
     try {
-      // Surface a failed turn / swallowed delivery failure
-      // as a truthful 500 instead of a blind 202, mirroring /internal/inject.
+      // A failed turn or delivery answers 500. Unlike /internal/inject,
+      // which answers 202 before the turn runs, this endpoint waits for it.
       const result = await dispatcher.handleMessage(agentId, userId, text);
       if (!result.ok) {
         logger.error({ err: result.error, agentId, userId }, "inject turn/delivery failed");

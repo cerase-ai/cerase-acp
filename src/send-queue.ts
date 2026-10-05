@@ -64,7 +64,7 @@ export interface SendQueueOptions {
   /**
    * Where each chunk is dispatched. The target returns a `DeliveryResult`
    * instead of throwing on a channel error — a `!ok` result drives the
-   * one-retry + visible-marker path below and is recorded so `drain()` can
+   * retries and the visible marker below, and is recorded so `drain()` can
    * report whether any chunk ultimately failed. A target that still throws
    * is treated defensively as a `!ok` result.
    */
@@ -80,12 +80,10 @@ export interface SendQueueOptions {
 }
 
 /**
- * Sent once when a chunk is lost after its retry.
+ * Sent once when a chunk is lost after its retries.
  *
- * Kept as the default for a queue built without a language -- the CLI and the
- * test ingresses have none. A real turn passes the localised one, because this
- * default used to be the only version anybody saw and it carried two languages
- * in one line.
+ * The default for a queue built without a language -- the CLI and the test
+ * ingresses have none. A real turn passes the localised one.
  */
 export const DELIVERY_FAILURE_MARKER = deliveryFailureNotice("unknown");
 
@@ -98,8 +96,8 @@ export type DrainResult = { ok: true } | { ok: false; failures: Array<{ chunk: s
 
 export class SendQueue {
   private failureMarkerQueued = false;
-  // Chunks ultimately lost (after the one retry), so
-  // drain() can report a truthful aggregate outcome to the dispatcher.
+  // Chunks lost after their retries, so drain() can report a truthful
+  // aggregate outcome to the dispatcher.
   private failures: Array<{ chunk: string; error: Error }> = [];
   // Chunks the channel took and the send path did not withhold.
   private deliveredCount = 0;

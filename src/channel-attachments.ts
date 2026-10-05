@@ -1,4 +1,4 @@
-// C4 — per-channel inbound-attachment extraction. Pure functions over each
+// Per-channel inbound-attachment extraction. Pure functions over each
 // channel's raw message shape → a normalised list the adapter feeds to the
 // shared ingest. Kept separate from the adapter glue so they're unit-tested
 // without the channel SDKs.
@@ -15,7 +15,7 @@ export interface TelegramFileRef {
  * Structural view of a Telegram message for attachment extraction.
  * The index signature lets callers pass full SDK message objects (which
  * carry many extra fields) without excess-property friction, while the
- * named fields stay precisely typed (M-AUDIT-acp-2).
+ * named fields stay precisely typed.
  */
 export interface TelegramMessageLike {
   photo?: Array<{ file_id: string; file_size?: number }>;
@@ -95,10 +95,7 @@ export interface SlackFileRef {
   sizeBytes?: number;
 }
 
-/**
- * Structural view of a Slack message event for attachment extraction
- * (M-AUDIT-acp-2).
- */
+/** Structural view of a Slack message event for attachment extraction. */
 interface SlackMessageLike {
   files?: Array<{
     name?: string | null;
@@ -131,10 +128,7 @@ export interface WorkspaceChatAttachmentRef {
   resourceName: string;
 }
 
-/**
- * Structural view of a Google Chat message for attachment extraction
- * (M-AUDIT-acp-2).
- */
+/** Structural view of a Google Chat message for attachment extraction. */
 export interface WorkspaceChatMessageLike {
   attachment?: Array<{
     contentName?: string;

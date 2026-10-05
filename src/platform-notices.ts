@@ -1,12 +1,10 @@
-// The messages the PLATFORM posts into the chat on its own account, as
-// opposed to the ones the model writes.
+// The messages the bridge itself posts into the chat, in the assistant's
+// voice, as opposed to the ones the model writes. The notices the platform
+// sends on its own account, signed Cerase, are in platform-notice.ts.
 //
-// Two things were wrong with them wherever they were written inline. They were
-// Italian regardless of the language the conversation was being held in, and
-// they were written in a different register from the assistant beside them --
-// an emoji and a parenthetical on one line, a raw workspace path on the next.
-// To the person reading the chat both come from the same colleague, so they
-// have to sound like one.
+// Each is written in the language of the conversation and in the register of
+// the assistant beside it: to the person reading the chat both come from the
+// same colleague, so they have to sound like one.
 //
 // The rules they follow, and the reason each is here:
 //   - no raw path, no id, no internal name. The assistant's own output-hygiene
@@ -116,13 +114,7 @@ export function oversizeUploadNotice(
   );
 }
 
-/**
- * A chunk of the reply the channel refused even on the retry.
- *
- * This one used to carry the Italian and the English in a single string joined
- * by a slash, which is what a notice looks like when nobody can say which
- * language the reader is owed.
- */
+/** A chunk of the reply the channel refused through every retry. */
 export function deliveryFailureNotice(lang: SupportedLang): string {
   return pick(
     {
@@ -263,12 +255,9 @@ export const WRITING_NOTICE = "\u{1F4AC}";
 export const WRITING_ENDED_NOTICE = "\u2026";
 
 /**
- * The last segment of a workspace-relative path.
- *
- * A notice used to print the path the model had written, which put
- * `bozze/2026/preventivo-acme.md` in front of someone who has no filesystem to
- * resolve it against and contradicts the hygiene rule in the same breath as
- * apologising.
+ * The last segment of a workspace-relative path. A notice names a file by its
+ * name: the person has no filesystem to resolve a path such as
+ * `bozze/preventivo-acme.md` against.
  */
 export function displayFileName(relPath: string): string {
   const segments = relPath.split("/").filter((s) => s !== "");

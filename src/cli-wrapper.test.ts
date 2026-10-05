@@ -115,7 +115,7 @@ describe("cerase-acp-cli (bash wrapper)", () => {
   });
 
   it("`repl` delegates to the TS in-process REPL and replies per line", async () => {
-    // Two stdin lines + EOF. M13: bash `cmd_repl` is now `exec node
+    // Two stdin lines + EOF. The bash `cmd_repl` is `exec node
     // dist/cli.js repl` — the loop lives in TS, so a single ACP
     // child (fake-acp-child here) handles BOTH lines from one
     // SessionManager. Reply count == 2; the wrapper's job is just

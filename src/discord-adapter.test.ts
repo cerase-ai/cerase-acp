@@ -103,7 +103,7 @@ describe("discord-adapter reports reachability, not a cached flag", () => {
   });
 });
 
-// Cross-adapter invariant (per chat-adapter.ts OPT-67 contract). Any
+// Cross-adapter invariant (the typing contract in chat-adapter.ts). Any
 // adapter that EVER adds a typing-indicator pattern (Discord
 // `sendTyping`, Telegram `sendChatAction('typing')`, Slack assistant
 // thread status, Workspace Chat) must follow the same shape:

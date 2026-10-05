@@ -1,13 +1,10 @@
 // Whether the chat provider is actually answering this adapter.
 //
-// The bridge already had a readiness signal and it was a cached flag:
 // discord.js `client.isReady()` is the client's own view of its own socket,
-// updated when the library notices something. A container that lost its
-// network kept reporting a ready Discord adapter for five minutes, through
-// `/healthz` and `/internal/status` both, with nothing logged. Nothing was
-// broken — the adapter reconnected on its own — but an alert wired to `ready`
-// would not have fired, and an operator reading either surface during the
-// outage would have been told the bridge was fine.
+// updated when the library notices something. A container that has lost its
+// network can keep reporting a ready Discord adapter for minutes, through
+// `/healthz` and `/internal/status` both, with nothing logged, so an alert
+// wired to that flag alone would not fire.
 //
 // A cached flag can never answer that question, so this module measures
 // instead: it remembers when the provider last answered, refreshes that by
@@ -41,9 +38,7 @@ export interface ReachabilityMonitorOptions {
   intervalMs?: number;
   /**
    * How long the provider may stay silent before readiness turns false.
-   * Default 180s — three missed probes, so a single blip cannot flip it,
-   * and the five-minute outage that prompted this would have been reported
-   * with two minutes still to run.
+   * Default 180s: three missed probes, so a single blip cannot flip it.
    */
   staleAfterMs?: number;
   /** How long one probe may take before it counts as unanswered. Default: one interval. */
@@ -172,7 +167,7 @@ export class ReachabilityMonitor {
  * Both halves are needed and neither is redundant. The client flag catches a
  * socket the library knows it lost; the measurement catches the case the flag
  * cannot see, which is the library believing a dead socket is alive. An
- * adapter with no monitor at all keeps the old meaning.
+ * adapter with no monitor at all reports the client flag alone.
  */
 export function isChannelReady(clientReady: boolean, reachability?: ReachabilitySnapshot): boolean {
   if (!clientReady) return false;

@@ -437,7 +437,7 @@ describe("SessionManager", () => {
       }
     });
     // Note: the fake child currently emits no messageId in its chunks,
-    // so reconciliation is skipped — the test asserts the M16 path is
+    // so reconciliation is skipped — the test asserts the reconciliation path is
     // INERT until ACP exposes a messageId. This is the correct
     // behaviour: don't fetch when we can't address the message.
     // The richer assertion lives in the next test.

@@ -15,13 +15,11 @@ const AgentIdSchema = z
     message: "agent id must be alphanumeric + '-' (no spaces, no leading dash)",
   });
 
-// The bridge is no longer Discord-only. Each
-// agent declares which chat channel it speaks via `channel` (default
-// 'discord' for back-compat with every existing agents.yaml). Per-channel
-// credential fields are flat on the agent (rather than nested under a
-// `<channel>:` block) so the env-substitution helper continues to work
-// without nesting awareness, and zod's superRefine validates that the
-// fields required by the selected channel are present.
+// Each agent declares which chat channel it speaks via `channel` (default
+// 'discord'). The Discord, Telegram and Slack credential fields are flat on
+// the agent, and zod's superRefine validates that the fields required by the
+// selected channel are present; a workspace_chat agent's app is its nested
+// `workspace_chat` block, checked when its adapter starts.
 //
 // The substitution / refinement matrix:
 //   channel='discord'        → bot_token required (Discord bot token)
@@ -33,7 +31,7 @@ const AgentIdSchema = z
 //                              `workspace_chat` block: project number and
 //                              key path. Checked when the adapter starts,
 //                              not here (see WorkspaceChatAppSchema).
-//   channel='web'            → NO credentials (C2-0). A panel-only agent
+//   channel='web'            → NO credentials. A panel-only agent
 //                              (e.g. the maintainer assistant): turns arrive
 //                              via /internal/inject and the reply is read
 //                              from the opencode timeline in Filament — no
@@ -48,9 +46,9 @@ const AgentIdSchema = z
 export const ChatChannelSchema = z.enum(["discord", "telegram", "slack", "workspace_chat", "web"]);
 export type ChatChannel = z.infer<typeof ChatChannelSchema>;
 
-// An assistant's own Google Chat app (DEC-37 in cerase-core): every assistant
-// on the channel is its own app in its own Google Cloud project, as every
-// assistant on Discord is its own bot. Every field is optional here and checked
+// An assistant's own Google Chat app: every assistant on the channel is its own
+// app in its own Google Cloud project, as every assistant on Discord is its own
+// bot. Every field is optional here and checked
 // by the adapter's start(): a requirement at this level would fail the whole
 // file, and with it the panel-only maintainer and every reload.
 const WorkspaceChatAppSchema = z.object({
@@ -91,17 +89,14 @@ const AgentSchema = z
     // Which of the slot's primary agents this session runs under.
     //
     // opencode exposes its primary agents as ACP session modes and `opencode
-    // acp` has no flag to pick one, so the mode IS the agent selector. It was a
-    // constant until the health probe needed an assistant of its own: the probe
-    // asks the maintainer to answer one word and the maintainer, reasonably,
-    // answers a paragraph, so nothing could be asserted about the reply.
+    // acp` has no flag to pick one, so the mode IS the agent selector. It is
+    // configurable because the health probe runs an assistant of its own: the
+    // probe asks for a one-word answer, and the maintainer reasonably answers
+    // with a paragraph.
     //
-    // Defaulted rather than required, and that is what keeps this backwards
-    // compatible in both directions. A config written before this field existed
-    // loads unchanged and asks for the same mode it always did; a config that
-    // names one the slot does not define is refused per agent, with the modes
-    // the slot does offer in the message, exactly as an absent `cerase` already
-    // was.
+    // Defaulted to `cerase` rather than required, so a file without it keeps
+    // loading. A mode the slot does not define is refused per agent, with the
+    // modes the slot does offer in the message.
     mode: z.string().min(1).default(CERASE_SESSION_MODE),
     // The model this assistant runs on, as the `provider/model` pair opencode
     // names it (for example `cerase-litellm/core`), written by the
@@ -172,13 +167,10 @@ const SessionSchema = z.object({
 
 const BridgeConfigSchema = z
   .object({
-    // M-auto-reload (v0.2): zero agents is a valid bootstrap state.
-    // The bridge starts idle and ConfigReloader brings in agents as
-    // the operator wires them up — no more "first you have to seed an
-    // agent.yaml entry to make the bridge boot" friction. The cerase
-    // appliance always renders `agents: []` when there are no
-    // renderable Agents (RegenAgentsYaml), and the bridge must
-    // tolerate this without crash-looping.
+    // Zero agents is a valid state: the bridge starts idle and the reload
+    // brings agents in as they are added. The appliance renders `agents: []`
+    // when it has no agents to render (RegenAgentsYaml), and the bridge must
+    // load it without crash-looping.
     agents: z.array(AgentSchema),
     session: SessionSchema,
     // The organisation's language, for the notices the bridge writes by itself
@@ -206,9 +198,9 @@ const BridgeConfigSchema = z
 export type AgentConfig = z.infer<typeof AgentSchema>;
 export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
 
-// Replaces every `${env:VAR}` token in `raw` with `env[VAR]`. Throws when
-// a referenced variable is absent from `env` so a missing token surfaces
-// at config-load time, not at first message dispatch.
+// Replaces every `${env:VAR}` token in `raw` with `env[VAR]`. Throws when a
+// referenced variable is absent from `env` or empty, so a missing token
+// surfaces at config-load time, not at first message dispatch.
 export function resolveEnvSubstitutions(raw: string, env: Record<string, string | undefined>): string {
   return raw.replace(/\$\{env:([A-Z0-9_]+)\}/g, (_, name: string) => {
     const value = env[name];

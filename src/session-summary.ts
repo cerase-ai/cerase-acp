@@ -3,8 +3,7 @@
 // When OpenCode auto-compacts a chat-only session it emits an "Anchored Summary"
 // block. The bridge already DETECTS + withholds it from chat (egress-redaction).
 // Instead of discarding it, we POST it to the control-plane over the internal
-// channel so it is persisted as the assistant's canonical rolling summary — the
-// warm-resume + measurement substrate of the context-hygiene design.
+// channel so it is persisted as the assistant's canonical rolling summary.
 //
 // Best-effort + fire-and-forget: a capture failure must NEVER affect the user's
 // turn, so this resolves to a boolean and never throws.

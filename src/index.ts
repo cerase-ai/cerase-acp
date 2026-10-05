@@ -26,9 +26,8 @@ async function main(): Promise<void> {
   const handle = await runBridge({
     config: cfg,
     bridgeE2eTest: process.env.BRIDGE_E2E_TEST === "1",
-    // v0.2: pass the config path so runBridge instantiates a
-    // ConfigReloader that watches agents.yaml for live updates.
-    // The bridge auto-reloads in place — no more docker restart.
+    // The config path makes runBridge start a ConfigReloader, which applies
+    // every change to agents.yaml in place.
     configPath: cfgPath,
   });
 

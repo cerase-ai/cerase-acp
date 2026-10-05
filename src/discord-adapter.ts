@@ -1,9 +1,9 @@
-// Thin discord.js glue. One Client per configured agent, DM intent
-// only, no guild-channel listeners. All real logic lives in Dispatcher
-// (which knows nothing about Discord); this file is the smallest
-// possible bridge between the two — kept lean so we can verify it
-// behaviourally via the cerase repo's e2e-discord bats tier and the
-// BRIDGE_E2E_TEST endpoint, without unit-testing discord.js mocks.
+// discord.js glue. One Client per configured agent, with the DirectMessages,
+// MessageContent and Guilds intents; anything posted in a server is dropped.
+// All real logic lives in Dispatcher (which knows nothing about Discord);
+// this file is kept lean and is exercised against a stand-in discord.js in
+// the unit tests and against Discord itself by cerase-core's e2e-discord
+// tier.
 
 import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partials, Routes } from "discord.js";
 import { extractDiscordFiles } from "./channel-attachments.js";
@@ -18,12 +18,6 @@ import { detectLanguage } from "./turn-meta.js";
 import { TypingSessions } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
-
-// The standalone `DiscordAdapter` interface was generalised into
-// `ChatAdapter` (see ./chat-adapter.ts). Kept here as a deprecated alias for
-// any caller that imports it by name (mostly the test suite). New code
-// should import ChatAdapter.
-export type DiscordAdapter = ChatAdapter;
 
 export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   // Cache per-user DM channels so we don't re-resolve on every chunk
@@ -65,7 +59,7 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       if (msg.guildId !== null) return;
       const userId = msg.author.id;
       let text = msg.content ?? "";
-      // C4-2 — inbound attachments: a file with no caption must NOT be dropped.
+      // Inbound attachments: a file with no caption must not be dropped.
       // Each carries the size Discord reports, so one over the cap is refused
       // before it is downloaded.
       const inbound = extractDiscordFiles(msg.attachments.values());
@@ -74,7 +68,7 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       if (msg.channel.isDMBased() && msg.channel.type !== undefined) {
         dmChannels.set(userId, msg.channel as DMChannel);
       }
-      // M18 — 👀 read-receipt as soon as the bot picks up the DM,
+      // A 👀 read-receipt as soon as the bot picks up the DM,
       // before any LLM work starts. Persistent (we never remove it):
       // the typing indicator below carries the "actively working"
       // signal during the turn; the eye marker remains afterwards
@@ -86,7 +80,7 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       // An inbound DM arrived over the gateway, which is stronger evidence
       // than any probe: this socket carried a packet just now.
       reachability.note();
-      // C4-2 — download inbound files into the agent workspace + prepend the
+      // Download inbound files into the agent workspace and prepend the
       // [Uploaded files: …] marker the message-attachment-receiver skill reads.
       //
       // Ahead of the typing indicator, because the oversize notice is a
@@ -103,7 +97,7 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
           await dispatcher.sendSystemMessage(agent.id, userId, notice);
         }
       }
-      // M18 — "Claudia is typing…" while the turn is in flight.
+      // "Claudia is typing…" while the turn is in flight.
       // Refreshes every 7s (Discord's indicator auto-stops at ~10s),
       // self-terminates after ~5 min as a defensive ceiling, and is ended by
       // the turn's FIRST delivery (see makeSendTarget) rather than by the
@@ -143,10 +137,8 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
 
   return {
     agentId: agent.id,
-    // The real gateway connection state: true once the client has logged in
-    // and the WebSocket is up, false after a drop or before login. This is
-    // what tells "Attivo ma disconnesso" apart from a healthy Luigi in the
-    // admin.
+    // Whether Discord can carry a message now. This is what tells "Attivo ma
+    // disconnesso" apart from a healthy Luigi in the admin.
     ready() {
       // Both halves, because neither covers the other: the client flag catches
       // a socket the library knows it lost, and the measurement catches the
@@ -208,8 +200,8 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         // arrival and must be ordered behind the keepalive exactly as a text
         // chunk is.
         await typing.end(userId);
-        // CHAT-UX / ATTACH-1: upload the workspace file as a real Discord
-        // attachment. `attachment` accepts a Buffer directly.
+        // Upload the workspace file as a real Discord attachment.
+        // `attachment` accepts a Buffer directly.
         await channel.send({
           content: file.caption,
           files: [{ attachment: file.bytes, name: file.name }],
@@ -222,10 +214,10 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
     },
     makeSendTarget(userId: string) {
       return async (chunk: string): Promise<DeliveryResult> => {
-        // A failed channel.send (slot down, gateway drop, user blocked the
-        // bot) is returned as `{ ok: false }` rather than thrown — the
-        // SendQueue retries once, then the failure surfaces all the way to
-        // the inject HTTP status instead of being swallowed.
+        // A failed channel.send (gateway drop, user blocked the bot) is
+        // returned as `{ ok: false }` rather than thrown: the SendQueue retries
+        // it with a backoff, then the failure surfaces all the way to the
+        // inject status instead of being swallowed.
         try {
           let channel = dmChannels.get(userId);
           if (!channel) {

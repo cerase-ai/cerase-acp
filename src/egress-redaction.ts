@@ -137,12 +137,11 @@ const IDENTITY_AND_ARTIFACT_REDACTIONS: ReadonlyArray<{ pattern: RegExp; replace
   // Backticked internal recipe identifiers, e.g. `cerase-search.search`,
   // `airtable-power.list_records`.
   //
-  // The comment that stood here said the hyphen in the namespace kept this off
-  // "a plain filename like `report.md`". That holds only for filenames WITHOUT
-  // a hyphen, and the shipped skills mandate hyphenated ones by name --
-  // `report-q3.docx`, `q3-results-presentation.pdf`, `presentation-brief.md`,
-  // `pending-skill-<slug>.md` among them. So a user who asked for a
-  // presentation was told, verbatim, "Ecco uno strumento".
+  // A hyphen in the namespace does not tell a recipe from a filename: the
+  // shipped skills name their files with hyphens (`report-q3.docx`,
+  // `q3-results-presentation.pdf`, `presentation-brief.md`,
+  // `pending-skill-<slug>.md`), and rewriting one would tell a person who asked
+  // for a presentation "Ecco uno strumento".
   //
   // The real difference is the SUFFIX, not the hyphen: a recipe reference ends
   // in a method name, a filename ends in a file extension. Extensions are a
@@ -242,15 +241,10 @@ export function stripToolCallArtifacts(text: string): string {
   return out;
 }
 
-// OURS. The appliance replaces the engine's section list with its own in
-// SlotWriter::compactionPrompt(), and the marker set was left on the engine's —
-// so the one shape the product actually asks the model to produce was the
-// one shape the detector could not see. An assistant answered a request to
-// join a meeting with its whole working-memory block, in a customer's chat.
-//
-// The note on SUMMARY_SECTION_MARKERS says to review these on an OpenCode
-// bump. The drift came from our side instead: the prompt naming the sections
-// is in cerase-core and this list is here, with nothing holding them equal.
+// The section headings of the appliance's own compaction prompt, which
+// replaces the engine's section list in cerase-core's
+// SlotWriter::compactionPrompt(). That prompt and this list are kept equal by
+// hand: a change to one needs the same change to the other.
 //
 // Each one matches a whole markdown heading line, which is also what makes
 // them usable on a fragment: see summaryHeadingStart below.
@@ -267,12 +261,11 @@ const SUMMARY_HEADING_LINES: ReadonlyArray<RegExp> = [
  *
  * During mid-session compaction OpenCode produces a structured session-state
  * block (Anchored Summary / Constraints & Preferences / Active Tools & State /
- * Next Actions / Technical Notes / Workspace Paths & Files). It is an INTERNAL
- * artefact, not an answer — yet it once surfaced as an assistant reply, leaking
- * a masked PII token (`<nome …>`), workspace file paths, and tool state to the
- * user. The fix is to recognise such a block at the egress boundary and
- * withhold it entirely (a reply that IS the session summary is never
- * user-facing — see the sibling call in bridge.ts).
+ * Next Actions / Technical Notes / Workspace Paths & Files). It is an internal
+ * artefact, not an answer, and carries masked PII tokens (`<nome …>`),
+ * workspace file paths and tool state. A reply that is this block is withheld
+ * from the chat at the egress boundary and posted to the control-plane as the
+ * rolling summary (see the sibling call in bridge.ts).
  *
  * Detection is deliberately tolerant of FORMAT DRIFT — the section names can
  * change on an OpenCode bump, so we don't anchor on one exact string. REVIEW

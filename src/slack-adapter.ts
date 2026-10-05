@@ -1,15 +1,13 @@
-// Slack chat adapter.
+// Slack chat adapter: one Slack app per agent, direct messages only, through
+// @slack/bolt in Socket Mode, so the appliance exposes no public webhook: the
+// app opens the websocket to Slack.
 //
-// Minimal DM-only adapter implementing the ChatAdapter contract.
-// Uses @slack/bolt in Socket Mode so the appliance does NOT need
-// to expose a public webhook on Traefik — Slack initiates the
-// websocket connection from us outward.
-//
-// Per-tenant Slack-app setup (operator runbook in
-// docs/operator/slack-setup.md): create a Slack app, scopes
-// chat:write + im:history + im:read + im:write, install to
-// workspace, copy bot xoxb-… token + app-level xapp-… token into
-// agents.yaml via env substitution.
+// The app needs a bot token (xoxb-…) and an app-level token (xapp-…) in
+// agents.yaml; its setup and scopes are in cerase-core's
+// docs/operator/slack-setup.md. A file the person shares is downloaded with
+// the bot token into the slot's workspace. Slack shows no typing indicator for
+// the turn, and the adapter has no sendFile, so a file the assistant attaches
+// is not sent and the bridge tells the person.
 //
 // A platform notice is posted as Block Kit blocks with its link in a URL
 // button (platform-notice.ts). Slack reports a click on that button to the app
@@ -17,12 +15,8 @@
 // does not acknowledge it, so the adapter acknowledges that one action and
 // does nothing else with it.
 //
-// Out of scope per the architecture brief:
-//   - channel posts (group rooms)
-//   - threading
-//   - slash commands
-//   - interactive components beyond the notice's link button
-//   - App Home tab
+// Not handled: channel posts, threads, slash commands, interactive components
+// other than the notice's link button, and the App Home tab.
 
 import type { App } from "@slack/bolt";
 import { extractSlackFiles } from "./channel-attachments.js";
@@ -44,8 +38,7 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
   }
 
   // Lazy-loaded SDK client. Real @slack/bolt App type — default
-  // StringIndexed generic matches the untyped message payloads below
-  // (M-AUDIT-acp-2).
+  // StringIndexed generic matches the untyped message payloads below.
   let app: App | undefined;
 
   return {
@@ -68,8 +61,8 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
         try {
           const m = args.message;
           if (m.channel_type !== "im") return;
-          // C4-4 — allow the `file_share` subtype (it carries the uploaded
-          // files); still drop edited/deleted/bot-reply subtypes.
+          // Allow the `file_share` subtype (it carries the uploaded files);
+          // still drop edited/deleted/bot-reply subtypes.
           if (m.subtype && m.subtype !== "file_share") return;
           const userId = typeof m.user === "string" ? m.user : undefined;
           const text = typeof m.text === "string" ? m.text : "";

@@ -2,10 +2,11 @@
 //
 // A single adapter's start() failure is non-fatal: the channel just stays
 // not-ready while the rest of the bridge keeps serving. This module adds the
-// recovery half: when a channel adapter
-// fails to start (a bad-then-fixed Discord token, a transient Cloudflare
-// ConnectTimeoutError), retry it on a capped, jittered exponential backoff
-// until it connects — no container restart, no operator action.
+// recovery half: when a channel adapter fails to start for a reason that can
+// pass (a DNS blip, a gateway 5xx, a transient Cloudflare ConnectTimeoutError),
+// retry it on a capped, jittered exponential backoff until it connects — no
+// container restart, no operator action. A credential the provider refused is
+// not retried: see credential-rejection.ts.
 //
 // It is deliberately tiny and side-effect-isolated: it owns only timers and an
 // attempt counter per agent, and reports recovery/failure through callbacks so

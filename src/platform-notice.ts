@@ -39,9 +39,9 @@ export interface PlatformNotice {
 
 /**
  * The notice an `/internal/inject` body carries, or undefined when the value is
- * not one. Every string is required to be non-empty, the link's address to be
- * http or https: a notice that would render as an empty box, or a button that
- * opens nothing, is refused where it arrives rather than shown.
+ * not one. The title and the link's label must be non-empty, the body a
+ * string, and the link's address http or https: a notice with no heading, or a
+ * button that opens nothing, is refused where it arrives rather than shown.
  */
 export function parsePlatformNotice(value: unknown): PlatformNotice | undefined {
   if (value === null || typeof value !== "object") return undefined;

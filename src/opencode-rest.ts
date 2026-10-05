@@ -1,6 +1,5 @@
-// Thin client for opencode serve's REST API. Currently used by M16
-// shadow-channel reconciliation; expand if other audit-channel features
-// land (M9 message export, session inspection, etc.).
+// Thin client for opencode serve's REST API, used to recover the text the
+// ACP stream dropped from a turn (see reconciler.ts).
 //
 // opencode serve listens on 127.0.0.1:3284 INSIDE each slot container, so it
 // is reached from inside it: `docker exec <slot> curl http://127.0.0.1:3284/…`
@@ -54,15 +53,11 @@ export const SLOT_REST_SCRIPT =
 
 /**
  * Build an endpoint for a known agent container name. Returns `null` for a
- * name docker could not have given a container, in which case M16
+ * name docker could not have given a container, in which case the
  * reconciliation is skipped quietly.
  *
- * Caller passes the container name directly (e.g. `cerase-agent-1`).
- * Older versions of this function accepted an `agentId` string and
- * prefixed it with `cerase-agent-`, which produced a double-prefix
- * (`cerase-agent-agent-1`) once the slot-pool naming landed in
- * cerase-core (Agent ids became `agent-N`). Session-manager now
- * derives the container name from `spawn.args[2]` of agents.yaml.
+ * Caller passes the container name directly (e.g. `cerase-agent-1`), which
+ * the session manager takes from `spawn.args[2]` of agents.yaml.
  */
 export function defaultEndpointForAgent(containerName: string): RestEndpoint | null {
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(containerName)) return null;

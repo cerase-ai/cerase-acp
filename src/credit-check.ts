@@ -6,8 +6,8 @@
 // prompting whether the tenant still has credits, and short-circuits with the
 // no-credits copy when it doesn't.
 //
-// Backs QUOTA-1-D's `POST /api/internal/credit-check/{agent}` (the same
-// endpoint the LiteLLM cerase_credit_gate hook calls) over the same internal
+// Calls the control-plane's `POST /api/internal/credit-check/{agent}` (the
+// same endpoint the LiteLLM cerase_credit_gate hook calls) over the same internal
 // bearer the bridge already uses for session-summary — no new secret. The
 // controller answers 402 when the tenant is below the credit safety buffer,
 // 200 (proceed) otherwise.

@@ -1,11 +1,10 @@
 // What the control-plane knows and the bridge needs in front of a turn: the
 // organization's wall clock, and when this person last spoke to this assistant.
 //
-// Both were missing for the same reason. The clock does not exist at all — the
-// assistant sees a date and no time of day, and the slot container sets no TZ,
-// so late in the evening in Italy it believes it is still yesterday. The gap
-// exists but only in memory: `TurnMetaTracker` keeps it in a Map, so restarting
-// this process makes the next turn read `gap=first` to somebody who has been
+// The slot container sets no TZ and the assistant sees a date with no time of
+// day, so late in the evening in Italy it would believe it is still yesterday.
+// The gap lives only in `TurnMetaTracker`'s Map, so after a restart of this
+// process the next turn would read `gap=first` to somebody who has been
 // writing for months.
 //
 // Neither is fixed by remembering more here. The timezone belongs to the

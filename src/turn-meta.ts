@@ -1,7 +1,7 @@
 // Tracks the per-`(agent, user)` last-turn timestamp and produces the
-// `[turn_meta: gap=…, lang=…]` block the bridge prepends to each
-// `session/prompt`. The agent reads this per the system-prompt rules
-// in cerase/agent-runtime/agent/srv/AGENTS.md.
+// `[turn_meta: gap=…, lang=…, now=…]` block the bridge prepends to each
+// `session/prompt`. The agent reads it by the rules in the baseline prompt,
+// cerase-core's control-plane/config/defaults/agents-baseline.md.
 
 export type SupportedLang = "it" | "en" | "es" | "fr" | "unknown";
 
@@ -22,7 +22,7 @@ export function formatGap(prevAt: number | undefined, now: number): string {
 // Tiny stopword-based language hint. Not a serious NLP detector — just
 // enough to give the agent's system prompt a starting bias so it
 // replies in the user's language by default. The agent itself does
-// the heavy lifting on language tracking (M2 system-prompt rules).
+// the heavy lifting on language tracking.
 const STOPWORDS: Record<Exclude<SupportedLang, "unknown">, RegExp> = {
   it: /\b(?:ciao|non|che|il|la|sono|come|cosa|grazie|per|con|del|della|puoi|mi|hai|fa|fare|aiutare|riassumere|domanda)\b/i,
   en: /\b(?:hello|the|and|you|can|what|how|with|please|help|summarise|summarize|difference|between|files|document|question)\b/i,
@@ -56,10 +56,7 @@ export function makeTurnMetaBlock(parts: { gap: string; lang: SupportedLang; now
 interface TurnState {
   lastAt: number;
   // The language hint already computed for the meta block, kept so the
-  // PLATFORM's own messages can be written in it too. Until this was
-  // recorded the detector's answer was handed to the model and thrown away,
-  // and every notice the bridge posts by itself was Italian regardless of who
-  // was reading it.
+  // notices the bridge writes by itself can be written in it too.
   lastLang: SupportedLang;
 }
 

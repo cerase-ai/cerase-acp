@@ -1,5 +1,5 @@
-// CHAT-UX / ATTACH-1 — outgoing chat attachments via a `[[attach: <path>]]`
-// marker in the agent's reply.
+// Outgoing chat attachments via a `[[attach: <path>]]` marker in the agent's
+// reply.
 //
 // Same shape as approval-link.ts: the agent emits a marker in its
 // outgoing text; the bridge intercepts it, uploads the referenced

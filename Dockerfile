@@ -1,31 +1,35 @@
-# cerase-acp — in-house Discord-to-ACP bridge for Cerase.
+# cerase-acp: the chat bridge of the Cerase platform. It connects each Cerase
+# assistant to direct messages on Discord, Telegram, Slack or Google Workspace
+# Chat, and runs each conversation as an ACP session with `opencode acp` inside
+# the assistant's slot container, reached with `docker exec`.
 #
-# Multi-stage:
-#   1. build  → node:20 (full toolchain) installs deps + compiles TS
-#   2. runtime → node:20-slim with tini PID 1 + docker.io (needed to
-#                spawn `opencode acp` in sibling agent containers via
-#                `docker exec`).
+# Two stages:
+#   1. build: node:22 installs the dependencies, compiles the TypeScript and
+#      drops the dev dependencies.
+#   2. runtime: node:22-slim with tini as PID 1 and the Docker CLI, running
+#      `node dist/index.js` as the non-root `node` user.
 #
-# Operator contract:
-#   - Mount agents.yaml at /etc/cerase-acp/agents.yaml (read-only).
-#   - Pass DISCORD_BOT_TOKEN_<AGENT_ID> for each agent in agents.yaml.
-#   - Optional: BRIDGE_E2E_TEST=1 to enable the test-injection
-#     endpoint on :7474. Never set in production.
-#   - Optional: CERASE_ACP_LOG_LEVEL=info|debug|warn|error|silent
-#     (default info).
-#   - Mount /var/run/docker.sock so the bridge can spawn sibling
-#     containers' `opencode acp`. Tier-0 replaces with kubectl-via-
-#     in-cluster-API; only the spawn command in agents.yaml changes.
+# What the container needs:
+#   - agents.yaml at /etc/cerase-acp/agents.yaml (CERASE_ACP_CONFIG), mounted
+#     read-only. The channel credentials are in it, directly or as ${env:VAR}.
+#   - A Docker API for `docker exec` and `docker inspect` against the slots:
+#     the socket, or DOCKER_HOST pointing at a proxy, as on the appliance.
+#   - A volume on /var/lib/cerase-acp/state (CERASE_ACP_STATE_DIR) for what the
+#     bridge keeps across a restart of its own.
+#   - More than 200 s to stop, so the turns in flight can end and their notices
+#     go out; the appliance gives it 220 s.
+#   - Optional: CERASE_ACP_LOG_LEVEL (default info). BRIDGE_E2E_TEST=1 starts
+#     the test-injection endpoint on 127.0.0.1:7474 and is never set in
+#     production.
+# README.md lists every variable.
 
 # ---------- build stage ----------
-# OPT-22: bumped from node:20 — Node 22 LTS active, no reason to stay
-# on 20 on Ubuntu 26.04. Pure TypeScript build, no native deps.
+# Node 22 LTS. A pure TypeScript build, no native dependencies.
 #
-# M-ACP-NPM-STRIP-1: pinned to an immutable digest. `node:22` is a MUTABLE tag —
-# it is re-pushed on every patch release, so the same Dockerfile silently builds
-# a different image tomorrow. cerase-agent pinned by digest under M-SUPPLY-PIN-1;
-# this image was left on the moving tag. Refresh both digests together when the
-# node line moves.
+# Pinned to an immutable digest: `node:22` is a mutable tag, re-pushed on every
+# patch release, so the same Dockerfile would build a different image the next
+# day. The slot image (cerase-core, agent-runtime/slot/Dockerfile) is pinned to
+# the same node release; refresh the digests of both when the node line moves.
 FROM node:22.22.3@sha256:2d178f2785b96dfbf62a416ca2e40f50e30150b4ff3320d706f0d96e90600eb3 AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
@@ -37,9 +41,8 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ---------- runtime stage ----------
-# OPT-22: bumped from node:20-slim (see build-stage comment).
-# M-ACP-NPM-STRIP-1: digest-pinned, same digest cerase-agent runs — one node
-# across the fleet, and a base that cannot change under either image.
+# Digest-pinned, the same digest the slot image runs: one node across the
+# fleet, and a base that cannot change under either image.
 FROM node:22.22.3-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752 AS runtime
 # The digest-pinned base lags the debian security feed, so this stage applies
 # the published security upgrades before installing anything. The blocking
@@ -51,12 +54,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends tini docker.io \
  && rm -rf /var/lib/apt/lists/*
 
-# M-ACP-NPM-STRIP-1: drop the npm bundled in the node base, exactly as
-# cerase-agent does. The runtime CMD is `node dist/index.js` — npm is used only
-# in the build stage above, which is discarded. Left here it is dead weight
-# carrying the whole npm-bundled CVE class (npm 10.9.8 / sigstore 3.1.0 /
-# picomatch), the same set that blocked cerase-agent's Trivy gate. node,
-# corepack and yarn remain; nothing in src/ shells out to npm or npx.
+# Drop the npm bundled in the node base, as the slot image does. The runtime
+# CMD is `node dist/index.js` and npm is used only in the build stage above,
+# which is discarded. Left here it carries the CVEs of npm's own dependencies
+# into the image for nothing. node, corepack and yarn remain; nothing in src/
+# shells out to npm or npx.
 RUN rm -rf /usr/local/lib/node_modules/npm \
            /usr/local/bin/npm \
            /usr/local/bin/npx
@@ -71,14 +73,12 @@ ENV CERASE_ACP_CONFIG=/etc/cerase-acp/agents.yaml
 ENV NODE_ENV=production
 ENV CERASE_ACP_LOG_LEVEL=info
 
-# OPT-26 (tech-audit 2026-06-01 D4): drop privileges to the bundled
-# non-root `node` user (uid 1000) so the bridge process doesn't run
-# as root in production. Reads agents.yaml read-only via the
-# host-side bind mount; doesn't need root for anything else.
-# Re-take ownership of /app so any future writable subdir works.
-# Where the bridge keeps what must outlive a restart (the Chat space each
-# person last wrote from). Created here so a named volume mounted on it starts
-# owned by the user the bridge runs as.
+# The bridge runs as the base image's non-root `node` user (uid 1000): it reads
+# agents.yaml from a read-only mount and needs root for nothing. The state
+# directory holds what must outlive a restart of the bridge (resumable
+# sessions, messages kept during a stop, the Chat space each person last wrote
+# from), and is created here so a named volume mounted on it starts owned by
+# that user.
 RUN mkdir -p /var/lib/cerase-acp/state && chown -R node:node /app /var/lib/cerase-acp
 ENV CERASE_ACP_STATE_DIR=/var/lib/cerase-acp/state
 USER node

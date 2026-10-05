@@ -17,7 +17,7 @@
 // produces, and holding that turn would turn a real failure into a silent
 // wait. The evidence is either that the bridge closed the session itself, or
 // that the slot's container stopped, is restarting, or started after the child
-// was spawned. Without either, the turn fails as it always did.
+// was spawned. Without either, the turn fails as any other failed turn does.
 
 import type { AgentConfig } from "./config.js";
 import { dockerExec, type SlotExec } from "./opencode-rest.js";

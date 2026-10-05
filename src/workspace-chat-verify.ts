@@ -7,9 +7,7 @@
 // con la sua memoria, i suoi connettori e i suoi documenti.
 //
 // Tenere il listener raggiungibile solo attraverso la rotta Traefik non e' una
-// mitigazione: Traefik e' cio' che lo espone. Finche' la rotta non esiste il
-// listener e' irraggiungibile, e quello stato si legge facilmente come una
-// difesa da chi sta per aggiungere la rotta.
+// mitigazione: Traefik e' cio' che lo espone.
 //
 // Cosa Google manda e cosa si controlla (docs: "Verify requests from Google
 // Chat"): un JWT nell'header `Authorization: Bearer`, firmato da
@@ -92,7 +90,7 @@ export async function certificati(
  * Verifica l'header `Authorization` di una richiesta di Chat.
  *
  * Alza `RichiestaNonVerificata` su qualunque cosa non sia un token valido,
- * firmato da Chat, destinato a QUESTA app e non scaduto. Non restituisce mai
+ * firmato da Chat, destinato a uno dei progetti in `audience` e non scaduto. Non restituisce mai
  * "non lo so": un dubbio e' un rifiuto.
  */
 export async function verifica(

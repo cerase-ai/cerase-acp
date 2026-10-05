@@ -6,16 +6,14 @@
 //   repl   --config X --agent Y --user Z
 //     Stay alive across N turns. Single SessionManager +
 //     TurnMetaTracker + opencode-acp child kept alive for the
-//     duration of the REPL, mirroring the Discord daemon's
-//     `(agent, user)` lifecycle. Empty line / EOF / SIGINT → shutdown.
+//     duration of the REPL, mirroring the daemon's `(agent, user)`
+//     lifecycle. Empty line / EOF / SIGINT → shutdown.
 //
-// Why repl runs in-process and not as bash-per-turn-spawn (M13): the
-// production Discord daemon keeps ONE long-lived ACP child per
-// `(agent, user)` pair through N DMs — that's where conversation
-// continuity comes from. The CLI's `repl` is supposed to be a
-// faithful proxy for that experience (same lifecycle = same
-// problems = same debug surface). A bash REPL with per-turn spawn
-// would test a fictional scenario where each turn is a fresh session.
+// Why repl runs in-process and not as a spawn per turn: the daemon keeps one
+// long-lived ACP child per `(agent, user)` pair across messages, which is
+// where conversation continuity comes from. The CLI's `repl` keeps the same
+// lifecycle so it shows the same problems; a spawn per turn would test a
+// scenario where each turn is a fresh session.
 
 import * as readline from "node:readline";
 import { isAllowed } from "./allowlist.js";
@@ -150,8 +148,8 @@ function loadAndValidate(
   }
   if (!isAllowed(cfg, args.agentId, args.userId)) {
     // Refusal text language is keyed off the probe text passed in
-    // (one-shot: the prompt text; repl: the first line typed or a
-    // safe default). Caller exits 0 — refusal is a valid response.
+    // (one-shot: the prompt text; repl: none, so the default language).
+    // Caller exits 0 — refusal is a valid response.
     io.stdoutWrite(`${pickRefusalMessage(refusalProbeText ?? "")}\n`);
     return { exitCode: 0 };
   }
@@ -162,8 +160,8 @@ function loadAndValidate(
  * Run one prompt round-trip against the given (already-instantiated)
  * SessionManager + TurnMetaTracker. Streams `agent_thought_chunk`
  * dim+italic to stderr and `agent_message_chunk` plain to stdout.
- * When no message chunks arrive at all, surfaces the "no direct
- * reply" marker on stdout so empty replies don't go silent.
+ * When thought chunks arrive and no message chunk does, says so on
+ * stdout, so a reply that was all reasoning does not look empty.
  *
  * Returns 0 on success, 1 on ACP error. Does NOT shutdown the
  * manager — that's the caller's responsibility.
@@ -213,10 +211,8 @@ async function runOneTurn(
       io.stdoutWrite("(no direct reply from the agent — only the thought above)");
     }
     io.stdoutWrite("\n");
-    // M16: surface a once-per-turn marker when the shadow channel
-    // recovered text the ACP stream missed. Customer-trust signal:
-    // "we noticed transport dropped some content, we recovered it
-    // from the persisted audit record."
+    // Say once per turn, on stderr, when text or reasoning the ACP stream
+    // missed was recovered from opencode's stored message after the turn.
     const last = telemetrySink?.last;
     if (last && (last.reconciledTextBytes > 0 || last.reconciledReasoningBytes > 0)) {
       const DIM = "\x1b[2m";
@@ -284,10 +280,9 @@ async function runRepl(args: CommonArgs, io: CliIO): Promise<number> {
   const validated = loadAndValidate(args, io, null);
   if ("exitCode" in validated) return validated.exitCode;
 
-  // For unauthorised users we don't even enter the loop — the refusal
-  // is keyed off the first incoming line so we can detect the
-  // language. Authorised path: persistent SessionManager + Tracker
-  // across all turns of this REPL.
+  // An unauthorised user never reaches the loop: loadAndValidate above has
+  // already printed the refusal. Authorised path: one SessionManager and
+  // TurnMetaTracker across all turns of this REPL.
   const telemetrySink: { last?: TurnTelemetry } = {};
   const mgr = new SessionManager(validated.cfg, undefined, {
     onTelemetry: (t) => (telemetrySink.last = t),
@@ -304,10 +299,8 @@ async function runRepl(args: CommonArgs, io: CliIO): Promise<number> {
         return 0;
       }
       const rc = await runOneTurn(mgr, tracker, args.agentId, args.userId, line, io, telemetrySink);
-      // A single failing turn doesn't kill the REPL — log and let the
-      // user retry. Only return non-zero if the SessionManager itself
-      // is no longer usable (would surface as the next prompt
-      // throwing during spawn).
+      // A failing turn, a failed spawn included, does not end the REPL: the
+      // error is printed and the user can try another line.
       if (rc !== 0) {
         io.stderrWrite("(turn failed — try another line, or empty line to exit)\n");
       }

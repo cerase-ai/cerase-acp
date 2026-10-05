@@ -21,8 +21,8 @@ const logger = makeLogger("cerase-acp.session-manager");
 /**
  * Streaming session-update events the caller cares about. We forward the
  * raw ACP SessionUpdate union (agent_message_chunk, tool_call,
- * tool_call_update, plan, agent_thought_chunk, etc.) — the stream-buffer
- * in M4 picks the cases it cares about.
+ * tool_call_update, plan, agent_thought_chunk, etc.), and each caller (the
+ * dispatcher's reply stream, the CLI) picks the cases it needs.
  */
 type SessionUpdate = acp.SessionNotification["update"];
 
@@ -40,9 +40,8 @@ export interface PromptResult {
  * without parsing log output.
  *
  * Used to dimension the upstream opencode race (#17505 / #25421) in
- * production: if `drainExit === "ceiling"` or `lastChunkAgeMs` is
- * near `POST_PROMPT_MAX_DRAIN_MS` we know the drain bound needs more
- * room or the M16 reconciler should kick in.
+ * production: a `drainExit` of "ceiling", or a `lastChunkAgeMs` near
+ * `POST_PROMPT_MAX_DRAIN_MS`, says the drain bound needs more room.
  */
 export interface TurnTelemetry {
   agentId: string;
@@ -66,13 +65,13 @@ export interface TurnTelemetry {
    */
   lastChunkAgeMs: number;
   /**
-   * Bytes of `agent_message_chunk` content recovered via M16 REST
-   * reconciliation after the drain loop. `0` is the happy path —
-   * the ACP stream delivered everything. Any non-zero value flags
-   * an upstream race that the M16 shadow channel just patched.
+   * Length (`string.length`) of the `agent_message_chunk` text recovered
+   * from opencode's REST API after the drain loop. `0` means the ACP stream
+   * delivered everything; any other value is text the stream dropped and
+   * the reconciliation replayed.
    */
   reconciledTextBytes: number;
-  /** Same as above but for `agent_thought_chunk` (reasoning) bytes. */
+  /** Same as above but for `agent_thought_chunk` (reasoning) text. */
   reconciledReasoningBytes: number;
 }
 
@@ -80,8 +79,8 @@ export interface SessionManagerOptions {
   /** Subscribe to per-turn telemetry. Fires AFTER the drain loop. */
   onTelemetry?: (t: TurnTelemetry) => void;
   /**
-   * Inject a canonical-message fetcher for M16 shadow-channel
-   * reconciliation. Tests use this to substitute a canned reply;
+   * Inject a canonical-message fetcher for the REST reconciliation after
+   * each turn. Tests use this to substitute a canned reply;
    * production omits it and `defaultFetcher` (reads the opencode
    * serve REST endpoint from inside the slot) is used.
    */
@@ -94,22 +93,16 @@ export interface SessionManagerOptions {
    */
   endpointResolver?: (containerName: string) => RestEndpoint | null;
   /**
-   * Per-turn watchdog: a hung opencode child used to block that user's
-   * PromptQueue forever (until the idle kill). The child is killed, the turn
-   * rejects (the dispatcher sends the localized copy) and the next prompt
-   * respawns.
+   * Per-turn watchdog for a hung opencode child: the child is killed, the
+   * turn rejects (the dispatcher sends the localized copy) and the next
+   * prompt respawns.
    *
-   * ⚠️ **What it measures is SILENCE, not elapsed time.** It used to race the
-   * prompt against a ten-minute wall clock, and a wall clock cannot tell a dead
-   * child from one that is working: for 600 seconds the two look identical, and
-   * killing is the remedy for only the first. Measured on the bench with the
-   * turn limit raised so sessions were not cut short first: on the 41 hardest
-   * tasks the slower flash model ran a median of 177 s, a p90 of 474 s and a
-   * longest of 2 791 s — 11 sessions of 205 past the old watchdog, each one
-   * credits consumed turn by turn and no answer delivered.
-   *
-   * A child emitting thought chunks is alive whatever the clock says, so every
-   * chunk re-arms this; a child silent for this long is not going to start.
+   * It measures silence, not elapsed time, because a wall clock cannot tell a
+   * dead child from one that is working. Every update re-arms it, so a child
+   * emitting thought chunks is never ended by it. It does not fire while a
+   * tool call the turn opened is still running: a sub-agent started with the
+   * `task` tool sends this session nothing until it returns, and then only
+   * the ceiling applies.
    */
   turnSilenceMs?: number;
   /**
@@ -218,8 +211,8 @@ export class SessionOutgrownError extends Error {
  *
  * Both halves are required: the error name the runtime put in `data`, and the
  * words "too large to compact" in the message. Anything else, an overflow the
- * runtime reports for another reason included, fails the turn as it always
- * did.
+ * runtime reports for another reason included, fails the turn as any other
+ * error does.
  */
 export function isCompactionOverflow(err: unknown): boolean {
   if (!(err instanceof acp.RequestError)) return false;
@@ -359,8 +352,8 @@ export class SessionManager {
   // here. The record is written to the state directory as well, because the
   // bridge restarts too, and a bridge that is killed lets no child exit first.
   private resumableSessions: ResumableSessions;
-  // Agents whose slot does not offer the Cerase mode, so no session for them
-  // can start. Kept here rather than in the caller because this is where the
+  // Agents whose slot does not offer the mode they run under (`mode`, default
+  // `cerase`), so no session for them can start. Kept here rather than in the caller because this is where the
   // absence is seen and where the recovery is seen too, and a report that
   // only ever gets set is a report that outlives the fault it names.
   private sessionModeFailures = new Map<string, SessionModeUnavailable>();
@@ -457,14 +450,13 @@ export class SessionManager {
   /**
    * How many turns this agent has outstanding right now: prompts being
    * generated plus prompts queued behind them, across every user talking to
-   * it.
+   * it, plus the turns the dispatcher holds outside any queue (holdTurn).
    *
-   * This is the only place in the appliance that knows. A turn IS the
-   * `session/prompt` RPC this queue holds, so the count is true the instant
-   * the prompt is enqueued and false the instant the RPC settles — no poll,
-   * no timestamp, no window. The control-plane asks it before replacing an
-   * assistant's AGENTS.md, because that write restarts the slot and a restart
-   * mid-generation loses the user's message.
+   * A prompt counts from the moment it is enqueued until its queue task ends,
+   * after the post-prompt drain and the REST reconciliation. The
+   * control-plane asks it before replacing an assistant's AGENTS.md, because
+   * that write restarts the slot and a restart mid-generation loses the
+   * user's message.
    *
    * A session still being spawned counts too. The child is started BY the
    * first prompt, so the gap between "the user sent something" and "the queue
@@ -485,8 +477,9 @@ export class SessionManager {
   /**
    * Count a turn as in flight until the returned function is called, for the
    * moments it sits in no queue: between the tries of a turn held through a
-   * restart, and while the slot is asked whether it restarted. A control-plane
-   * that read the agent as idle then would restart the slot again under it.
+   * restart, while the slot is asked whether it restarted, and while a
+   * conversation that outgrew its summary starts over. A control-plane that
+   * read the agent as idle then would restart the slot again under it.
    */
   holdTurn(agentId: string): () => void {
     this.heldTurns.set(agentId, (this.heldTurns.get(agentId) ?? 0) + 1);
@@ -560,11 +553,11 @@ export class SessionManager {
   }
 
   // ────────────────────────────────────────────────────────────────
-  // Hot ops — invoked by ConfigReloader (M-auto-reload v0.2) when
-  // `agents.yaml` changes on disk. All four mutate the shared
-  // BridgeConfig in place so downstream consumers reading from the
-  // same reference (Dispatcher, allowlist.isAllowed) see the new
-  // state without a config-passing refactor.
+  // Hot ops, called by applyConfigDiff in bridge.ts when agents.yaml
+  // changes on disk. addAgent, removeAgent, replaceAgent and
+  // updateAllowlist change the shared BridgeConfig in place, so the
+  // Dispatcher and allowlist.isAllowed, which read the same object, see the
+  // new state.
 
   /**
    * Register a new Agent so subsequent prompts addressed to it
@@ -584,8 +577,7 @@ export class SessionManager {
   /**
    * Remove an Agent: kill all its in-flight ACP children, then
    * drop it from agentsById + the shared config. No-op when the
-   * id is not registered (idempotent — the reloader can fire
-   * concurrent diffs without races).
+   * id is not registered.
    */
   removeAgent(agentId: string): void {
     if (!this.agentsById.has(agentId)) {
@@ -600,11 +592,9 @@ export class SessionManager {
   }
 
   /**
-   * Terminate every (user, agentId) ACP child for one agent without
-   * removing the agent itself — used when the diff classifies a
-   * mutation as `bot_token_or_spawn` (the adapter and children
-   * must be torn down, but the agent is still in the config).
-   * Subsequent prompts respawn under the updated AgentConfig.
+   * Terminate every ACP child of one agent without removing the agent
+   * itself. removeAgent and replaceAgent call it; after replaceAgent the
+   * next prompt spawns under the reloaded AgentConfig.
    */
   killAgentSessions(agentId: string): void {
     for (const [key, entry] of this.entries) {
@@ -693,9 +683,9 @@ export class SessionManager {
         // If spawnAndInit rejects (a child dies mid-handshake, an EPIPE on a
         // closed stdin, etc.), `await pending` below surfaces the rejection to
         // the caller — but this discarded chain ALSO rejects, and with no
-        // `.catch` it becomes an UNHANDLED rejection that terminates the whole
-        // multi-tenant bridge (Node ≥15) over one user's recoverable per-turn
-        // failure. Swallow it here; the awaiter still handles the real error.
+        // `.catch` it is an unhandled rejection: index.ts logs it as an error,
+        // and a process without that handler, such as the CLI, exits on it.
+        // Swallow it here; the awaiter still handles the real error.
         pending
           .finally(() => {
             if (this.inFlightSpawns.get(key) === pending) this.inFlightSpawns.delete(key);
@@ -735,19 +725,18 @@ export class SessionManager {
       // arrive AFTER the `session/prompt` RPC response with
       // stopReason: end_turn — a server-side race between
       // event-subscription and prompt-RPC reply in opencode acp.
-      // Without draining, the caller (CLI / Discord adapter) sees
+      // Without draining, the caller (the dispatcher or the CLI) sees
       // the final delta as missing and the reply appears empty or
       // truncated.
       //
-      // Counters fuel the M15 `[turn_telemetry]` line: operators
-      // grep these to dimension the race in production and decide
-      // whether the M16 reconciler needs to fire.
+      // The counters feed the `[turn_telemetry]` line, which operators
+      // grep to measure the race in production.
       let lastUpdateAt = Date.now();
       let chunksReceived = 0;
       let textChunks = 0;
       let thoughtChunks = 0;
-      // M16 bookkeeping — accumulate everything the ACP delta stream
-      // gave us so the reconciler can diff against the REST snapshot.
+      // Accumulate everything the ACP delta stream gave us so the
+      // reconciler can diff it against the REST snapshot.
       // We also latch the first messageId we see; ACP attaches it to
       // both agent_message_chunk and agent_thought_chunk updates.
       const seen: SeenState = { textSeen: "", reasoningSeen: "" };
@@ -893,11 +882,10 @@ export class SessionManager {
         // elapses as a safety ceiling. Captures the post-RPC
         // notifications that opencode acp emits asynchronously.
         //
-        // Ceiling raised 2000 → 8000 in M15 after end-to-end tests
-        // showed turns with tool-call intermediates emitting their
-        // final agent_message_chunk ~3s after end_turn. 8s is
-        // generous — turns that haven't streamed in 300ms exit
-        // early via the idle branch anyway.
+        // The ceiling is 8 s because turns with tool-call intermediates
+        // have been seen emitting their final agent_message_chunk about
+        // 3 s after end_turn. A turn that has not streamed for 300 ms
+        // exits early through the idle branch.
         const POST_PROMPT_IDLE_MS = 300;
         const POST_PROMPT_MAX_DRAIN_MS = 8000;
         const drainStart = Date.now();
@@ -918,20 +906,17 @@ export class SessionManager {
           }
           await new Promise((r) => setTimeout(r, 50));
         }
-        // M16: shadow-channel reconciliation. After the drain has
-        // settled we ask opencode serve for the canonical assistant
-        // message and replay any text/reasoning the ACP delta stream
-        // missed as synthetic chunks. Failure modes (no messageId yet,
-        // no endpoint configured, fetch failure) all degrade silently
-        // to "no reconciliation" — the M15 drain alone still covered
-        // the majority of cases.
+        // Shadow-channel reconciliation. After the drain has settled we
+        // ask opencode serve for the canonical assistant message and
+        // replay any text/reasoning the ACP delta stream missed as
+        // synthetic chunks. With no messageId, no endpoint configured, or
+        // a failed fetch (logged as a warning), the turn keeps what the
+        // stream and the drain delivered.
         if (assistantMessageId) {
-          // Container name is the third spawn arg in the canonical
-          // `docker exec -i <container> opencode acp` shape — the
-          // same name the bridge talks to over the docker socket.
-          // Falls back to `cerase-agent-${agent.id}` for legacy
-          // (pre-slot-pool) agents.yaml shapes where args[2] isn't
-          // a container name.
+          // Container name is the third spawn arg in the appliance's
+          // `docker exec -i <container> opencode acp` shape, the same
+          // name the bridge talks to over the docker socket. With fewer
+          // than three args it falls back to `cerase-agent-<agent id>`.
           const containerName = agent.spawn.args[2] ?? `cerase-agent-${agent.id}`;
           const endpoint = this.endpointResolver(containerName);
           if (endpoint) {
@@ -1046,7 +1031,8 @@ export class SessionManager {
     // Wire the ACP client. The client handler implements the Client
     // interface: it forwards sessionUpdate notifications to the current
     // entry's onUpdate callback (the active prompt() invocation), and
-    // auto-cancels permission requests (PoC policy — no in-DM buttons).
+    // answers permission requests automatically through
+    // permission-policy.ts.
     const stream = acp.ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
       Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
@@ -1188,7 +1174,7 @@ export class SessionManager {
 
       // `agent.cwd` is the path inside the agent container — DON'T use
       // process.cwd() here, that would leak the host/bridge cwd into the
-      // ACP child's session state. Default `/root/cerase/workspace`
+      // ACP child's session state. Default `/home/agent/cerase/workspace`
       // comes from the config schema.
       if (resumed) {
         sessionId = resumed;
@@ -1214,11 +1200,10 @@ export class SessionManager {
       // customer's assistant reasonably answers a paragraph.
       //
       // The rule is that the session runs under the mode it asked for or it
-      // does not run. Carrying on without it used to look like the forgiving
-      // choice, and it is not: what answers the customer then is opencode's
-      // own agent, a different assistant under this one's name, and the only
-      // trace was a warning line nobody reads. A refused session is at least
-      // a fault someone can act on.
+      // does not run. Carrying on without it would have opencode's own agent
+      // answer the customer, a different assistant under this one's name,
+      // with a warning line as the only trace. A refused session is a fault
+      // someone can act on.
       //
       // The absence is a property of the slot, not of the session, so it is
       // remembered per agent and served on the status endpoint. It is not

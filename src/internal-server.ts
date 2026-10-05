@@ -1,27 +1,24 @@
-// SCHED-2 — production internal HTTP endpoint (shared-secret auth) the
-// control-plane scheduled-message dispatcher POSTs to:
+// The internal HTTP endpoint (shared-secret auth) the control-plane posts
+// scheduled and console messages to:
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, label?, system_message_only?, notice? }  → 202
+//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice? }  → 202
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first. A
 // platform note that arrives while a turn of its conversation runs waits for
 // that turn with the other notes, and they share the next one
 // (note-coalescer.ts).
-// The 202 means accepted (validation + allowlist passed), not "turn
-// completed" — the caller (AcpInjector) uses a 15s fire-and-forget timeout,
-// and awaiting the full model turn made every >15s turn throw
-// ChatInjectFailed client-side while the turn actually ran, so the scheduled
-// dispatcher re-fired it (duplicate DMs). The heads-up + turn run as a logged
-// background task; failures stay observable via loud logs + the `inject`
-// block of GET /internal/status.
-// E3: when `system_message_only` is true it instead delivers `text` straight
-// to the DM as a system message and runs NO model turn (the E2 bind-time
-// connect nudge — a notification, not a prompt the agent should answer);
-// that path is a fast channel send, so it stays synchronous and keeps its
-// truthful 500 on delivery failure. With a `notice` ({ title, body, link? }),
+// The 202 means accepted (validation and allowlist passed), not that the turn
+// completed: the caller (AcpInjector) gives up after 15 s, a turn routinely
+// takes longer, and a caller that saw a timeout would send the message again.
+// The heads-up and the turn run as a logged background task; failures show in
+// the logs and the `inject` block of GET /internal/status.
+// When `system_message_only` is true it instead delivers `text` straight to
+// the DM as a system message and runs no model turn (a notification, not a
+// prompt the agent should answer); that path is a fast channel send, so it
+// stays synchronous and keeps its truthful 500 on delivery failure. With a `notice` ({ title, body, link? }),
 // the system message is a platform notice, drawn in the channel's own box with
 // its link in a button (platform-notice.ts); `text` is then the same notice
 // spelled out, for a bridge that predates notices.
@@ -42,14 +39,6 @@ export interface InternalServer {
   close(): Promise<void>;
 }
 
-/**
- * One agent's REAL runtime state on the bridge.
- * `attached` = an adapter is held for it; `ready` = its channel client
- * reports a live connection right now (discord.js `client.isReady()`).
- * The field is channel-agnostic (`ready`, not `discordReady`): the bridge
- * is multi-channel and the control-plane maps it to a single "Connessione"
- * badge regardless of platform.
- */
 /**
  * Why an agent is down, when the bridge knows and has stopped trying to fix
  * it. A retry loop against a refused credential looks like recovery in
@@ -94,6 +83,12 @@ export interface SessionModeMissingFailure {
   detail: string;
 }
 
+/**
+ * One agent's runtime state on the bridge. `attached` = an adapter is held
+ * for it; `ready` = the adapter reports it can carry a message right now
+ * (false after a failed start). The control-plane maps `ready` to a single
+ * "Connessione" badge whatever the channel.
+ */
 export interface AgentLiveness {
   id: string;
   channel: string;
@@ -110,13 +105,10 @@ export interface AgentLiveness {
    * Ms since the channel provider last answered this adapter, `null` when it
    * is not measured (no probe on this channel) or has never answered.
    *
-   * It is here because `ready` alone was read as reachability and is not the
-   * same question. A bridge that had lost its network answered `ready: true`
-   * for five minutes with nothing logged: the client's cached view of its own
-   * socket said one thing and the network said another, and this surface
-   * carried only the first. `ready` now takes this age into account; the age
-   * itself is published so a reader can tell a dropped socket apart from a
-   * silent provider without guessing.
+   * It is published beside `ready`, which takes it into account, so a reader
+   * can tell a dropped socket apart from a silent provider without guessing:
+   * a client's view of its own socket can report a live connection while
+   * nothing answers it.
    */
   lastContactAgeMs?: number | null;
   /**
@@ -178,9 +170,8 @@ export interface InternalServerOptions {
   getAgentStatus?: () => AgentLiveness[];
   /**
    * The session limits the running bridge enforces, served as the additive
-   * `session` block of `GET /internal/status`. What the file says and what the
-   * process runs under came apart once, and nothing could tell them apart
-   * from outside the container.
+   * `session` block of `GET /internal/status`, so the limits in force can be
+   * compared with the file from outside the container.
    */
   getSessionLimits?: () => Record<string, number>;
   /**
@@ -189,25 +180,23 @@ export interface InternalServerOptions {
    * ANY user_id on ANY agent's channel (the model-turn path checks the
    * allowlist, but the heads-up + system-message-only sends bypassed it).
    * When provided, an inject for a (agentId,userId) not in the allowlist is
-   * rejected 403 before any send. Absent → no allowlist enforcement
-   * (back-compat for callers that pre-validate).
+   * rejected 403 before any send. Absent → no allowlist enforcement, for a
+   * caller that validates first.
    */
   isAllowed?: (agentId: string, userId: string) => boolean;
 }
 
 /** The heads-up posted before processing when surface_in_chat is set. */
 export function headsUpText(body: string): string {
-  // SCHED-5: the user must see exactly which scheduled message fired and
-  // that the agent is taking it on. Body rendered as a code block.
+  // The user must see exactly which scheduled message fired and that the
+  // agent is taking it on. Body rendered as a code block.
   return `🕐 Ricevuto messaggio temporizzato:\n\`\`\`\n${body}\n\`\`\`\nora lo prendo in carico.`;
 }
 
 /**
- * The observable outcome of the detached inject turns,
- * served as the additive `inject` block of GET /internal/status. Because the
- * endpoint now acks 202 at acceptance, this (plus loud logs) is where a
- * failed background turn surfaces — the M-ACP-FAILLOUD guarantee that a 202
- * is never silently followed by nothing.
+ * The observable outcome of the detached inject turns, served as the `inject`
+ * block of GET /internal/status. The endpoint acks 202 at acceptance, so this
+ * block and the logs are where a failed background turn shows.
  */
 export interface InjectActivity {
   in_flight: number;
@@ -290,11 +279,10 @@ async function handleRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
 
   // An unauthenticated liveness probe for the compose healthcheck, served
-  // before the shared-secret gate. Returns 200 when the internal server is
-  // listening AND at least one adapter can carry a message, so the container
-  // goes unhealthy the moment the bridge's inject transport is down — unlike
-  // the old `node --version` check, which stayed green all through the
-  // crash-loop. It leaks only counts (never agent identities or secrets), so
+  // before the shared-secret gate. It answers 503 when the bridge holds
+  // adapters and every one reports itself down (noChatTransport), and 200
+  // otherwise, so the container goes unhealthy when no chat can reach an
+  // assistant. It leaks only counts (never agent identities or secrets), so
   // it needs no bearer; which credential was refused is on /internal/status,
   // behind the bearer, because that names an agent.
   if (req.method === "GET" && url.pathname === "/healthz") {
@@ -316,11 +304,10 @@ async function handleRequest(
       // is down" when nothing is down — a number that gets an alert wired to
       // it, and then muted.
       //
-      // What `ready` MEANS is set by the adapter, and for a Discord adapter it
-      // now includes whether the provider is answering rather than only what
-      // its client caches. That is the other half of the same lesson: this
-      // number is the one an alert is wired to, so it has to be the one that
-      // moves when the bridge cannot reach anybody.
+      // What `ready` means is set by the adapter; for a Discord adapter it
+      // includes whether the provider is answering, not only what its client
+      // caches. This is the number an alert is wired to, so it has to move
+      // when the bridge cannot reach anybody.
       //
       // So the denominator is published too, over the adapters the question
       // applies to. `readyOf` is 0 on a bridge of only web agents, and
@@ -351,8 +338,8 @@ async function handleRequest(
       return;
     }
     const agents = opts.getAgentStatus ? opts.getAgentStatus() : [];
-    // Additive `inject` block — the control-plane's
-    // BridgeStatusClient reads only `agents`, so this is back-compatible.
+    // The `inject` block reports the detached inject turns; the
+    // control-plane's BridgeStatusClient reads its last_failure.
     sendJson(res, 200, {
       agents,
       inject: injects.snapshot(),
@@ -390,15 +377,15 @@ async function handleRequest(
     return;
   }
   const surfaceInChat = rec.surface_in_chat !== false; // default true
-  // E3: a notification-only injection (the E2 bind-time connect nudge) delivers
-  // the text straight to the DM as a system message and must NOT run a model
-  // turn — otherwise the agent would "reply" to its own nudge. When set, we send
-  // `text` verbatim via sendSystemMessage and skip handleMessage entirely.
+  // A notification-only injection delivers straight to the DM and runs no
+  // model turn, otherwise the agent would reply to its own nudge: a notice
+  // goes through sendNotice, anything else as `text` verbatim through
+  // sendSystemMessage, and handleMessage is skipped.
   const systemMessageOnly = rec.system_message_only === true;
-  // C1-4: an optional caller-supplied heads-up overrides the default
+  // An optional caller-supplied heads-up overrides the default
   // scheduled-message wording (the in-admin chat echo passes its own
-  // attribution marker, e.g. "💬 Paolo (dal pannello): …"). Absent → the
-  // scheduled dispatcher's existing heads-up is used, so it is unaffected.
+  // attribution marker, e.g. "💬 Paolo (dal pannello): …"). Absent: the
+  // wording of headsUpText.
   const headsUp = typeof rec.heads_up === "string" && rec.heads_up.length > 0 ? rec.heads_up : headsUpText(text);
   // A notice is refused rather than sent as text when it is malformed, and
   // when it comes as a model turn: either is the caller's bug, and a notice the
@@ -435,13 +422,11 @@ async function handleRequest(
     return;
   }
 
-  // Ack acceptance now, before the heads-up + model
-  // turn: the caller (AcpInjector, 15s timeout, fire-and-forget) must never
-  // time out on a long turn that is in fact running — that made the
-  // scheduled-message dispatcher re-fire it (duplicate DMs) and the panel
-  // keep the draft. The turn runs as a logged background task below; its
-  // failures stay observable via logger.error + the
-  // `inject` block of GET /internal/status — never a silent 202-then-nothing.
+  // Ack acceptance now, before the heads-up and the model turn: the caller
+  // (AcpInjector) gives up after 15 s, and a long turn it gave up on would be
+  // sent again while it runs. The turn runs as a logged background task
+  // below; its failures show through logger.error and the `inject` block of
+  // GET /internal/status.
   sendJson(res, 202, { status: "accepted" });
 
   injects.start();
@@ -455,10 +440,10 @@ async function handleRequest(
 }
 
 /**
- * The detached heads-up + model turn behind an already
- * ack'd inject. Everything is caught here: a failed heads-up stays
- * best-effort (log + continue, as before), a failed/throwing turn is logged
- * loudly and recorded on the tracker so /internal/status surfaces it.
+ * The detached heads-up and model turn behind an already ack'd inject.
+ * Everything is caught here: a failed heads-up is logged and the turn goes
+ * on, a failed or throwing turn is logged loudly and recorded on the tracker
+ * so /internal/status surfaces it.
  */
 async function runInjectTurn(
   opts: InternalServerOptions,
@@ -487,7 +472,7 @@ async function runInjectTurn(
     // (and the dispatcher has already sent the user-facing error copy).
     // A platform note that arrives during a turn of its conversation waits
     // for it with the other notes, and they run as one turn; anything else
-    // goes straight to the dispatcher, as it always did.
+    // goes straight to the dispatcher.
     const result = await notes.submit(agentId, userId, text);
     if (!result.ok) {
       logger.error({ err: result.error, agentId, userId }, "detached inject turn/delivery failed");

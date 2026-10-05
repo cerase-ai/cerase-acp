@@ -1,9 +1,9 @@
-// CHAT-UX / ATTACH-1 — read a file from an agent's workspace so the
-// bridge can upload it as a chat attachment.
+// Read a file from an agent's workspace so the bridge can upload it as a chat
+// attachment.
 //
 // The agent's workspace lives at ~/cerase/workspace inside its slot-pool
-// container (`cerase-agent-N`); the bridge already has the docker socket
-// (OPT-32), so it reads the file with `docker exec <container> cat …`.
+// container (`cerase-agent-N`); the bridge already reaches the slots through
+// Docker, so it reads the file with `docker exec <container> cat …`.
 // The path is workspace-relative and traversal-guarded upstream
 // (isSafeWorkspacePath) — re-checked here as a hard boundary.
 
@@ -120,7 +120,7 @@ export async function readAgentWorkspaceFile(
   }
   const root = opts?.workspaceRoot ?? DEFAULT_WORKSPACE_ROOT;
   // The console's limit, which the channel's own may undercut when the file is
-  // sent; it was the bridge's own 8 MB until the console's reached it.
+  // sent.
   const maxBytes = opts?.maxBytes ?? fileLimitBytes();
   const fetcher = opts?.fetcher ?? realFetcher;
   // execFile (no shell) → the path is a single argv member, so spaces /

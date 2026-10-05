@@ -12,8 +12,7 @@
 // answer, only a person editing agents.yaml or the Discord developer portal.
 // Three discord.js codes pass it.
 //
-//   TokenInvalid       the provider refused the token at login. This is the
-//                      one seen in production.
+//   TokenInvalid       the provider refused the token at login.
 //   TokenMissing       the client was asked to use a token and had none. A
 //                      retry re-asks with the same nothing.
 //   DisallowedIntents  the application behind the token has not been granted a

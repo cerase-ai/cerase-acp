@@ -1,5 +1,5 @@
-// The Google Chat REST calls the Workspace Chat adapter makes as the tenant's
-// Chat app: posting a reply, rewriting the text of a message it posted,
+// The Google Chat REST calls the Workspace Chat adapter makes as an
+// assistant's Chat app: posting a reply, rewriting the text of a message it posted,
 // finding a user's direct-message space, listing the app's direct-message
 // spaces and downloading an upload, each authorised with app authentication.
 //

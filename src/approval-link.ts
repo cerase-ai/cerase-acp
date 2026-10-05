@@ -1,5 +1,5 @@
-// HITL-3/4 — acp injects the server-minted approval link into the
-// agent's outgoing message via the {{APPROVAL_LINK}} placeholder.
+// The bridge injects the server-minted approval link into the agent's
+// outgoing message via the {{APPROVAL_LINK}} placeholder.
 //
 // The link is minted by the control-plane and fetched here over the
 // internal channel — it NEVER enters the agent/LLM context (the agent
@@ -40,7 +40,7 @@ export interface PendingLinkOptions {
 
 /**
  * Fetch the signed link for an agent's latest pending approval from the
- * control-plane, or null when there is none / on any failure.
+ * control-plane, or null when there is none. Throws when the fetch fails.
  */
 export async function fetchPendingApprovalLink(agentId: string, opts: PendingLinkOptions): Promise<string | null> {
   const f = opts.fetchImpl ?? fetch;

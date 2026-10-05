@@ -1,14 +1,11 @@
 // Shadow-channel reconciliation against opencode serve's REST snapshot.
 //
-// Background — M16 of cerase-acp. The ACP stdio child (`opencode acp`)
-// has a documented race where session/update notifications can land
-// AFTER the session/prompt RPC reply with stopReason: end_turn (upstream
-// anomalyco/opencode#17505, PR #21316 was auto-closed by the
-// compliance bot before review). Our M15 drain bumps the safety
-// ceiling to 8s; M16 closes the structural gap: after the drain, we
-// fetch the canonical assistant message from `opencode serve`'s REST
-// API (`GET /session/{sid}/message/{mid}`) and emit synthetic chunks
-// for whatever the delta stream missed.
+// The ACP stdio child (`opencode acp`) can send session/update notifications
+// AFTER the session/prompt reply with stopReason: end_turn (upstream
+// anomalyco/opencode#17505). The session manager drains for up to 8 s after
+// end_turn, then fetches the canonical assistant message from `opencode
+// serve`'s REST API (`GET /session/{sid}/message/{mid}`) and emits synthetic
+// chunks for whatever the delta stream missed.
 //
 // This module is pure: it doesn't fetch anything. The fetching belongs
 // to the session manager; this just diffs `seen` against `canonical`
@@ -16,7 +13,7 @@
 
 /**
  * One `parts[]` entry from the REST snapshot. We model only the
- * fields M16 cares about — text content, kind, and the `ignored`
+ * fields the reconciliation needs — text content, kind, and the `ignored`
  * marker that opencode's own delta path uses to skip parts (see
  * agent.ts:466 — `part.ignored !== true`). Tool / step / file /
  * patch parts have non-streaming kinds; we leave their typing

@@ -1,12 +1,10 @@
-// C4 — inbound chat attachments: download files a user sent (Discord/Telegram/
-// Slack/Workspace Chat/panel), drop them into the agent's workspace, and prepend
-// the `[Uploaded files: <paths>]` marker the `message-attachment-receiver` skill
+// Inbound chat attachments: download files a user sent (Discord, Telegram,
+// Slack, Workspace Chat), drop them into the agent's workspace, and prepend the
+// `[Uploaded files: <paths>]` marker the `message-attachment-receiver` skill
 // consumes (it routes each path to the OCR / transcribe / docreader recipes).
 //
-// This is the bridge-side half that was missing: the agent-side skill + recipes
-// already exist, but no adapter downloaded inbound files or emitted the marker —
-// so attachments never reached the agent. The logic lives here (pure +
-// injectable) so it is unit-tested without channel SDKs / real docker / network.
+// The logic lives here (pure + injectable) so it is unit-tested without
+// channel SDKs / real docker / network.
 
 import { fileLimitMb } from "./file-limit.js";
 import { makeLogger } from "./logger.js";
@@ -25,10 +23,8 @@ export type Channel = "discord" | "telegram" | "slack" | "workspace-chat";
  * Each channel's real platform ceiling for an inbound file, in MB. The
  * EFFECTIVE cap is `min(the console's limit, this)`. Discord caps DM uploads at
  * ~25 MB; Telegram's Bot API getFile download tops out at 20 MB (the LOWEST of
- * the lot — lower than Discord); Slack allows up to ~1 GB. A channel with NO
- * entry here falls back to the console's limit alone — workspace-chat is the
- * internal web chat, which has no platform ceiling, so it is intentionally
- * omitted.
+ * the lot — lower than Discord); Slack allows up to ~1 GB. A channel with no
+ * entry here, Workspace Chat, falls back to the console's limit alone.
  */
 const CHANNEL_MAX_MB: Partial<Record<Channel, number>> = { discord: 25, telegram: 20, slack: 1024 };
 

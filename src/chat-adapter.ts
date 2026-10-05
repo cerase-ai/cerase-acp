@@ -1,17 +1,14 @@
 // The cross-channel adapter contract.
 //
-// Each chat-channel implementation (discord, telegram, slack,
-// workspace_chat) returns a ChatAdapter — same interface the original
-// DiscordAdapter shipped, generalised across channels. The bridge
-// stores them in `Map<agentId, ChatAdapter>` and the dispatcher
-// reaches the user via `adapter.makeSendTarget(userId)`. Adding a new
-// channel = adding one file + one switch case in `createChatAdapter`.
+// Each channel implementation (discord, telegram, slack, workspace_chat,
+// web) returns a ChatAdapter. The bridge stores them in
+// `Map<agentId, ChatAdapter>` and the dispatcher reaches the user via
+// `adapter.makeSendTarget(userId)`. Adding a channel means adding it to
+// ChatChannelSchema, one adapter file and one case in `createChatAdapter`.
 //
 // The dispatcher, session-manager, allowlist, turn-meta, prompt-queue,
-// send-queue, typing-keepalive — everything else — is channel-agnostic
-// and unchanged. The whole point of the milestone: NO special cases
-// for non-Discord channels; the per-channel surface area is one small
-// adapter file each.
+// send-queue and typing-keepalive are channel-agnostic; what a channel does
+// differently is in its adapter and in the optional members below.
 
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
@@ -20,13 +17,12 @@ import type { ReachabilitySnapshot } from "./reachability.js";
 
 /**
  * The outcome of a single delivery attempt to a chat channel. The adapter
- * delivery methods return this instead of
- * `Promise<void>` so a swallowed failure (e.g. `channel.send` rejecting
- * because the slot is down / the gateway dropped) can be propagated up the
- * stack — through the SendQueue, the Dispatcher, and finally surfaced as a
- * truthful HTTP status on `/internal/inject` — instead of resolving as a
- * blind success. Adapters MUST NOT throw on a send error anymore: they
- * catch it and return `{ ok: false, error }`.
+ * delivery methods return this instead of `Promise<void>` so a failure (e.g.
+ * `channel.send` rejecting because the gateway dropped) reaches the
+ * SendQueue and the Dispatcher, and from there the turn's result: the
+ * `inject` block of `/internal/status`, or the 500 a `system_message_only`
+ * inject answers. Adapters must not throw on a send error: they catch it and
+ * return `{ ok: false, error }`.
  *
  * `withheld` is set by the bridge's send path on a chunk it kept out of the
  * chat whole: an internal summary, or tool-call markup and nothing else. The
@@ -55,18 +51,17 @@ export interface ChatAdapter {
    *
    * The Discord adapter answers with both halves: discord.js `client.isReady()`
    * (true after login, false on a gateway drop) AND its reachability
-   * measurement below. The flag alone reported a live connection through a
-   * five-minute network outage, which is the case a client's view of its own
-   * socket structurally cannot see. An adapter that doesn't implement this at
-   * all is treated as ready while it is held (best-effort — those channels
-   * expose no finer signal yet).
+   * measurement below, because a client's view of its own socket can report a
+   * live connection through a network outage. An adapter that doesn't
+   * implement this is reported as `ready: null` on /internal/status (false
+   * after a failed start), and is counted in neither `ready` nor `readyOf` on
+   * /healthz.
    */
   ready?(): boolean;
   /**
    * What this adapter has measured about the provider answering it: when it
-   * last did, and whether that is now old enough to call silence. Optional —
-   * an adapter without one reports readiness from its client alone, which is
-   * the older and weaker meaning.
+   * last did, and whether that is now old enough to call silence. Optional:
+   * an adapter without one reports readiness from its client alone.
    *
    * It is published beside `ready` rather than folded away into it, because
    * the two failures need different answers from an operator: a client that
@@ -77,8 +72,8 @@ export interface ChatAdapter {
   /**
    * The function the dispatcher uses to send a chunk to this user's DM.
    *
-   * **OPT-67 typing-indicator contract (applies to ALL adapters that
-   * surface a "is typing…" UX):**
+   * **Typing-indicator contract, for every adapter that shows an "is
+   * typing…" indicator:**
    *
    *   1. Typing should be visible while the turn is silent (signals
    *      "still working" before any text has arrived).
@@ -108,9 +103,9 @@ export interface ChatAdapter {
    *     block. That is now the leak guard for a turn that delivers
    *     nothing, not the normal exit path.
    *
-   * Telegram (`sendChatAction('typing')`), Slack (assistant.threads.
-   * setStatus or similar): same shape — keepalive in the message handler,
-   * cleared by the send that precedes it, NO per-chunk re-trigger.
+   * Telegram (`sendChatAction('typing')`, every 4 s) starts its keepalive in
+   * the text handler and stops it in that handler's `finally`, when the turn
+   * ends; its send target does not end it. Slack raises no indicator.
    *
    * Workspace Chat has no indicator to raise, so its handler posts a
    * placeholder message instead, a single speech balloon, and the send target
@@ -134,11 +129,12 @@ export interface ChatAdapter {
   wholeAnswers?: WholeAnswers;
 
   /**
-   * CHAT-UX / ATTACH-1 — upload a workspace file as a chat attachment to
-   * `userId`. Optional: an adapter that doesn't implement it signals
-   * "attachments not supported on this channel" and the bridge degrades
-   * to a text note. Discord uses `channel.send({ files })`; Telegram
-   * `sendDocument`; Slack `filesUploadV2`; Workspace Chat media upload.
+   * Upload a workspace file as a chat attachment to `userId`. Discord uses
+   * `channel.send({ files })`; the web adapter reports delivery and sends
+   * nothing, because the console links the file from the transcript.
+   * Optional: on an adapter without it (Telegram, Slack, Workspace Chat) the
+   * bridge tells the person the file did not arrive and records the failure
+   * against the turn.
    */
   sendFile?(userId: string, file: OutgoingFile): Promise<DeliveryResult>;
 
@@ -193,7 +189,7 @@ export async function createChatAdapter(agent: AgentConfig, dispatcher: Dispatch
       return createWorkspaceChatAdapter(agent, dispatcher);
     }
     case "web": {
-      // C2-0 — panel-only null-sink channel (maintainer assistant).
+      // Console-only channel whose replies are discarded (maintainer assistant).
       const { createWebAdapter } = await import("./web-adapter.js");
       return createWebAdapter(agent, dispatcher);
     }

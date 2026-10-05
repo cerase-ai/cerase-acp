@@ -182,11 +182,11 @@ describe("runCli", () => {
     expect(out.stderr).toMatch(/unknown|usage/i);
   });
 
-  // ── repl subcommand (M13) ────────────────────────────────────────────────
+  // ── repl subcommand ─────────────────────────────────────────────────────
 
   it("repl keeps ONE child alive across turns (mirrors Discord daemon lifecycle)", async () => {
     // Two stdin lines = two turns. The fake-acp-child echoes its
-    // received cwd in the sessionId (set up in M9). If the same
+    // received cwd in the sessionId. If the same
     // child is reused across turns, the same sessionId surfaces on
     // both turns — the ACP session is single, persistent.
     // Conversely, a per-turn-spawn implementation (the old bash

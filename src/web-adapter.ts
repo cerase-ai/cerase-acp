@@ -3,17 +3,16 @@
 // A panel-only agent — the maintainer assistant — has no external chat
 // client. Turns arrive via the internal inject endpoint (/internal/inject,
 // keyed on a synthetic web user id) and the assistant's reply is persisted
-// by opencode and read from the Filament timeline (cerase-core C1-2). So
+// by opencode and read from the Filament timeline. So
 // this adapter carries NO transport: start/stop are no-ops and the send
 // target discards each streamed chunk (debug-logged only).
 //
 // Attachments work the same way: the console links each `[[attach:]]` file of
 // a turn from the transcript, so sendFile reports delivery and sends nothing.
 //
-// It exists purely so the dispatcher's `resolveSendTarget(agentId, userId)`
-// has a target and `handleMessage` can run a turn — the rest of the
-// pipeline (session-manager, prompt-queue, allowlist, turn-meta) is
-// channel-agnostic and unchanged, exactly the CHANNEL-1 contract.
+// It exists so the dispatcher's `resolveSendTarget(agentId, userId)` has a
+// target and `handleMessage` can run a turn; the rest of the pipeline
+// (session-manager, prompt-queue, allowlist, turn-meta) is channel-agnostic.
 
 import type { ChatAdapter, DeliveryResult, OutgoingFile } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";

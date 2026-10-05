@@ -1,7 +1,7 @@
 // Google Workspace Chat adapter.
 //
 // Every assistant on the channel is its own Chat app, in its own Google Cloud
-// project, as every assistant on Discord is its own bot (DEC-37 in cerase-core).
+// project, as every assistant on Discord is its own bot.
 // Google POSTs every event for every app to one route, WORKSPACE_CHAT_EVENT_PATH,
 // which the appliance's Traefik forwards unchanged to this listener. The
 // project number the event's token was issued for names the app, and so the
@@ -405,8 +405,8 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
    * stored entry says. Listing the app's direct messages is allowed under app
    * authentication, and an app that belongs to one person usually has exactly
    * one: that one is used and remembered. With none or several the lookup by
-   * email is tried as before, which Google refuses to a service account and
-   * the caller logs; a space picked among several could be somebody else's.
+   * email is tried, which Google refuses to a service account and the caller
+   * logs; a space picked among several could be somebody else's.
    */
   async function resolveSpace(chat: WorkspaceChatApi, store: WorkspaceChatSpaces, userId: string): Promise<string> {
     try {
@@ -551,9 +551,8 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
 
   return {
     agentId: agent.id,
-    // Ready while the webhook is serving this assistant: its route registered
-    // and the listener bound. Without it the bridge reported nothing, and the
-    // console read nothing as «never ready» and failed the machine's release.
+    // Ready while the webhook is serving this assistant: its route registered,
+    // its API client made and the listener bound.
     ready() {
       return ROUTES.has(agent.id) && api !== undefined && sharedServer?.listening === true;
     },
