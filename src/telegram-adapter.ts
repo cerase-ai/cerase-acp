@@ -158,16 +158,31 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
         logger.error({ err, agentId: agent.id }, "telegraf reported error");
       });
 
-      // launch() uses long-polling by default — works behind any
-      // outbound-only egress without exposing a public webhook.
-      // We await `bot.launch()` indirectly: telegraf's launch resolves
-      // only on stop, so we kick it off without awaiting completion.
-      bot.launch().catch((err: unknown) => {
-        if (!stopped) {
-          logger.error({ err, agentId: agent.id }, "telegraf launch crashed");
-        }
+      // Long polling, which needs no public webhook. launch() settles only
+      // when polling ends, so start() waits for its onLaunch callback instead:
+      // telegraf calls it once Telegram has answered getMe, which is where a
+      // token Telegram refuses is rejected. A launch that rejects before that
+      // rejects start(), so the bridge reports the channel down and retries it,
+      // instead of counting a bot that never connected as started.
+      const connecting = bot;
+      await new Promise<void>((resolve, reject) => {
+        let connected = false;
+        connecting
+          .launch({}, () => {
+            connected = true;
+            resolve();
+          })
+          .catch((err: unknown) => {
+            if (!connected) {
+              reject(err);
+              return;
+            }
+            if (!stopped) {
+              logger.error({ err, agentId: agent.id }, "telegraf polling stopped with an error");
+            }
+          });
       });
-      logger.info({ agentId: agent.id }, "telegraf bot ready (long-polling)");
+      logger.info({ agentId: agent.id }, "telegraf bot connected (long polling)");
     },
     async stop() {
       stopped = true;

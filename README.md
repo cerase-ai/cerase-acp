@@ -333,6 +333,10 @@ applied agent by agent:
 - **One channel down does not stop the others.** Each adapter starts on its own.
   A failed start is retried on a jittered backoff that starts at 5 s and doubles
   up to 5 minutes, without a container restart.
+- **A Telegram bot is started once Telegram has answered.** The adapter's start
+  waits for Telegram to accept the bot's token before polling, so a token
+  Telegram refuses is a failed start: `/internal/status` reports the agent
+  `ready: false`, and the start is retried as above.
 - **A credential Discord refuses is not retried.** A refused or missing token,
   or a bot whose application lacks the Message Content intent, stops the retries
   for that agent and is reported on `/internal/status` as the failure
