@@ -1081,17 +1081,21 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     expect(google.shown()).toEqual([ELLIPSIS, pickSlowMessage(IT)]);
   });
 
-  // The one ending in which nothing at all is posted: all the turn wrote was
-  // the engine's own summary, which never reaches the chat. No send target
-  // runs, so only the turn's own exit can end the line.
-  it("turns into an ellipsis when the turn ends with nothing posted at all", async () => {
+  // All the turn wrote was the engine's own summary, which never reaches the
+  // chat. That is no answer, so the turn is asked again as an empty one is,
+  // and the line stays up until the answer comes.
+  it("stays up while a reply that was only the engine's summary is asked again, and turns into an ellipsis when the answer comes", async () => {
     await write();
     await vi.waitFor(() => expect(turns).toHaveLength(1));
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     turns[0]!.end("## Objective\nriassumere\n\n## Work state\nin corso\n\n## Next move\nrispondere\n");
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    await settle();
+    expect(google.edits).toEqual([]);
+    expect(texts(google.posts)).toEqual([BALLOON]);
+    turns[1]!.end("Ecco il riepilogo.");
     await expectEachEndedOnce(google.posts[0]!);
-    expect(google.shown()).toEqual([ELLIPSIS]);
-    expect(google.posts).toHaveLength(1);
+    expect(google.shown()).toEqual([ELLIPSIS, "Ecco il riepilogo."]);
   });
 
   it("turns into an ellipsis when the handler throws before the dispatcher made a send target", async () => {

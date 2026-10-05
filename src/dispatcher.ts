@@ -319,7 +319,6 @@ interface ReplyStream {
   /** Drop whatever is held and not yet queued, and take nothing more. */
   discard: () => void;
   endedInMarkup: () => boolean;
-  delivered: () => number;
 }
 
 export class Dispatcher {
@@ -608,8 +607,9 @@ export class Dispatcher {
 
     logger.info({ agentId, userId, textLen: text.length }, "dispatching to session manager");
 
-    // Track whether the turn emitted anything and whether it
-    // failed, so we can surface a user-facing message instead of silence.
+    // Track whether the turn answered the person and whether it failed, so
+    // we can surface a user-facing message instead of silence. Text that was
+    // withheld whole answers nobody: see `spoke`.
     let produced = false;
     // Whether the turn started a tool. A turn with neither text nor a tool
     // call ended on its reasoning alone, and is tried again below.
@@ -681,6 +681,7 @@ export class Dispatcher {
       reply.end();
       const last = await queue.drain();
       if (drainResult.ok) drainResult = last;
+      produced = produced && this.spoke(queue, last, reply);
     }
     if (keep) {
       this.deps.attachOutcomes?.take(agentId, userId);
@@ -710,6 +711,7 @@ export class Dispatcher {
         reply.end();
         const drained = await queue.drain();
         if (drainResult.ok) drainResult = drained;
+        produced = produced && this.spoke(queue, drained, reply);
       }
     }
     // An answer that ended as a tool call written out as text was held back,
@@ -957,7 +959,7 @@ export class Dispatcher {
       reply.end();
     }
     const drain = await queue.drain();
-    const answered = !failed && reply.delivered() > 0 && !reply.endedInMarkup();
+    const answered = !failed && !reply.endedInMarkup() && this.spoke(queue, drain, reply);
     if (!answered) {
       logger.warn({ agentId, userId }, "the retry did not produce an answer either — telling the person to ask again");
     }
@@ -1058,7 +1060,6 @@ export class Dispatcher {
     // tool-call block inside a fence is quoted, not emitted, so no hold starts
     // there.
     let fenceOpen = false;
-    let delivered = 0;
     // True while the last text of the turn is a tool-call block that was held
     // back; anything sent after it answers the person and clears it.
     let endedInMarkup = false;
@@ -1077,7 +1078,6 @@ export class Dispatcher {
       if (whole) answer.push(text);
       else queue.enqueue(text);
       fenceOpen = fenceOpenAfter(text, fenceOpen);
-      delivered += 1;
       endedInMarkup = false;
     };
     const buffer = new StreamBuffer({
@@ -1143,8 +1143,18 @@ export class Dispatcher {
         answer = [];
       },
       endedInMarkup: () => endedInMarkup,
-      delivered: () => delivered,
     };
+  }
+
+  /**
+   * Whether a prompt's reply reached the person. A part of it delivered does,
+   * and so does a part the channel refused, since the person is told; so does
+   * an answer held back as tool-call markup, which has a retry of its own.
+   * Text withheld whole, by the stream's holds or by the send path, reached
+   * nobody, and a reply that was only that has not answered the person.
+   */
+  private spoke(queue: SendQueue, drained: DrainResult, reply: ReplyStream): boolean {
+    return queue.delivered() > 0 || !drained.ok || reply.endedInMarkup();
   }
 
   /**

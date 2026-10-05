@@ -172,11 +172,14 @@ allowlist gates `/internal/inject`.
    person. Nothing is sent between tries, so the typing indicator stays on. A
    fourth empty answer tells the person it is taking longer than expected. A
    failed turn is never asked again: provider errors keep the runtime's own
-   backoff. Rule: `src/empty-turn.ts`.
+   backoff. Text the bridge withheld whole (an internal summary, or tool-call
+   markup the send path drops) reached nobody, so a turn whose only text was
+   that counts as one that said nothing. Rule: `src/empty-turn.ts`.
 6. **Notices.** A failed turn, a turn that ran a tool and wrote nothing, a
-   fourth empty answer, and a part of a reply the channel kept refusing each get
-   a short message in the person's language: the language of their message, else the
-   last one they wrote in, else the organisation's `locale`, else English.
+   fourth empty answer, and a part of a reply the channel kept refusing each
+   get a short message in the person's language: the language of their
+   message, else the last one they wrote in, else the organisation's `locale`,
+   else English.
 
 **Platform notices** are what the console sends on the platform's account: an
 approval to give, a link to connect an account or set a password, a meeting the

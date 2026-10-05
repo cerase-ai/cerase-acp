@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import { type AgentConfig, type BridgeConfig, loadConfig } from "./config.js";
-import type { Dispatcher } from "./dispatcher.js";
+import { type Dispatcher, pickSlowMessage } from "./dispatcher.js";
 import { isChannelReady } from "./reachability.js";
 import { workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 
@@ -963,7 +963,8 @@ describe("an attach that never arrives cannot close as a delivered turn", () => 
 // turn, the bridge's own per-piece filter sees it in fragments, and the
 // dispatcher is what keeps it out of the chat. What is withheld is still
 // captured as the assistant's rolling summary, as the send path does for one it
-// withholds whole.
+// withholds whole. A reply that was only the summary has not answered the
+// person, so the turn is asked again as an empty one is.
 describe("a summary the agent streams inside a turn", () => {
   let handle: RunBridgeHandle | undefined;
   let controlPlane: Server | undefined;
@@ -993,7 +994,7 @@ describe("a summary the agent streams inside a turn", () => {
     "- Manca il listino del terzo fornitore.",
   ].join("\n");
 
-  it("never reaches the chat, and is captured whole", async () => {
+  it("never reaches the chat, is captured whole, and the person is answered", async () => {
     // Stands in for the control-plane: records the summary capture and
     // answers everything else with a 404, which the bridge treats as the
     // control-plane being unavailable and proceeds without.
@@ -1070,10 +1071,52 @@ describe("a summary the agent streams inside a turn", () => {
       },
       { timeout: 8000, interval: 100 },
     );
-    await vi.waitFor(() => expect(captured).toHaveLength(1), { timeout: 2000, interval: 50 });
+    // The fixture answers every prompt with the same summary, so each of the
+    // three tries an empty turn gets is withheld and captured too, and the
+    // person is told the answer is taking longer.
+    await vi.waitFor(() => expect(captured).toHaveLength(4), { timeout: 2000, interval: 50 });
 
-    expect(chat).toEqual([]);
-    expect(captured[0]).toEqual({ agent_id: "summary-probe", summary: SUMMARY });
+    expect(chat).toEqual([pickSlowMessage("ciao")]);
+    for (const c of captured) expect(c).toEqual({ agent_id: "summary-probe", summary: SUMMARY });
+  });
+});
+
+// The send path withholds a chunk that is the engine's own summary whole. Its
+// title alone is enough there, and the stream's holds, which start at the
+// appliance's section headings, let it through to that point.
+describe("a reply the send path withholds whole", () => {
+  let handle: RunBridgeHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+  });
+
+  it("is not an answer: the turn is asked again, and the person is answered", async () => {
+    const DROPPED = "Anchored Summary of the session and the next actions to take";
+    const cfg = makeConfig();
+    cfg.agents = [
+      { ...cfg.agents[0]!, spawn: { command: "env", args: ["--", `FAKE_REPLY=${DROPPED}`, "node", FAKE_CHILD] } },
+    ];
+    const chat: string[] = [];
+    let dispatcher: Dispatcher | undefined;
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, d) => {
+        dispatcher = d;
+        const a = makeFakeAdapter(agent, d, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        return a;
+      },
+    });
+
+    // The fixture answers every prompt with the same summary.
+    expect(await dispatcher?.handleMessage("doc-qa", "111", "ciao")).toEqual({ ok: true });
+    expect(chat).toEqual([pickSlowMessage("ciao")]);
   });
 });
 

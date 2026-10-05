@@ -337,6 +337,88 @@ describe("a turn that ends with nothing to say", () => {
   });
 });
 
+// A reply the bridge withholds whole reaches nobody: an internal summary the
+// stream holds back, or a chunk the send path drops as a summary or as
+// tool-call markup. A turn whose only text was that has not answered the
+// person, and it is asked again exactly as a turn that said nothing is.
+describe("a reply that is only a block the bridge withholds", () => {
+  const SUMMARY = [
+    "## Objective",
+    "- Rispondere alla mail.",
+    "",
+    "## Work State",
+    "- In corso.",
+    "",
+    "## Next Move",
+    "- Inviare.",
+  ].join("\n");
+  const ANSWER = "Ecco il riepilogo della riunione.";
+  type Update = Parameters<SessionUpdateHandler>[0];
+  const text = (t: string): Update =>
+    ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } }) as Update;
+  const toolCall = { sessionUpdate: "tool_call", toolCallId: "call-1", title: "read", status: "in_progress" } as Update;
+
+  /** A session manager whose n-th prompt streams `tries[n]`, and the last of them for every prompt after. */
+  function harness(tries: Update[][], send?: (chunk: string) => { ok: true; withheld?: true }) {
+    const sent: string[] = [];
+    const prompts: string[] = [];
+    const withheld: string[] = [];
+    const d = new Dispatcher({
+      config: makeConfig("unused"),
+      sessionManager: {
+        async prompt(_a: string, _u: string, promptText: string, onUpdate?: SessionUpdateHandler) {
+          const updates = tries[Math.min(prompts.length, tries.length - 1)]!;
+          prompts.push(promptText);
+          for (const u of updates) onUpdate?.(u);
+          return { stopReason: "end_turn" };
+        },
+      } as unknown as SessionManager,
+      turnMeta: new TurnMetaTracker(),
+      onSummaryWithheld: (_agentId, summary) => withheld.push(summary),
+      resolveSendTarget: () => async (chunk) => {
+        const result = send?.(chunk) ?? { ok: true };
+        if (!result.withheld) sent.push(chunk);
+        return result;
+      },
+    });
+    return { d, sent, prompts, withheld };
+  }
+
+  it("asks again when the stream withheld the reply as a summary, and the answer is what the person gets", async () => {
+    const h = harness([[text(SUMMARY)], [text(ANSWER)]]);
+    await expect(h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo?")).resolves.toEqual({ ok: true });
+    expect(h.prompts).toHaveLength(2);
+    expect(h.prompts[1]).toBe(emptyTurnRetryPrompt());
+    expect(h.sent).toEqual([ANSWER]);
+    expect(h.withheld).toEqual([SUMMARY]);
+  });
+
+  it("asks again when the send path withheld every chunk of the reply", async () => {
+    const DROPPED = "Anchored summary of the session so far";
+    const h = harness([[text(DROPPED)], [text(ANSWER)]], (chunk) =>
+      chunk === DROPPED ? { ok: true, withheld: true } : { ok: true },
+    );
+    await expect(h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo?")).resolves.toEqual({ ok: true });
+    expect(h.prompts).toHaveLength(2);
+    expect(h.prompts[1]).toBe(emptyTurnRetryPrompt());
+    expect(h.sent).toEqual([ANSWER]);
+  });
+
+  it("tells the person it is taking longer when every try is withheld", async () => {
+    const h = harness([[text(SUMMARY)]]);
+    await h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?");
+    expect(h.prompts).toHaveLength(4);
+    expect(h.sent).toEqual([pickSlowMessage("mi fai il riepilogo della riunione?")]);
+  });
+
+  it("gets the empty-reply notice when the turn ran a tool and its only text was withheld", async () => {
+    const h = harness([[toolCall, text(SUMMARY)]]);
+    await h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?");
+    expect(h.prompts).toHaveLength(1);
+    expect(h.sent).toEqual([pickEmptyMessage("mi fai il riepilogo della riunione?")]);
+  });
+});
+
 // M-ACP-DISCLOSURE-OFF — the AI-Act first-contact disclosure was removed: the
 // assistant is USER-facing (the employee was given it and knows it's an AI), so
 // Art. 50's "obvious from the context of use" exemption applies. Guard that no
@@ -732,11 +814,14 @@ describe("a summary streamed inside a turn", () => {
     expect(pieces.filter((p) => isInternalSummaryBlock(p))).toEqual([]);
   });
 
-  it("is not delivered at all, and is handed over for capture", async () => {
+  it("is not delivered, is handed over for capture, and leaves the turn as one that said nothing", async () => {
+    // The stub streams the same summary for every prompt, so each of the
+    // tries an empty turn gets is withheld too, and the person is told the
+    // answer is taking longer.
     const h = harness(chunked(SUMMARY));
     await expect(h.d.handleMessage("doc-qa", "111", "ciao")).resolves.toEqual({ ok: true });
-    expect(h.delivered).toEqual([]);
-    expect(h.withheld).toEqual([SUMMARY]);
+    expect(h.delivered).toEqual([pickSlowMessage("ciao")]);
+    expect(h.withheld).toEqual([SUMMARY, SUMMARY, SUMMARY, SUMMARY]);
   });
 
   it("does not hold back what was sent before its first heading", async () => {

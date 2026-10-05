@@ -27,8 +27,13 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  * truthful HTTP status on `/internal/inject` — instead of resolving as a
  * blind success. Adapters MUST NOT throw on a send error anymore: they
  * catch it and return `{ ok: false, error }`.
+ *
+ * `withheld` is set by the bridge's send path on a chunk it kept out of the
+ * chat whole: an internal summary, or tool-call markup and nothing else. The
+ * person received nothing from it, and a reply that was only such chunks has
+ * not answered them.
  */
-export type DeliveryResult = { ok: true } | { ok: false; error: Error };
+export type DeliveryResult = { ok: true; withheld?: true } | { ok: false; error: Error };
 
 /**
  * How a channel that takes each answer as one message cuts it: into one

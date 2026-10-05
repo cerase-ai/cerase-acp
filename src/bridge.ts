@@ -380,9 +380,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // the agent). Only acts on chunks carrying the placeholder, so the
       // common path pays no extra HTTP.
       // The wrapper forwards the inner adapter's DeliveryResult so a
-      // swallowed send failure can surface; a fully suppressed chunk
-      // (attachment-only, internal summary, DSML) reports `{ ok: true }`
-      // because there was nothing left to deliver.
+      // swallowed send failure can surface. A chunk that was only files
+      // reports `{ ok: true }`: the files are the reply. A chunk withheld
+      // whole as an internal summary or as tool-call markup reports
+      // `withheld`, so the dispatcher knows the person received nothing.
       return async (chunk: string): Promise<DeliveryResult> => {
         let text = chunk;
         // HITL-3: approval link substitution (unchanged).
@@ -414,6 +415,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         // point, and sending ahead of them would put unredacted text in the
         // chat. So the upload moves down rather than the text moving up.
         let deliverAttachments = async (): Promise<void> => {};
+        // What a chunk withheld whole reports: delivered when it carried files,
+        // which are an answer of their own, and withheld when it did not.
+        let withheldWhole: DeliveryResult = { ok: true, withheld: true };
 
         if (hasAttachments(text)) {
           const parsed = parseAttachments(text);
@@ -463,6 +467,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             }
           };
           text = parsed.text;
+          if (relPaths.length > 0) withheldWhole = { ok: true };
           // If the reply was only the marker, don't send an empty message —
           // the attachment(s) are the whole reply, and nothing introduces them.
           if (!text) {
@@ -481,7 +486,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           captureSummary(agentId, text);
           await deliverAttachments();
 
-          return { ok: true };
+          return withheldWhole;
         }
         // Deterministic engine-identity redaction, the last step before the
         // reply leaves for any channel — never reveal we run on OpenCode,
@@ -495,7 +500,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
           await deliverAttachments();
 
-          return { ok: true };
+          return withheldWhole;
         }
         const textResult = await inner(text);
         // After the text, always. A failed text send does not withhold the

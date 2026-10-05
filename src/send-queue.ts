@@ -101,6 +101,8 @@ export class SendQueue {
   // Chunks ultimately lost (after the one retry), so
   // drain() can report a truthful aggregate outcome to the dispatcher.
   private failures: Array<{ chunk: string; error: Error }> = [];
+  // Chunks the channel took and the send path did not withhold.
+  private deliveredCount = 0;
 
   private items: string[] = [];
   private running = false;
@@ -134,6 +136,14 @@ export class SendQueue {
   }
 
   /**
+   * How many chunks reached the person: taken by the channel and not withheld
+   * by the send path. A reply whose every chunk was withheld counts none.
+   */
+  delivered(): number {
+    return this.deliveredCount;
+  }
+
+  /**
    * Resolves when the queue is empty AND no send is in flight. The resolved
    * value reports whether every chunk was ultimately delivered, so the
    * dispatcher can fail loud on a swallowed delivery failure.
@@ -154,6 +164,7 @@ export class SendQueue {
         if (wait > 0) await sleep(wait);
         const chunk = this.items.shift()!;
         const result = await this.sendWithRetry(chunk);
+        if (result.ok && !result.withheld) this.deliveredCount += 1;
         if (!result.ok) {
           // The chunk is lost after its retries.
           // Record it (so drain() reports the failure) and emit a visible
