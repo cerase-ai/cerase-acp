@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { untilChild } from "./__tests__/fake-clock.js";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
@@ -118,7 +119,7 @@ describe("a bridge that stops with a turn in flight", () => {
   it("waits for the turn and delivers its whole answer before it stops", async () => {
     const { d, sent, stop } = dispatcher(SLOW);
     const turn = d.handleMessage("doc-qa", "111", MESSAGE);
-    await vi.waitFor(() => expect(timesSent(MESSAGE)).toBe(1));
+    await untilChild(() => expect(timesSent(MESSAGE)).toBe(1));
 
     const report = await stop(10_000);
 
@@ -134,7 +135,7 @@ describe("a bridge that stops with a turn in flight", () => {
   it("keeps a message that arrives meanwhile, acknowledged at once, and never sends it to the assistant", async () => {
     const { d, m, sent, stop } = dispatcher(SLOW);
     const first = d.handleMessage("doc-qa", "111", MESSAGE);
-    await vi.waitFor(() => expect(timesSent(MESSAGE)).toBe(1));
+    await untilChild(() => expect(timesSent(MESSAGE)).toBe(1));
     const stopped = stop(10_000);
 
     const second = await d.handleMessage("doc-qa", "222", SECOND);
@@ -155,7 +156,7 @@ describe("a bridge that stops with a turn in flight", () => {
     const { d, m, stop } = dispatcher(SLOW);
     const first = d.handleMessage("doc-qa", "111", MESSAGE);
     const second = d.handleMessage("doc-qa", "111", SECOND);
-    await vi.waitFor(() => {
+    await untilChild(() => {
       expect(timesSent(MESSAGE)).toBe(1);
       expect(m.turnsInFlight("doc-qa")).toBe(2);
     });
@@ -195,7 +196,7 @@ describe("a bridge that stops with a turn in flight", () => {
     const { d, m, stop } = dispatcher(SLOW);
     void d.handleMessage("doc-qa", "111", MESSAGE);
     const queued = d.handleMessage("doc-qa", "111", SECOND);
-    await vi.waitFor(() => {
+    await untilChild(() => {
       expect(timesSent(MESSAGE)).toBe(1);
       expect(m.turnsInFlight("doc-qa")).toBe(2);
     });
@@ -219,7 +220,7 @@ describe("a bridge that stops with a turn in flight", () => {
   it("asks the person to send again a message it has nowhere to keep", async () => {
     const { d, sent, stop } = dispatcher(SLOW, { keep: false });
     void d.handleMessage("doc-qa", "111", MESSAGE);
-    await vi.waitFor(() => expect(timesSent(MESSAGE)).toBe(1));
+    await untilChild(() => expect(timesSent(MESSAGE)).toBe(1));
     const stopped = stop(10_000);
 
     const second = await d.handleMessage("doc-qa", "222", SECOND);
@@ -236,7 +237,7 @@ describe("a turn still running when the stop stops waiting", () => {
     it(`ends with the update notice, once, and is neither kept nor sent again${slotRestarted ? ", though the slot restarted too" : ""}`, async () => {
       const { d, m, sent, stop } = dispatcher(["FAKE_HANG_PROMPT=1"], { slotRestarted });
       const turn = d.handleMessage("doc-qa", "111", MESSAGE);
-      await vi.waitFor(() => expect(timesSent(MESSAGE)).toBe(1));
+      await untilChild(() => expect(timesSent(MESSAGE)).toBe(1));
 
       const started = Date.now();
       const report = await stop(300);
@@ -433,7 +434,7 @@ describe("a restart of the whole bridge", () => {
   it("finishes the turn in flight, and the next bridge answers the message kept meanwhile, once, in the same session", async () => {
     const old = await start(SLOW, 10_000);
     const first = old.dispatcher().handleMessage("doc-qa", "111", MESSAGE);
-    await vi.waitFor(() => expect(timesSent(MESSAGE)).toBe(1));
+    await untilChild(() => expect(timesSent(MESSAGE)).toBe(1));
 
     const stopped = old.handle.shutdown();
     expect(await old.dispatcher().handleMessage("doc-qa", "111", SECOND)).toEqual({ ok: true });
@@ -448,7 +449,7 @@ describe("a restart of the whole bridge", () => {
     expect(session).toBeDefined();
 
     const next = await start([], 10_000);
-    await vi.waitFor(() => expect(next.chat()).toContain(SECOND), { timeout: 8_000 });
+    await untilChild(() => expect(next.chat()).toContain(SECOND));
     expect(sessionIn(next.chat(), SECOND)).toBe(session);
     expect(timesSent(SECOND)).toBe(1);
     expect(new PendingMessages(dir).list()).toEqual([]);
@@ -465,7 +466,7 @@ describe("a restart of the whole bridge", () => {
   it("tells the person a turn still running at the limit was interrupted, and the next bridge does not answer it again", async () => {
     const old = await start(["FAKE_HANG_PROMPT=1"], 300);
     const first = old.dispatcher().handleMessage("doc-qa", "111", MESSAGE);
-    await vi.waitFor(() => expect(timesSent(MESSAGE)).toBe(1));
+    await untilChild(() => expect(timesSent(MESSAGE)).toBe(1));
 
     await old.handle.shutdown();
 

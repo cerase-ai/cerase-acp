@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { freezeBridgeClock, untilChild, useBridgeClock } from "./__tests__/fake-clock.js";
 import type { BridgeConfig } from "./config.js";
 import type { RestEndpoint } from "./opencode-rest.js";
 import type { CanonicalMessage } from "./reconciler.js";
@@ -91,6 +92,18 @@ function makeConfig(overrides?: {
   };
 }
 
+// The manager's timers run on a fake clock: the drain after a prompt, the
+// turn watchdog and the idle timeout. The child runs in real time, so the
+// clock runs at real speed too, and a test that is about one of those limits
+// reaches it by moving the clock, on the limit's production value.
+beforeEach(() => {
+  useBridgeClock();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("SessionManager", () => {
   let mgr: SessionManager;
 
@@ -130,7 +143,7 @@ describe("SessionManager", () => {
     expect(mgr.turnsInFlight("doc-qa")).toBe(0);
 
     const turn = mgr.prompt("doc-qa", "user-A", "ping");
-    await vi.waitFor(() => expect(mgr.turnsInFlight("doc-qa")).toBeGreaterThan(0));
+    await untilChild(() => expect(mgr.turnsInFlight("doc-qa")).toBeGreaterThan(0));
 
     await turn;
     expect(mgr.turnsInFlight("doc-qa")).toBe(0);
@@ -142,7 +155,7 @@ describe("SessionManager", () => {
 
     const first = mgr.prompt("doc-qa", "user-A", "one");
     const second = mgr.prompt("doc-qa", "user-A", "two");
-    await vi.waitFor(() => expect(mgr.turnsInFlight("doc-qa")).toBe(2));
+    await untilChild(() => expect(mgr.turnsInFlight("doc-qa")).toBe(2));
 
     await Promise.all([first, second]);
     expect(mgr.turnsInFlight("doc-qa")).toBe(0);
@@ -216,7 +229,7 @@ describe("SessionManager", () => {
 
     // What the AGENTS.md watcher does to the slot, in one call.
     mgr.killAgentSessions("doc-qa");
-    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+    await untilChild(() => expect(mgr.activeSessionCount()).toBe(0));
 
     const r = await mgr.prompt("doc-qa", "user-A", "second");
     expect(r.stopReason).toBe("end_turn");
@@ -244,7 +257,7 @@ describe("SessionManager", () => {
     const before = mgr.currentSessionId("doc-qa", "user-A");
 
     mgr.killAgentSessions("doc-qa");
-    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+    await untilChild(() => expect(mgr.activeSessionCount()).toBe(0));
 
     await mgr.prompt("doc-qa", "user-A", "second");
     expect(mgr.currentSessionId("doc-qa", "user-A")).not.toBe(before);
@@ -259,7 +272,7 @@ describe("SessionManager", () => {
     const before = mgr.currentSessionId("doc-qa", "user-A");
 
     mgr.killAgentSessions("doc-qa");
-    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+    await untilChild(() => expect(mgr.activeSessionCount()).toBe(0));
 
     const r = await mgr.prompt("doc-qa", "user-A", "second");
     expect(r.stopReason).toBe("end_turn");
@@ -271,7 +284,7 @@ describe("SessionManager", () => {
     for (let i = 0; i < 3; i += 1) {
       await mgr.prompt("doc-qa", "user-A", `turn ${i}`);
       mgr.killAgentSessions("doc-qa");
-      await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+      await untilChild(() => expect(mgr.activeSessionCount()).toBe(0));
     }
     expect(mgr.resumableSessionCount()).toBe(1);
   });
@@ -315,13 +328,14 @@ describe("SessionManager", () => {
         ({ stdin: null, stdout: null, on() {}, once() {}, kill() {} }) as unknown as ReturnType<SpawnFn>;
       mgr = new SessionManager(makeConfig(), badSpawn);
       await expect(mgr.prompt("doc-qa", "user-A", "x")).rejects.toThrow(/stdin\/stdout/);
-      // Let any stray unhandled rejection from the discarded finally-chain fire.
-      await new Promise((r) => setTimeout(r, 50));
+      // Let any stray unhandled rejection from the discarded finally-chain fire:
+      // Node reports one once the microtasks have run, before the next macrotask.
+      await new Promise((r) => setImmediate(r));
       expect(unhandled).toHaveLength(0);
       // inFlightSpawns was cleaned up → a retry re-spawns (and rejects again),
       // still with no unhandled rejection.
       await expect(mgr.prompt("doc-qa", "user-A", "y")).rejects.toThrow(/stdin\/stdout/);
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setImmediate(r));
       expect(unhandled).toHaveLength(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);
@@ -354,27 +368,31 @@ describe("SessionManager", () => {
     expect(mgr.activeSessionCount()).toBe(0);
   });
 
-  it("captures a 3s burst of late chunks after end_turn (M15 ceiling bump)", async () => {
-    // Upstream opencode race #17505: session/update notifications
-    // continue streaming after the session/prompt RPC reply. Each chunk
-    // in the burst refreshes `lastUpdateAt`, so only the
-    // POST_PROMPT_MAX_DRAIN_MS ceiling cuts us off. With burst length
-    // 3000ms and the M15 ceiling bumped 2000→8000, we capture the full
-    // burst; pre-M15 we lost the last ~1000ms of content (visible reply
-    // truncated mid-sentence).
+  it("captures a 3s burst of late chunks after end_turn", async () => {
+    // Upstream opencode race #17505: session/update notifications continue
+    // streaming after the session/prompt RPC reply. Each chunk in the burst
+    // refreshes `lastUpdateAt`, so only the drain's 8 s ceiling cuts it off,
+    // and a ceiling of 2 s lost the last second of a 3 s burst.
     //
-    // Burst: 30 chars at 100ms intervals = 3000ms total post-end_turn.
+    // The clock stands still and moves 100 ms at each chunk: a burst of 30
+    // chunks 100 ms apart, however fast the child writes them.
+    freezeBridgeClock();
     const lateBurst = "abcdefghij" + "klmnopqrst" + "uvwxyz0123";
-    mgr = new SessionManager(makeConfig({ reply: "head=", lateBurstText: lateBurst, lateBurstIntervalMs: 100 }));
+    mgr = new SessionManager(makeConfig({ reply: "head=", lateBurstText: lateBurst, lateBurstIntervalMs: 5 }));
     const chunks: string[] = [];
-    const result = await mgr.prompt("doc-qa", "user-A", "ping", (update) => {
+    const turn = mgr.prompt("doc-qa", "user-A", "ping", (update) => {
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
         chunks.push(update.content.text);
+        if (chunks.length > 1) vi.advanceTimersByTime(100);
       }
     });
+    await untilChild(() => expect(chunks.join("")).toBe(`head=${lateBurst}`));
+    // The drain ends 300 ms after the last chunk.
+    await vi.advanceTimersByTimeAsync(300);
+    const result = await turn;
     expect(result.stopReason).toBe("end_turn");
     expect(chunks.join("")).toBe(`head=${lateBurst}`);
-  }, 10_000);
+  });
 
   it("emits per-turn telemetry via the onTelemetry hook (M15)", async () => {
     const captured: TurnTelemetry[] = [];
@@ -493,20 +511,16 @@ describe("SessionManager", () => {
   });
 
   it("kills the child after idle_timeout_minutes of inactivity", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      mgr = new SessionManager(makeConfig({ reply: "x", idleTimeoutMinutes: 1 }));
-      await mgr.prompt("doc-qa", "user-A", "ping");
-      expect(mgr.activeSessionCount()).toBe(1);
-      // Fast-forward past the 1-minute idle window
-      await vi.advanceTimersByTimeAsync(61 * 1000);
-      // Allow exit handler to fire
-      vi.useRealTimers();
-      await new Promise((r) => setTimeout(r, 100));
-      expect(mgr.activeSessionCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    mgr = new SessionManager(makeConfig({ reply: "x", idleTimeoutMinutes: 60 }));
+    await mgr.prompt("doc-qa", "user-A", "ping");
+    expect(mgr.activeSessionCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(59 * 60_000);
+    expect(mgr.activeSessionCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    // The child exits in its own time; the session goes with it.
+    await untilChild(() => expect(mgr.activeSessionCount()).toBe(0));
   });
 });
 
@@ -681,7 +695,7 @@ describe("the model a resumed session runs on", () => {
   /** What the AGENTS.md watcher does to the slot, then wait for the exit. */
   async function restartSlot(): Promise<void> {
     mgr.killAgentSessions("doc-qa");
-    await vi.waitFor(() => expect(mgr.activeSessionCount()).toBe(0));
+    await untilChild(() => expect(mgr.activeSessionCount()).toBe(0));
   }
 
   // The defect as it was met: a compaction had stamped the session's last user
@@ -818,76 +832,91 @@ describe("the model a resumed session runs on", () => {
   });
 });
 
-describe("per-turn watchdog (M-ACP-2)", () => {
-  it("kills a hung child and rejects the turn within the timeout", async () => {
-    const cfg: BridgeConfig = {
-      agents: [
-        {
-          id: "hung",
-          bot_token: "x",
-          allowed_users: ["1"],
-          cwd: "/home/agent/cerase/workspace",
-          spawn: {
-            command: "env",
-            args: ["--", "FAKE_HANG_PROMPT=1", "node", FAKE_CHILD],
-          },
-        },
-      ],
-      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
-    } as unknown as BridgeConfig;
-    const mgr = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
-    try {
-      await expect(mgr.prompt("hung", "1", "ciao")).rejects.toThrow(/watchdog/i);
-      // The hung child was killed and the session dropped — a fresh
-      // prompt respawns (and hangs again → rejects again, proving the
-      // queue is NOT blocked forever).
-      await expect(mgr.prompt("hung", "1", "ancora")).rejects.toThrow(/watchdog/i);
-    } finally {
-      await mgr.shutdown();
+// The watchdog runs on its production limits, three minutes of silence and a
+// forty-five minute ceiling, and a test reaches them by moving the clock: at
+// each update the child sends, for a turn that is working, and from the test
+// for one that has gone quiet.
+describe("per-turn watchdog", () => {
+  const SILENCE_MS = 180_000;
+  const CEILING_MS = 45 * 60_000;
+  let m: SessionManager | undefined;
+
+  afterEach(async () => {
+    await m?.shutdown();
+    m = undefined;
+  });
+
+  /** A turn's outcome, readable while it is still running. */
+  function watch(turn: Promise<unknown>) {
+    const state: { settled: boolean; error?: unknown; value?: unknown } = { settled: false };
+    const done = turn.then(
+      (value) => Object.assign(state, { settled: true, value }),
+      (error: unknown) => Object.assign(state, { settled: true, error }),
+    );
+    return { state, done };
+  }
+
+  it("kills a hung child and rejects the turn at the silence limit, and the next prompt respawns", async () => {
+    const cfg = makeConfig();
+    cfg.agents[0]!.spawn.args = ["--", "FAKE_HANG_PROMPT=1", "node", FAKE_CHILD];
+    m = new SessionManager(cfg);
+    const mm = m;
+    for (const text of ["ciao", "ancora"]) {
+      const turn = watch(mm.prompt("doc-qa", "111", text));
+      await untilChild(() => expect(mm.activeSessionCount()).toBe(1));
+      await vi.advanceTimersByTimeAsync(SILENCE_MS - 10_000);
+      expect(turn.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await turn.done;
+      // The hung child was killed and the session dropped, so the second
+      // prompt respawns and hangs again: the queue is not blocked for ever.
+      expect(turn.state.error).toMatchObject({ name: "TurnWatchdogError", reason: "silent", ms: SILENCE_MS });
     }
-  }, 20_000);
+  });
 
   // The two halves of the same rule, and they pull in opposite directions: a
   // turn that is working must survive a budget the wall clock would have cut,
   // and a turn that never ends must still be ended.
   it("does not kill a turn that is still streaming past the silence budget", async () => {
-    // Twelve chunks 80ms apart is roughly a second of work against a silence
-    // budget of 300ms. Under the wall clock this turn was dead three times
-    // over; under liveness every chunk re-arms the budget.
-    const cfg = makeConfig({ chunks: 12, delayMsPerChunk: 80, reply: "abcdefghijkl" }) as unknown as BridgeConfig;
-    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
-    try {
-      // It RESOLVED — the assertion is that no watchdog rejected it, and the
-      // stop reason is the child's own rather than a kill.
-      expect(await m.prompt("doc-qa", "111", "ciao")).toMatchObject({ stopReason: "end_turn" });
-    } finally {
-      await m.shutdown();
-    }
-  }, 20_000);
+    // Twelve chunks, each arriving 100 s after the one before: twenty minutes
+    // of work against a three-minute silence budget, and every chunk re-arms it.
+    m = new SessionManager(makeConfig({ chunks: 12, delayMsPerChunk: 5, reply: "abcdefghijkl" }));
+    const result = await m.prompt("doc-qa", "111", "ciao", (update) => {
+      if (update.sessionUpdate === "agent_message_chunk") vi.advanceTimersByTime(100_000);
+    });
+    // It RESOLVED: no watchdog rejected it, and the stop reason is the
+    // child's own rather than a kill.
+    expect(result).toMatchObject({ stopReason: "end_turn" });
+  });
 
   // A release that leaves the bridge image unchanged never restarts it, so a
   // limit read only at boot is a limit a reload can never change, and a turn
   // waiting on an approval dies at the old silence limit.
   it("applies a reloaded silence limit to a turn already waiting", async () => {
-    const cfg = makeConfig({ chunks: 1, delayMsPerChunk: 1800, reply: "ok" }) as unknown as BridgeConfig;
-    cfg.session = { ...cfg.session, turn_silence_seconds: 1 };
-    const m = new SessionManager(cfg);
-    try {
-      const turn = m.prompt("doc-qa", "111", "ciao");
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      m.applySession({ ...cfg.session, turn_silence_seconds: 5 });
-      expect(await turn).toMatchObject({ stopReason: "end_turn" });
-      expect(m.sessionLimits().turn_silence_seconds).toBe(5);
-    } finally {
-      await m.shutdown();
-    }
-  }, 20_000);
+    const cfg = makeConfig();
+    cfg.agents[0]!.spawn.args = ["--", "FAKE_HANG_PROMPT=1", "node", FAKE_CHILD];
+    m = new SessionManager(cfg);
+    const mm = m;
+    const turn = watch(mm.prompt("doc-qa", "111", "ciao"));
+    await untilChild(() => expect(mm.activeSessionCount()).toBe(1));
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    mm.applySession({ ...cfg.session, turn_silence_seconds: 600 });
+    // Past the limit the turn started under, and inside the reloaded one.
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(turn.state.settled).toBe(false);
+    expect(mm.sessionLimits().turn_silence_seconds).toBe(600);
+
+    await vi.advanceTimersByTimeAsync(310_000);
+    await turn.done;
+    expect(turn.state.error).toMatchObject({ name: "TurnWatchdogError", reason: "silent", ms: 600_000 });
+  });
 
   it("keeps a limit a caller passed explicitly when the file is reloaded", () => {
     const cfg = makeConfig() as unknown as BridgeConfig;
-    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
-    m.applySession({ ...cfg.session, turn_silence_seconds: 5 });
-    expect(m.sessionLimits().turn_silence_seconds).toBe(0.3);
+    const mm = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
+    mm.applySession({ ...cfg.session, turn_silence_seconds: 5 });
+    expect(mm.sessionLimits().turn_silence_seconds).toBe(0.3);
   });
 
   // A tool call the session has opened is work under way, and the child says
@@ -897,55 +926,58 @@ describe("per-turn watchdog (M-ACP-2)", () => {
   // was told the turn had failed. While a tool call is open only the ceiling
   // ends the turn; once it closes, silence counts again.
   it("does not kill a turn whose open tool call runs silently past the silence budget", async () => {
-    const cfg = makeConfig({ toolCallMs: 1200, reply: "done" }) as unknown as BridgeConfig;
-    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
-    try {
-      expect(await m.prompt("doc-qa", "111", "ciao")).toMatchObject({ stopReason: "end_turn" });
-    } finally {
-      await m.shutdown();
-    }
-  }, 20_000);
+    m = new SessionManager(makeConfig({ toolCallMs: 50, reply: "done" }));
+    const result = await m.prompt("doc-qa", "111", "ciao", (update) => {
+      // Twenty minutes of silence while the tool call is open.
+      if (update.sessionUpdate === "tool_call") vi.advanceTimersByTime(20 * 60_000);
+    });
+    expect(result).toMatchObject({ stopReason: "end_turn" });
+  });
 
   it("still ends a turn whose tool call never closes, at the ceiling", async () => {
-    const cfg = makeConfig({ toolCallNeverEnds: true }) as unknown as BridgeConfig;
-    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 1500 });
-    try {
-      await expect(m.prompt("doc-qa", "111", "ciao")).rejects.toMatchObject({
-        name: "TurnWatchdogError",
-        reason: "ceiling",
-      });
-    } finally {
-      await m.shutdown();
-    }
-  }, 20_000);
+    m = new SessionManager(makeConfig({ toolCallNeverEnds: true }));
+    let opened = false;
+    const turn = watch(
+      m.prompt("doc-qa", "111", "ciao", (update) => {
+        if (update.sessionUpdate === "tool_call") opened = true;
+      }),
+    );
+    await untilChild(() => expect(opened).toBe(true));
+
+    await vi.advanceTimersByTimeAsync(CEILING_MS - 60_000);
+    expect(turn.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(65_000);
+    await turn.done;
+    expect(turn.state.error).toMatchObject({ name: "TurnWatchdogError", reason: "ceiling", ms: CEILING_MS });
+  });
 
   it("counts silence again once the tool call has closed", async () => {
-    const cfg = makeConfig({ toolCallMs: 100, silentAfterToolMs: 5_000 }) as unknown as BridgeConfig;
-    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 400, turnCeilingMs: 60_000 });
-    try {
-      await expect(m.prompt("doc-qa", "111", "ciao")).rejects.toMatchObject({
-        name: "TurnWatchdogError",
-        reason: "silent",
-      });
-    } finally {
-      await m.shutdown();
-    }
-  }, 20_000);
+    m = new SessionManager(makeConfig({ toolCallMs: 50, silentAfterToolMs: 60_000 }));
+    let closed = false;
+    const turn = watch(
+      m.prompt("doc-qa", "111", "ciao", (update) => {
+        if (update.sessionUpdate === "tool_call_update") closed = true;
+      }),
+    );
+    await untilChild(() => expect(closed).toBe(true));
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS + 10_000);
+    await turn.done;
+    expect(turn.state.error).toMatchObject({ name: "TurnWatchdogError", reason: "silent" });
+  });
 
   it("ends a turn that passes its ceiling, and says which limit it hit", async () => {
-    const cfg = makeConfig({ chunks: 40, delayMsPerChunk: 80, reply: "x".repeat(40) }) as unknown as BridgeConfig;
-    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 60_000, turnCeilingMs: 400 });
-    try {
-      // Never "produced nothing": this child produced output for the whole
-      // run, and the reason is what the dispatcher branches on for its copy.
-      await expect(m.prompt("doc-qa", "111", "ciao")).rejects.toMatchObject({
-        name: "TurnWatchdogError",
-        reason: "ceiling",
-      });
-    } finally {
-      await m.shutdown();
-    }
-  }, 20_000);
+    // Forty chunks, 100 s apart: never silent for long, and past the ceiling
+    // after the twenty-seventh.
+    m = new SessionManager(makeConfig({ chunks: 40, delayMsPerChunk: 5, reply: "x".repeat(40) }));
+    // Never "produced nothing": this child produced output for the whole
+    // run, and the reason is what the dispatcher branches on for its copy.
+    await expect(
+      m.prompt("doc-qa", "111", "ciao", (update) => {
+        if (update.sessionUpdate === "agent_message_chunk") vi.advanceTimersByTime(100_000);
+      }),
+    ).rejects.toMatchObject({ name: "TurnWatchdogError", reason: "ceiling", ms: CEILING_MS });
+  });
 });
 
 // A turn queued behind one whose session the bridge ends has not reached the
@@ -993,11 +1025,13 @@ describe("the turns queued behind a session the bridge ends", () => {
     );
 
   it("are refused unsent when the watchdog ends the turn ahead of them", async () => {
-    const { cfg, sent } = hungChild(1_500);
-    m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
+    const { cfg, sent } = hungChild(500);
+    m = new SessionManager(cfg);
     const first = settle(m.prompt("doc-qa", "111", "one"));
-    await vi.waitFor(() => expect(sent()).toEqual(["one"]));
+    await untilChild(() => expect(sent()).toEqual(["one"]));
     const second = settle(m.prompt("doc-qa", "111", "two"));
+    // Past the silence limit, so the watchdog ends the first turn.
+    await vi.advanceTimersByTimeAsync(190_000);
 
     expect(await first).toBeInstanceOf(TurnWatchdogError);
     expect(await second).toBeInstanceOf(SessionRestartError);
@@ -1008,7 +1042,7 @@ describe("the turns queued behind a session the bridge ends", () => {
     const { cfg, sent } = hungChild(500);
     m = new SessionManager(cfg, undefined, { slotRestarted: async () => false });
     const first = settle(m.prompt("doc-qa", "111", "one"));
-    await vi.waitFor(() => expect(sent()).toEqual(["one"]));
+    await untilChild(() => expect(sent()).toEqual(["one"]));
     const second = settle(m.prompt("doc-qa", "111", "two"));
     m.killAgentSessions("doc-qa");
 
@@ -1021,7 +1055,7 @@ describe("the turns queued behind a session the bridge ends", () => {
     const { cfg, sent } = hungChild(500);
     m = new SessionManager(cfg, undefined, { slotRestarted: async () => false });
     const first = settle(m.prompt("doc-qa", "111", "one", undefined, { opensTurn: true }));
-    await vi.waitFor(() => expect(sent()).toEqual(["one"]));
+    await untilChild(() => expect(sent()).toEqual(["one"]));
     const second = settle(m.prompt("doc-qa", "111", "two", undefined, { opensTurn: true }));
     m.stopStartingTurns();
     await m.shutdown();

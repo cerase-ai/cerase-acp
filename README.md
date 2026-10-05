@@ -473,7 +473,10 @@ The suite needs no Docker, chat platform or network. Tests sit beside the code
 as `src/**/*.test.ts`. `src/__tests__/fake-acp-child.mjs` stands in for
 `opencode acp`, so the session manager is tested over real ACP stdio;
 `src/__tests__/fake-google.ts` serves Google's token, certificate and Chat
-endpoints for the Workspace Chat tests. `tsconfig.json` builds only the shipped
+endpoints for the Workspace Chat tests. The session manager and restart hold
+tests keep the bridge's timers on vitest's fake clock, on their production
+limits: the child runs in real time, and a test reaches a watchdog, the hold's
+bound or the idle timeout by moving the clock (`src/__tests__/fake-clock.ts`). `tsconfig.json` builds only the shipped
 code; `tsconfig.test.json` covers the tests too, and `src/typecheck.test.ts` runs
 it inside `npm test`. `npm run typecheck` runs that check alone.
 
