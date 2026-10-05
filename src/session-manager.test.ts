@@ -32,6 +32,9 @@ function makeConfig(overrides?: {
   setModelFails?: boolean;
   echoModel?: boolean;
   exitDelayMs?: number;
+  toolCallMs?: number;
+  toolCallNeverEnds?: boolean;
+  silentAfterToolMs?: number;
 }): BridgeConfig {
   const env: string[] = [];
   if (overrides?.reply !== undefined) env.push(`FAKE_REPLY=${overrides.reply}`);
@@ -52,6 +55,9 @@ function makeConfig(overrides?: {
   if (overrides?.setModelFails) env.push("FAKE_SET_MODEL_FAILS=1");
   if (overrides?.echoModel) env.push("FAKE_ECHO_MODEL=1");
   if (overrides?.exitDelayMs !== undefined) env.push(`FAKE_EXIT_DELAY_MS=${overrides.exitDelayMs}`);
+  if (overrides?.toolCallMs !== undefined) env.push(`FAKE_TOOL_CALL_MS=${overrides.toolCallMs}`);
+  if (overrides?.toolCallNeverEnds) env.push("FAKE_TOOL_CALL_NEVER_ENDS=1");
+  if (overrides?.silentAfterToolMs !== undefined) env.push(`FAKE_SILENT_AFTER_TOOL_MS=${overrides.silentAfterToolMs}`);
   // We pass env via a wrapper: `env VAR=... node fake-acp-child.mjs`.
   // Keeps the spawn shape (command + args) identical to production.
   const args = ["--", ...env, "node", FAKE_CHILD];
@@ -873,6 +879,48 @@ describe("per-turn watchdog (M-ACP-2)", () => {
     m.applySession({ ...cfg.session, turn_silence_seconds: 5 });
     expect(m.sessionLimits().turn_silence_seconds).toBe(0.3);
   });
+
+  // A tool call the session has opened is work under way, and the child says
+  // nothing while it runs: a sub-agent started with the `task` tool streams to
+  // its own session, not to this one. The deck skill's revision runs in one,
+  // and at 180 s of silence the watchdog killed it twice in a row and the person
+  // was told the turn had failed. While a tool call is open only the ceiling
+  // ends the turn; once it closes, silence counts again.
+  it("does not kill a turn whose open tool call runs silently past the silence budget", async () => {
+    const cfg = makeConfig({ toolCallMs: 1200, reply: "done" }) as unknown as BridgeConfig;
+    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
+    try {
+      expect(await m.prompt("doc-qa", "111", "ciao")).toMatchObject({ stopReason: "end_turn" });
+    } finally {
+      await m.shutdown();
+    }
+  }, 20_000);
+
+  it("still ends a turn whose tool call never closes, at the ceiling", async () => {
+    const cfg = makeConfig({ toolCallNeverEnds: true }) as unknown as BridgeConfig;
+    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 1500 });
+    try {
+      await expect(m.prompt("doc-qa", "111", "ciao")).rejects.toMatchObject({
+        name: "TurnWatchdogError",
+        reason: "ceiling",
+      });
+    } finally {
+      await m.shutdown();
+    }
+  }, 20_000);
+
+  it("counts silence again once the tool call has closed", async () => {
+    const cfg = makeConfig({ toolCallMs: 100, silentAfterToolMs: 5_000 }) as unknown as BridgeConfig;
+    const m = new SessionManager(cfg, undefined, { turnSilenceMs: 400, turnCeilingMs: 60_000 });
+    try {
+      await expect(m.prompt("doc-qa", "111", "ciao")).rejects.toMatchObject({
+        name: "TurnWatchdogError",
+        reason: "silent",
+      });
+    } finally {
+      await m.shutdown();
+    }
+  }, 20_000);
 
   it("ends a turn that passes its ceiling, and says which limit it hit", async () => {
     const cfg = makeConfig({ chunks: 40, delayMsPerChunk: 80, reply: "x".repeat(40) }) as unknown as BridgeConfig;

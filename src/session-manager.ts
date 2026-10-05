@@ -756,9 +756,20 @@ export class SessionManager {
       // both agent_message_chunk and agent_thought_chunk updates.
       const seen: SeenState = { textSeen: "", reasoningSeen: "" };
       let assistantMessageId: string | undefined;
+      // The tool calls this turn has opened and not yet closed. A sub-agent
+      // started with the `task` tool works in a session of its own and sends
+      // this one nothing until it returns, so a silence that long is the work
+      // and not a hang: while one is open only the ceiling ends the turn.
+      const openToolCalls = new Set<string>();
       entry!.onUpdate = (update) => {
         lastUpdateAt = Date.now();
         chunksReceived += 1;
+        if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+          const id = (update as { toolCallId?: string }).toolCallId;
+          const status = (update as { status?: string | null }).status;
+          if (id && (status === "completed" || status === "failed")) openToolCalls.delete(id);
+          else if (id && update.sessionUpdate === "tool_call") openToolCalls.add(id);
+        }
         if (update.sessionUpdate === "agent_message_chunk") {
           textChunks += 1;
           if (update.content.type === "text") seen.textSeen += update.content.text;
@@ -799,7 +810,11 @@ export class SessionManager {
               // one that produced output for forty minutes is the wrong sentence
               // in the log and the wrong copy in front of the user.
               const reason: TurnWatchdogReason | null =
-                ranFor >= this.turnCeilingMs ? "ceiling" : silentFor >= this.turnSilenceMs ? "silent" : null;
+                ranFor >= this.turnCeilingMs
+                  ? "ceiling"
+                  : openToolCalls.size === 0 && silentFor >= this.turnSilenceMs
+                    ? "silent"
+                    : null;
               if (reason === null) return;
               logger.error(
                 { agentId: agent.id, userId, reason, ranFor, silentFor, chunksReceived },

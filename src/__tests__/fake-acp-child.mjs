@@ -6,6 +6,14 @@
 //
 // Env knobs:
 //   FAKE_REPLY              — reply text (default "hello world")
+//   FAKE_TOOL_CALL_MS       — before the reply, open one tool call (a `tool_call`
+//                              update, status in_progress), stay silent this many
+//                              ms, then close it (`tool_call_update`, completed).
+//                              What a sub-agent looks like from the parent session.
+//   FAKE_TOOL_CALL_NEVER_ENDS — set to "1" to open that tool call and never close
+//                              it nor answer.
+//   FAKE_SILENT_AFTER_TOOL_MS — after closing the tool call, stay silent this
+//                              many ms before the reply.
 //   FAKE_CHUNKS             — number of session/update chunks (default 3)
 //   FAKE_HANG_PROMPT        — set to "1" to NEVER answer session/prompt
 //                              (hung-child simulation for the watchdog)
@@ -369,6 +377,33 @@ rl.on("line", async (line) => {
         },
       });
       return;
+    }
+    const toolCallMs = parseInt(process.env.FAKE_TOOL_CALL_MS ?? "0", 10);
+    const toolNeverEnds = process.env.FAKE_TOOL_CALL_NEVER_ENDS === "1";
+    if (toolCallMs > 0 || toolNeverEnds) {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call-1",
+            title: "task",
+            kind: "other",
+            status: "in_progress",
+          },
+        },
+      });
+      if (toolNeverEnds) return;
+      await sleep(toolCallMs);
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "call-1", status: "completed" } },
+      });
+      const silentAfter = parseInt(process.env.FAKE_SILENT_AFTER_TOOL_MS ?? "0", 10);
+      if (silentAfter > 0) await sleep(silentAfter);
     }
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.

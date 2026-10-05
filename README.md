@@ -109,10 +109,12 @@ allowlist gates `/internal/inject`.
   `allow_always` when offered, then `allow_once`, otherwise cancelled. The slot
   container is the security boundary.
 - **Turn watchdog.** A turn whose ACP stream says nothing for
-  `session.turn_silence_seconds` (default 180) is ended and its child killed. A
-  turn still streaming after `session.turn_ceiling_minutes` (default 45) is
-  ended and the person asked to split the request. The next message spawns a
-  new child.
+  `session.turn_silence_seconds` (default 180) is ended and its child killed,
+  unless a tool call it opened is still running: a sub-agent started with the
+  `task` tool sends this session nothing until it returns, so while a tool call
+  is open only the ceiling applies. A turn still running after
+  `session.turn_ceiling_minutes` (default 45) is ended and the person asked to
+  split the request. The next message spawns a new child.
 - **Text the ACP stream dropped.** After each turn the bridge reads the
   finished assistant message from opencode's REST API inside the slot
   (`docker exec` running `curl` against `127.0.0.1:3284`, with the slot's own
