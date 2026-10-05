@@ -170,6 +170,17 @@ allowlist gates `/internal/inject`.
    message in the person's language: the language of their message, else the
    last one they wrote in, else the organisation's `locale`, else English.
 
+**Platform notices** are what the console sends on the platform's account: an
+approval to give, a link to connect an account or set a password, a meeting the
+assistant waits in or has transcribed, a failure. They arrive on
+`/internal/inject` with a `notice` and never start a turn. Each channel shows
+one in its own box, signed «Cerase», with the link in a button: a Discord embed,
+Slack blocks, a Google Chat card, and on Telegram a quoted block under a bold
+heading. The address is spelled out wherever a button cannot be shown: the text
+of a Slack or Google Chat notification, a link Discord or Telegram refuses as a
+button, and the console's own transport, which receives the notice as text.
+Rendering: `src/platform-notice.ts`.
+
 Every channel and every injected message runs through this path
 (`Dispatcher.handleMessage`). The debug CLI does not: it talks to the session
 manager directly.
@@ -339,7 +350,7 @@ Every route but `/healthz` requires `Authorization: Bearer <CERASE_ACP_INTERNAL_
 |---|---|
 | `GET /healthz` | Unauthenticated liveness for the container healthcheck. `200 {status: "ok", adapters, ready, readyOf}`; `503 {status: "no_chat_transport"}` when every adapter reports itself down. Compare `ready` with `readyOf`: an agent whose channel has no readiness signal (Telegram, Slack, `web`) is counted in neither. |
 | `GET /internal/status` | Per agent: `id`, `channel`, `attached`, `ready` (`true`, `false`, or `null` for a channel with no readiness signal), `lastContactAgeMs`, `turnsInFlight`, and `failure` when the bridge has stopped trying. Plus `inject` (in flight, succeeded, failed, last failure) and `session` (the limits in force). |
-| `POST /internal/inject` | `{agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?}`. Runs `text` as a message from that user and answers 202 as soon as it is accepted; the turn's outcome is in the log and the `inject` block of `/internal/status`. With `surface_in_chat` (default `true`) a heads-up is posted first: `heads_up` when given, otherwise a fixed Italian line quoting the scheduled message. With `system_message_only` the text is delivered as it is and no turn runs, and a failed delivery answers 500. 400 on a missing field, 401 without the bearer, 403 for a user not in the agent's allowlist. |
+| `POST /internal/inject` | `{agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?}`. Runs `text` as a message from that user and answers 202 as soon as it is accepted; the turn's outcome is in the log and the `inject` block of `/internal/status`. With `surface_in_chat` (default `true`) a heads-up is posted first: `heads_up` when given, otherwise a fixed Italian line quoting the scheduled message. With `system_message_only` the text is delivered as it is and no turn runs, and a failed delivery answers 500. With `system_message_only` and `notice: {title, body, link?: {url, label}}` the message is a platform notice, drawn in the channel's own box (below), and `text` is the same notice spelled out. 400 on a missing field, on a malformed notice and on a notice without `system_message_only`, 401 without the bearer, 403 for a user not in the agent's allowlist. |
 
 ## Configuration
 

@@ -49,6 +49,7 @@ import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { Dispatcher, pickErrorMessage, pickRefusalMessage, pickSlowMessage, pickTooLongMessage } from "./dispatcher.js";
+import { googleChatNoticeMessage } from "./platform-notice.js";
 import { directMessagesOnlyNotice } from "./platform-notices.js";
 import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
@@ -486,6 +487,30 @@ describe("workspace-chat: one Chat app per assistant", () => {
     expect(google.dmLookups).toEqual(["users/Anna.Bianchi@example.com"]);
     expect(google.posts.map((p) => [p.space, p.text, p.thread])).toEqual([
       ["spaces/dm-Anna-Bianchi-example-com", "Promemoria.", undefined],
+    ]);
+  });
+
+  // A notice from the platform is a card, signed by the platform, with its
+  // link in a button; the phone's notification reads its fallback text.
+  it("a platform notice is posted as a card into the person's direct-message space", async () => {
+    const notice = {
+      title: "Richiesta di approvazione",
+      body: "«Guido» chiede la tua approvazione per: invia una mail",
+      link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+    };
+    const adapter = adapters.get("agent-2")!;
+    expect(adapter.sendNotice).toBeTypeOf("function");
+    const result = await adapter.sendNotice!("Anna.Bianchi@example.com", notice);
+    expect(result).toEqual({ ok: true });
+    const expected = googleChatNoticeMessage(notice);
+    expect(google.posts).toEqual([
+      expect.objectContaining({
+        space: "spaces/dm-Anna-Bianchi-example-com",
+        text: "",
+        cardsV2: expected.cardsV2,
+        fallbackText: expected.fallbackText,
+        thread: undefined,
+      }),
     ]);
   });
 

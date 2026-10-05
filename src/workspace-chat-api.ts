@@ -242,8 +242,21 @@ export class WorkspaceChatApi {
    * one is given, and returns the name Google gave the message.
    */
   async createMessage(space: string, text: string, thread?: string): Promise<string | undefined> {
+    return this.createMessageWith(space, { text }, thread);
+  }
+
+  /**
+   * `spaces.messages.create` with a message of any shape Google accepts: text,
+   * or cards with their fallback text. Posted in the space's turn as
+   * `createMessage` is.
+   */
+  async createMessageWith(
+    space: string,
+    message: Record<string, unknown>,
+    thread?: string,
+  ): Promise<string | undefined> {
     const query = thread ? "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" : "";
-    const body = thread ? { text, thread: { name: thread } } : { text };
+    const body = thread ? { ...message, thread: { name: thread } } : message;
     const resp = await this.write("spaces.messages.create", space, space, `/v1/${space}/messages${query}`, {
       method: "POST",
       headers: { "content-type": "application/json" },

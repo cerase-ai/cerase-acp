@@ -357,6 +357,18 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // replaces an agent's adapter in the map this reads.
     wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,
     pendingMessages,
+    // A platform notice goes to the adapter as it is, past every filter of the
+    // send target below: those clean what the model wrote, and the platform
+    // wrote this. An adapter that draws no notice gets it spelled out through
+    // the send target instead.
+    resolveNoticeTarget: (agentId, userId) => {
+      const adapter = adapters.get(agentId);
+      if (!adapter) {
+        throw new Error(`no chat adapter registered for agent "${agentId}"`);
+      }
+      const send = adapter.sendNotice?.bind(adapter);
+      return send ? (notice) => send(userId, notice) : undefined;
+    },
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {

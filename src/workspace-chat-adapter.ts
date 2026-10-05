@@ -40,7 +40,10 @@
 // is a message of its own, so the phone's notification carries the answer and
 // not the placeholder.
 //
-// Direct messages only: no group spaces, no cards.
+// Direct messages only, no group spaces. The one card is a platform notice:
+// its title, the platform under it, its body and its link in a button
+// (platform-notice.ts), with the notice spelled out as the fallback text a
+// phone's notification shows.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -50,6 +53,7 @@ import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { googleChatNoticeMessage, type PlatformNotice } from "./platform-notice.js";
 import { directMessagesOnlyNotice, WRITING_ENDED_NOTICE, WRITING_NOTICE } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
 import {
@@ -482,6 +486,69 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     }
   }
 
+  /**
+   * Post `message` to `userId`: into the space and thread of `conversation`,
+   * or with no event from this person in this turn (a scheduled message, a
+   * reply after a restart, a notice) into the space they last wrote from, and
+   * one is looked for only for someone who never wrote. A failure is logged as
+   * `failure` and returned.
+   */
+  const deliver = async (
+    userId: string,
+    conversation: Conversation | undefined,
+    message: Record<string, unknown>,
+    failure: string,
+  ): Promise<DeliveryResult> => {
+    let space = conversation?.space;
+    const thread = conversation?.thread;
+    try {
+      if (!api || !spaces) {
+        throw new Error(`workspace-chat adapter for agent "${agent.id}" is not started, refusing to send`);
+      }
+      if (space === undefined) {
+        const stored = spaces.known(userId);
+        if (stored === undefined) {
+          space = await resolveSpace(api, spaces, userId);
+        } else {
+          space = stored;
+          try {
+            await api.createMessageWith(stored, message, thread);
+            return { ok: true };
+          } catch (err) {
+            if (!wrongSpace(err)) throw err;
+            // A stored space this app cannot post in was recorded for
+            // another app, or has gone. It is dropped and looked for once
+            // more, and the message is posted once more below; a second
+            // refusal is reported, not retried.
+            spaces.forget(userId, stored);
+            space = await resolveSpace(api, spaces, userId);
+            logger.warn(
+              { agentId: agent.id, userId, stored, replacement: space, reason: (err as Error).message },
+              "workspace-chat stored direct-message space was wrong for this app; replaced and retried once",
+            );
+          }
+        }
+      }
+      await api.createMessageWith(space, message, thread);
+      return { ok: true };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      logger.error(
+        {
+          agentId: agent.id,
+          userId,
+          space,
+          thread,
+          httpStatus: error instanceof ChatApiError ? error.httpStatus : undefined,
+          googleStatus: error instanceof ChatApiError ? error.googleStatus : undefined,
+          reason: error.message,
+        },
+        failure,
+      );
+      return { ok: false, error };
+    }
+  };
+
   return {
     agentId: agent.id,
     // Ready while the webhook is serving this assistant: its route registered
@@ -533,57 +600,8 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       const endPlaceholder = placeholders.get(userId);
       placeholders.delete(userId);
       return async (chunk: string): Promise<DeliveryResult> => {
-        let space = conversation?.space;
-        const thread = conversation?.thread;
         try {
-          if (!api || !spaces) {
-            throw new Error(`workspace-chat adapter for agent "${agent.id}" is not started, refusing to send`);
-          }
-          const text = toChatText(chunk);
-          // No event from this person in this turn: a scheduled message, or a
-          // reply after a restart. The space they last wrote from is used, and
-          // one is looked for only for someone who never wrote.
-          if (space === undefined) {
-            const stored = spaces.known(userId);
-            if (stored === undefined) {
-              space = await resolveSpace(api, spaces, userId);
-            } else {
-              space = stored;
-              try {
-                await api.createMessage(stored, text, thread);
-                return { ok: true };
-              } catch (err) {
-                if (!wrongSpace(err)) throw err;
-                // A stored space this app cannot post in was recorded for
-                // another app, or has gone. It is dropped and looked for once
-                // more, and the message is posted once more below; a second
-                // refusal is reported, not retried.
-                spaces.forget(userId, stored);
-                space = await resolveSpace(api, spaces, userId);
-                logger.warn(
-                  { agentId: agent.id, userId, stored, replacement: space, reason: (err as Error).message },
-                  "workspace-chat stored direct-message space was wrong for this app; replaced and retried once",
-                );
-              }
-            }
-          }
-          await api.createMessage(space, text, thread);
-          return { ok: true };
-        } catch (err) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          logger.error(
-            {
-              agentId: agent.id,
-              userId,
-              space,
-              thread,
-              httpStatus: error instanceof ChatApiError ? error.httpStatus : undefined,
-              googleStatus: error instanceof ChatApiError ? error.googleStatus : undefined,
-              reason: error.message,
-            },
-            "workspace-chat reply not delivered",
-          );
-          return { ok: false, error };
+          return await deliver(userId, conversation, { text: toChatText(chunk) }, "workspace-chat reply not delivered");
         } finally {
           // After the post rather than before it, and not awaited: the answer
           // is on screen before the placeholder turns into an ellipsis. The
@@ -593,6 +611,17 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           void endPlaceholder?.();
         }
       };
+    },
+    // A card with the platform under its title and the link in a button, into
+    // the conversation the person last wrote in. The placeholder is the turn's
+    // and is left to it.
+    async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
+      return deliver(
+        userId,
+        conversations.get(userId),
+        { ...googleChatNoticeMessage(notice) },
+        "workspace-chat notice not delivered",
+      );
     },
   };
 }

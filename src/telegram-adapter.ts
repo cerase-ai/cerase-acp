@@ -7,9 +7,14 @@
 // telegram adapter (used as a READING reference, not vendored) is
 // also built on telegraf.
 //
+// A platform notice is a quoted block under a bold heading, in Telegram's HTML,
+// with its link in an inline URL button (platform-notice.ts). Telegram refuses
+// a button whose address it will not open, a host it cannot resolve for one,
+// and the notice is then sent again with the address spelled out.
+//
 // Out of scope per the architecture brief:
 //   - slash commands (Cerase never surfaces a /command UI to end users)
-//   - inline keyboards
+//   - inline keyboards beyond the notice's link button
 //   - edit-in-place streaming chunks
 //
 // Allowlist enforcement is the dispatcher's responsibility (same as
@@ -27,10 +32,23 @@ import {
   prependUploadMarker,
 } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { type PlatformNotice, telegramNoticeMessages } from "./platform-notice.js";
 import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.telegram");
+
+/**
+ * Telegram's refusal of a message for its button: a 400 whose description names
+ * the button or its URL («BUTTON_URL_INVALID», «Wrong HTTP URL»). Any other
+ * refusal is the send failing, and is reported as one.
+ */
+export function isButtonRefusal(err: unknown): boolean {
+  const response = (err as { response?: { error_code?: unknown; description?: unknown } } | null)?.response;
+  return (
+    response?.error_code === 400 && typeof response.description === "string" && /button|url/i.test(response.description)
+  );
+}
 
 export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   if (!agent.bot_token) {
@@ -157,6 +175,38 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
         bot?.stop("SIGTERM");
       } catch (err) {
         logger.warn({ err, agentId: agent.id }, "error during telegram bot stop");
+      }
+    },
+    async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
+      try {
+        if (!bot) {
+          throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to sendMessage`);
+        }
+        const telegram = bot.telegram;
+        const plain = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
+        const messages = telegramNoticeMessages(notice);
+        for (const [i, message] of messages.entries()) {
+          if (!message.button) {
+            await telegram.sendMessage(userId, message.html, plain);
+            continue;
+          }
+          try {
+            await telegram.sendMessage(userId, message.html, {
+              ...plain,
+              reply_markup: { inline_keyboard: [[{ text: message.button.label, url: message.button.url }]] },
+            });
+          } catch (err) {
+            if (!isButtonRefusal(err)) throw err;
+            logger.warn(
+              { agentId: agent.id, reason: (err as Error).message },
+              "telegram refused the notice's button; sent again with the address spelled out",
+            );
+            await telegram.sendMessage(userId, telegramNoticeMessages(notice, true)[i]!.html, plain);
+          }
+        }
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
       }
     },
     makeSendTarget(userId: string) {

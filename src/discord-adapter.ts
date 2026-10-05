@@ -12,6 +12,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { discordNoticeMessages, type PlatformNotice } from "./platform-notice.js";
 import { isChannelReady, ReachabilityMonitor, type ReachabilitySnapshot } from "./reachability.js";
 import { detectLanguage } from "./turn-meta.js";
 import { TypingSessions } from "./typing-keepalive.js";
@@ -129,6 +130,17 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
     logger.error({ err, agentId: agent.id }, "discord.js client error");
   });
 
+  // The DM channel with `userId`, opened once and kept.
+  const dmChannel = async (userId: string): Promise<DMChannel> => {
+    let channel = dmChannels.get(userId);
+    if (!channel) {
+      const user = await client.users.fetch(userId);
+      channel = (await user.createDM()) as DMChannel;
+      dmChannels.set(userId, channel);
+    }
+    return channel;
+  };
+
   return {
     agentId: agent.id,
     // The real gateway connection state: true once the client has logged in
@@ -166,6 +178,20 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
         await client.destroy();
       } catch (err) {
         logger.warn({ err, agentId: agent.id }, "error during discord client destroy");
+      }
+    },
+    async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
+      // An embed signed by the platform with the link in a button, and no
+      // plain text beside it: the box is what tells it from the assistant.
+      try {
+        const channel = await dmChannel(userId);
+        for (const message of discordNoticeMessages(notice)) {
+          await channel.send(message);
+        }
+        reachability.note();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
       }
     },
     async sendFile(userId: string, file: { name: string; bytes: Buffer; caption?: string }): Promise<DeliveryResult> {

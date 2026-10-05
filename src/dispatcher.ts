@@ -17,6 +17,7 @@ import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.
 import { EMPTY_TURN_RETRIES, emptyTurnRetryPrompt } from "./empty-turn.js";
 import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
+import { noticeText, type PlatformNotice } from "./platform-notice.js";
 import {
   deliveryFailureNotice,
   restartOutlastedNotice,
@@ -51,12 +52,21 @@ const logger = makeLogger("cerase-acp.dispatcher");
 // `Promise<void>`, so a swallowed channel error can surface.
 type SendTarget = (chunk: string) => Promise<DeliveryResult>;
 
+type NoticeTarget = (notice: PlatformNotice) => Promise<DeliveryResult>;
+
 export interface DispatcherDeps {
   config: BridgeConfig;
   sessionManager: SessionManager;
   turnMeta: TurnMetaTracker;
   /** Returns the function the bridge will call to deliver each chunk. */
   resolveSendTarget: (agentId: string, userId: string) => SendTarget;
+  /**
+   * The function that sends a platform notice in the agent's channel's own box,
+   * or undefined when its adapter draws none. Optional: the CLI and test
+   * ingresses have no channel, and an absent or undefined target sends the
+   * notice spelled out through `resolveSendTarget`.
+   */
+  resolveNoticeTarget?: (agentId: string, userId: string) => NoticeTarget | undefined;
   /**
    * Proactive out-of-credits gate. Called BEFORE the
    * ACP child is spawned / `prompt()` is invoked. Resolves `{exhausted:
@@ -498,6 +508,17 @@ export class Dispatcher {
   async sendSystemMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
     const send = this.deps.resolveSendTarget(agentId, userId);
     return send(text);
+  }
+
+  /**
+   * A notice from the platform, in the channel's own box where the adapter
+   * draws one and spelled out, address included, where it does not. No model
+   * turn: the assistant did not write it and must not answer it.
+   */
+  async sendNotice(agentId: string, userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
+    const target = this.deps.resolveNoticeTarget?.(agentId, userId);
+    if (target) return target(notice);
+    return this.sendSystemMessage(agentId, userId, noticeText(notice));
   }
 
   /**

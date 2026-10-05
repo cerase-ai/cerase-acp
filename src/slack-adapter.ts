@@ -11,11 +11,17 @@
 // workspace, copy bot xoxb-… token + app-level xapp-… token into
 // agents.yaml via env substitution.
 //
+// A platform notice is posted as Block Kit blocks with its link in a URL
+// button (platform-notice.ts). Slack reports a click on that button to the app
+// as well as opening the link, and shows the person a warning when the app
+// does not acknowledge it, so the adapter acknowledges that one action and
+// does nothing else with it.
+//
 // Out of scope per the architecture brief:
 //   - channel posts (group rooms)
 //   - threading
 //   - slash commands
-//   - Block Kit interactive components
+//   - interactive components beyond the notice's link button
 //   - App Home tab
 
 import type { App } from "@slack/bolt";
@@ -25,6 +31,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
+import { type PlatformNotice, SLACK_NOTICE_ACTION_ID, slackNoticeMessage } from "./platform-notice.js";
 import { detectLanguage } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.slack");
@@ -89,6 +96,12 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
         }
       });
 
+      // The notice's button opens its link in the browser; the click Slack
+      // also reports here only needs its acknowledgement.
+      app.action(SLACK_NOTICE_ACTION_ID, async ({ ack }) => {
+        await ack();
+      });
+
       app.error(async (err: unknown) => {
         logger.error({ err, agentId: agent.id }, "@slack/bolt reported error");
       });
@@ -101,6 +114,30 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
         await app?.stop();
       } catch (err) {
         logger.warn({ err, agentId: agent.id }, "error during slack app stop");
+      }
+    },
+    async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
+      try {
+        if (!app) {
+          throw new Error(`slack adapter for agent "${agent.id}" not started — refusing to postMessage`);
+        }
+        const { text, blocks } = slackNoticeMessage(notice);
+        // `text` is the notice spelled out, which is what a notification shows.
+        // No unfurl: the button is the link, and a preview card under it would
+        // be a second box saying the same thing.
+        // The blocks are built SDK-free in platform-notice.ts, in Block Kit's
+        // own JSON, so they are typed here as the call takes them.
+        const post = app.client.chat.postMessage.bind(app.client.chat);
+        await post({
+          channel: userId,
+          text,
+          blocks,
+          unfurl_links: false,
+          unfurl_media: false,
+        } as unknown as Parameters<typeof post>[0]);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
       }
     },
     makeSendTarget(userId: string) {

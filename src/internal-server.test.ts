@@ -6,9 +6,14 @@ import { headsUpText, type InternalServer, startInternalServer } from "./interna
 // `outcome` lets a test simulate a failed turn/delivery so we can assert the
 // endpoint surfaces it as a 500.
 function makeFakeDispatcher(outcome: import("./chat-adapter.js").DeliveryResult = { ok: true }) {
-  const calls: { handled: Array<[string, string, string]>; system: Array<[string, string, string]> } = {
+  const calls: {
+    handled: Array<[string, string, string]>;
+    system: Array<[string, string, string]>;
+    notices: Array<[string, string, unknown]>;
+  } = {
     handled: [],
     system: [],
+    notices: [],
   };
   const dispatcher = {
     async handleMessage(agentId: string, userId: string, text: string) {
@@ -17,6 +22,10 @@ function makeFakeDispatcher(outcome: import("./chat-adapter.js").DeliveryResult 
     },
     async sendSystemMessage(agentId: string, userId: string, text: string) {
       calls.system.push([agentId, userId, text]);
+      return outcome;
+    },
+    async sendNotice(agentId: string, userId: string, notice: unknown) {
+      calls.notices.push([agentId, userId, notice]);
       return outcome;
     },
   } as unknown as import("./dispatcher.js").Dispatcher;
@@ -116,6 +125,49 @@ describe("internal-server /internal/inject", () => {
     expect(calls.handled).toHaveLength(0);
   });
 
+  // A notice from the platform travels with its parts, so the channel can draw
+  // it in its own box; `text` is the same notice spelled out, which a bridge
+  // that predates notices delivers instead.
+  const NOTICE = {
+    title: "Richiesta di approvazione",
+    body: "«Matilde» chiede la tua approvazione per: invia una mail",
+    link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+  };
+
+  it("a system_message_only inject carrying a notice sends the notice, not its text", async () => {
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "Cerase · Richiesta di approvazione …",
+      system_message_only: true,
+      notice: NOTICE,
+    });
+    expect(resp.status).toBe(202);
+    expect(calls.notices).toEqual([["a1", "u1", NOTICE]]);
+    expect(calls.system).toHaveLength(0);
+    expect(calls.handled).toHaveLength(0);
+  });
+
+  it("400s a notice that is not one, and sends nothing", async () => {
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "x",
+      system_message_only: true,
+      notice: { title: "T", body: "x", link: { url: "javascript:alert(1)", label: "Apri" } },
+    });
+    expect(resp.status).toBe(400);
+    expect(calls.notices).toHaveLength(0);
+    expect(calls.system).toHaveLength(0);
+  });
+
+  it("400s a notice sent as a model turn: a notice is never a prompt", async () => {
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", notice: NOTICE });
+    expect(resp.status).toBe(400);
+    expect(calls.notices).toHaveLength(0);
+    expect(calls.handled).toHaveLength(0);
+  });
+
   it("404s for any other path", async () => {
     const resp = await fetch(`${base}/nope`, { headers: { authorization: `Bearer ${SECRET}` } });
     expect(resp.status).toBe(404);
@@ -201,6 +253,18 @@ describe("internal-server /internal/inject fail-loud (M-ACP-FAILLOUD-1)", () => 
   it("500s a system_message_only inject when delivery fails (stays synchronous)", async () => {
     await startWith({ ok: false, error: new Error("channel down") });
     const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", system_message_only: true });
+    expect(resp.status).toBe(500);
+  });
+
+  it("500s a notice whose delivery fails", async () => {
+    await startWith({ ok: false, error: new Error("channel down") });
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "x",
+      system_message_only: true,
+      notice: { title: "Trascrizione non riuscita", body: "x" },
+    });
     expect(resp.status).toBe(500);
   });
 });

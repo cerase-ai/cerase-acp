@@ -3,7 +3,7 @@
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, label?, system_message_only? }  → 202
+//     { agent_id, user_id, text, surface_in_chat?, label?, system_message_only?, notice? }  → 202
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first. A
@@ -21,7 +21,10 @@
 // to the DM as a system message and runs NO model turn (the E2 bind-time
 // connect nudge — a notification, not a prompt the agent should answer);
 // that path is a fast channel send, so it stays synchronous and keeps its
-// truthful 500 on delivery failure.
+// truthful 500 on delivery failure. With a `notice` ({ title, body, link? }),
+// the system message is a platform notice, drawn in the channel's own box with
+// its link in a button (platform-notice.ts); `text` is then the same notice
+// spelled out, for a bridge that predates notices.
 // This is the productionised counterpart of the BRIDGE_E2E_TEST-gated
 // /_test/inject (test-injection.ts).
 
@@ -30,6 +33,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Dispatcher } from "./dispatcher.js";
 import { makeLogger } from "./logger.js";
 import { NoteCoalescer } from "./note-coalescer.js";
+import { parsePlatformNotice } from "./platform-notice.js";
 
 const logger = makeLogger("cerase-acp.internal-server");
 
@@ -396,12 +400,27 @@ async function handleRequest(
   // attribution marker, e.g. "💬 Paolo (dal pannello): …"). Absent → the
   // scheduled dispatcher's existing heads-up is used, so it is unaffected.
   const headsUp = typeof rec.heads_up === "string" && rec.heads_up.length > 0 ? rec.heads_up : headsUpText(text);
+  // A notice is refused rather than sent as text when it is malformed, and
+  // when it comes as a model turn: either is the caller's bug, and a notice the
+  // assistant were asked to answer would be the assistant replying to the
+  // platform in the person's chat.
+  const notice = rec.notice === undefined || rec.notice === null ? undefined : parsePlatformNotice(rec.notice);
+  if (rec.notice !== undefined && rec.notice !== null && (notice === undefined || !systemMessageOnly)) {
+    sendJson(res, 400, {
+      error: notice
+        ? "a notice is sent with system_message_only"
+        : "notice must have a title, a body and, if any, a link with an http(s) url and a label",
+    });
+    return;
+  }
 
   if (systemMessageOnly) {
     try {
       // The delivery is the whole operation here — a `!ok`
       // result (channel down) must surface as a truthful 500, not a blind 202.
-      const result = await opts.dispatcher.sendSystemMessage(agentId, userId, text);
+      const result = notice
+        ? await opts.dispatcher.sendNotice(agentId, userId, notice)
+        : await opts.dispatcher.sendSystemMessage(agentId, userId, text);
       if (!result.ok) {
         logger.error({ err: result.error, agentId, userId }, "system-message-only inject delivery failed");
         sendJson(res, 500, { error: "delivery failed" });

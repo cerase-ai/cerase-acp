@@ -15,6 +15,7 @@
 
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import type { PlatformNotice } from "./platform-notice.js";
 import type { ReachabilitySnapshot } from "./reachability.js";
 
 /**
@@ -135,6 +136,20 @@ export interface ChatAdapter {
    * `sendDocument`; Slack `filesUploadV2`; Workspace Chat media upload.
    */
   sendFile?(userId: string, file: OutgoingFile): Promise<DeliveryResult>;
+
+  /**
+   * Send a notice from the platform, in this channel's own box: a Discord
+   * embed, Slack blocks, a Google Chat card, a Telegram quoted block. It names
+   * the platform as its sender and carries its link in a button, so the person
+   * cannot read it as something the assistant wrote. Optional: an adapter
+   * without it is handed the notice spelled out (`noticeText`) as a plain
+   * message, which is what the console's own transport receives.
+   *
+   * It leaves the typing indicator alone. A notice arrives while a turn may
+   * still be running, an approval most of all, and the indicator coming back
+   * after it is right for a turn that goes on.
+   */
+  sendNotice?(userId: string, notice: PlatformNotice): Promise<DeliveryResult>;
 }
 
 /** A file the agent attaches to its chat reply (read from its workspace). */

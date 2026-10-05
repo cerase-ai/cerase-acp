@@ -56,6 +56,10 @@ export function writeKeyFile(path: string, account: ServiceAccount, tokenUri: st
 export interface PostedMessage {
   space: string;
   text: string;
+  /** The cards the message carries, as posted; absent for a message of text alone. */
+  cardsV2?: unknown;
+  /** The plain text Google shows where the cards cannot be, as posted. */
+  fallbackText?: string;
   thread: string | undefined;
   messageReplyOption: string | null;
   authorization: string | undefined;
@@ -250,10 +254,17 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
       const post = /^\/v1\/(spaces\/[^/]+)\/messages$/.exec(url.pathname);
       if (req.method === "POST" && post?.[1]) {
-        const body = JSON.parse(await readBody(req)) as { text?: string; thread?: { name?: string } };
+        const body = JSON.parse(await readBody(req)) as {
+          text?: string;
+          cardsV2?: unknown;
+          fallbackText?: string;
+          thread?: { name?: string };
+        };
         const message: PostedMessage = {
           space: post[1],
           text: body.text ?? "",
+          ...(body.cardsV2 !== undefined ? { cardsV2: body.cardsV2 } : {}),
+          ...(body.fallbackText !== undefined ? { fallbackText: body.fallbackText } : {}),
           thread: body.thread?.name,
           messageReplyOption: url.searchParams.get("messageReplyOption"),
           authorization: req.headers.authorization,
