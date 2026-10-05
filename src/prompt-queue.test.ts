@@ -71,3 +71,41 @@ describe("PromptQueue", () => {
     expect(q.size()).toBe(0);
   });
 });
+
+describe("a flushed PromptQueue", () => {
+  it("lets the item running end, and refuses every item behind it in order without running it", async () => {
+    const q = new PromptQueue();
+    const ran: string[] = [];
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const running = q.enqueue(async () => {
+      await gate;
+      ran.push("running");
+      return "done";
+    });
+    const settled: string[] = [];
+    const behind = ["second", "third"].map((name) =>
+      q
+        .enqueue(async () => {
+          ran.push(name);
+        })
+        .catch((err: Error) => {
+          settled.push(`${name}: ${err.message}`);
+        }),
+    );
+    let asked = 0;
+    q.flush(() => new Error(`refused ${++asked}`));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toEqual([]);
+
+    release();
+    expect(await running).toBe("done");
+    await Promise.all(behind);
+    expect(ran).toEqual(["running"]);
+    expect(settled).toEqual(["second: refused 1", "third: refused 2"]);
+    await expect(q.enqueue(async () => "late")).rejects.toThrow("refused 3");
+    expect(q.size()).toBe(0);
+  });
+});

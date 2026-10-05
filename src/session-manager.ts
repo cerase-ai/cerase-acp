@@ -611,6 +611,7 @@ export class SessionManager {
       if (entry.agentId !== agentId) continue;
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
       entry.closedByBridge = true;
+      this.flushQueue(entry, "the bridge ended the session to apply a reload");
       if (!entry.closed && !entry.child.killed) {
         try {
           entry.child.kill("SIGTERM");
@@ -725,14 +726,9 @@ export class SessionManager {
     return entry.queue.enqueue(async () => {
       // Waiting, when the bridge started to stop, for its session to start or
       // for the turn ahead of it: this one has not reached the assistant, and
-      // does not now.
+      // does not now. A turn queued behind one whose session the bridge ended
+      // never gets here: see flushQueue.
       if (options?.opensTurn && this.stopping) throw new BridgeStoppingError();
-      // Queued behind a turn whose session outgrew its summary: that session
-      // is gone, and the turn goes to the one that replaces it, as a turn held
-      // through a restart does.
-      if (entry!.outgrown) {
-        throw new SessionRestartError(false, new Error("the session was let go because it outgrew its summary"));
-      }
       // Track when the last sessionUpdate landed so we can drain
       // post-resolve chunks. Workaround for opencode upstream issue
       // #17505 / #25421: ACP `agent_message_chunk` frames sometimes
@@ -823,6 +819,7 @@ export class SessionManager {
                   : "turn watchdog fired — killing the silent opencode child",
               );
               entry!.closedByBridge = true;
+              this.flushQueue(entry!, "the watchdog ended the turn ahead of this one");
               try {
                 entry!.child.kill("SIGTERM");
               } catch {
@@ -997,6 +994,13 @@ export class SessionManager {
     this.entries.clear();
     for (const e of entries) {
       if (e.idleTimer) clearTimeout(e.idleTimer);
+      // Nothing is sent again after a shutdown: a stopping bridge keeps a
+      // queued turn for the next one, and any other shutdown fails it.
+      e.queue.flush(() =>
+        this.stopping
+          ? new BridgeStoppingError()
+          : new Error("the bridge shut its sessions down before this turn reached the assistant"),
+      );
       if (!e.closed && !e.child.killed) {
         try {
           e.child.kill("SIGTERM");
@@ -1298,6 +1302,21 @@ export class SessionManager {
   }
 
   /**
+   * Refuse the turns queued behind the one running on a session the bridge is
+   * ending, so none of them is sent to the child going away: one read there
+   * can be acted on and then sent again to the next session. Each is refused
+   * in its place, after the turn ahead of it has ended, as a turn lost to a
+   * restart, which the dispatcher sends to the session that replaces this
+   * one. While the bridge stops it is refused as not sent instead, and kept
+   * for the next bridge.
+   */
+  private flushQueue(entry: SessionEntry, why: string): void {
+    entry.queue.flush(() =>
+      this.stopping ? new BridgeStoppingError() : new SessionRestartError(false, new Error(why)),
+    );
+  }
+
+  /**
    * Record the session a pair is in, so the next spawn for the same pair can
    * load it instead of starting cold: see ResumableSessions.
    */
@@ -1320,6 +1339,8 @@ export class SessionManager {
     const key = sessionKey(entry.agentId, entry.userId);
     entry.outgrown = true;
     entry.closedByBridge = true;
+    // A turn queued behind this one goes to the session that replaces it.
+    this.flushQueue(entry, "the session was let go because it outgrew its summary");
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     if (this.entries.get(key) === entry) this.entries.delete(key);
     this.resumableSessions.forget(key, entry.sessionId);
@@ -1360,6 +1381,7 @@ export class SessionManager {
       );
       if (victim.idleTimer) clearTimeout(victim.idleTimer);
       victim.closedByBridge = true;
+      this.flushQueue(victim, "the bridge ended the session to make room for another");
       if (!victim.closed && !victim.child.killed) {
         try {
           victim.child.kill("SIGTERM");
@@ -1378,6 +1400,7 @@ export class SessionManager {
     entry.idleTimer = setTimeout(() => {
       logger.info({ agentId: entry.agentId, userId: entry.userId }, "killing idle ACP child");
       entry.closedByBridge = true;
+      this.flushQueue(entry, "the bridge ended the idle session");
       try {
         entry.child.kill("SIGTERM");
       } catch {

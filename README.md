@@ -92,6 +92,11 @@ allowlist gates `/internal/inject`.
   ones; a pair's messages are sent one at a time, in order. A child idle for
   `session.idle_timeout_minutes` is stopped. At `session.max_concurrent`
   children, the least recently used is stopped to make room.
+- **A session the bridge ends is sent nothing more.** When the bridge ends a
+  session (idle, eviction, a reload, the turn watchdog, a session too large to
+  summarise), the turn running is left to end and the messages queued behind it
+  are not sent to the child going away: each is sent, in its place, to the
+  session that replaces it, or kept for the next bridge while the bridge stops.
 - **The session mode.** Each session is put in the opencode mode named by the
   agent's `mode` (default `cerase`, the Cerase profile the control-plane writes
   into the slot). When the slot does not offer that mode, the agent's sessions

@@ -1,11 +1,21 @@
 import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "./config.js";
 import type { RestEndpoint } from "./opencode-rest.js";
 import type { CanonicalMessage } from "./reconciler.js";
-import { SessionManager, type SpawnFn, type TurnTelemetry } from "./session-manager.js";
+import {
+  BridgeStoppingError,
+  SessionManager,
+  SessionRestartError,
+  type SpawnFn,
+  type TurnTelemetry,
+  TurnWatchdogError,
+} from "./session-manager.js";
 import { CERASE_SESSION_MODE } from "./session-mode.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -936,4 +946,88 @@ describe("per-turn watchdog (M-ACP-2)", () => {
       await m.shutdown();
     }
   }, 20_000);
+});
+
+// A turn queued behind one whose session the bridge ends has not reached the
+// assistant. Sent to the child the bridge is ending, it can be read and acted
+// on there and then sent again to the next session, so the assistant acts on
+// it twice; it is refused instead, as a turn lost to a restart, and the
+// dispatcher sends it to the next session.
+describe("the turns queued behind a session the bridge ends", () => {
+  let dir: string;
+  let m: SessionManager | undefined;
+
+  afterEach(async () => {
+    await m?.shutdown();
+    m = undefined;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A child that never answers and takes `exitDelayMs` to exit once killed, logging every prompt it is sent. */
+  function hungChild(exitDelayMs: number) {
+    dir = mkdtempSync(join(tmpdir(), "session-flush-"));
+    const log = join(dir, "prompts.log");
+    const cfg = makeConfig();
+    cfg.agents[0]!.spawn.args = [
+      "--",
+      "FAKE_HANG_PROMPT=1",
+      `FAKE_EXIT_DELAY_MS=${exitDelayMs}`,
+      `FAKE_PROMPT_LOG=${log}`,
+      "node",
+      FAKE_CHILD,
+    ];
+    const sent = () =>
+      existsSync(log)
+        ? readFileSync(log, "utf8")
+            .split("\n")
+            .filter((l) => l.length > 0)
+            .map((l) => JSON.parse(l) as string)
+        : [];
+    return { cfg, sent };
+  }
+
+  const settle = (p: Promise<unknown>) =>
+    p.then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+
+  it("are refused unsent when the watchdog ends the turn ahead of them", async () => {
+    const { cfg, sent } = hungChild(1_500);
+    m = new SessionManager(cfg, undefined, { turnSilenceMs: 300, turnCeilingMs: 60_000 });
+    const first = settle(m.prompt("doc-qa", "111", "one"));
+    await vi.waitFor(() => expect(sent()).toEqual(["one"]));
+    const second = settle(m.prompt("doc-qa", "111", "two"));
+
+    expect(await first).toBeInstanceOf(TurnWatchdogError);
+    expect(await second).toBeInstanceOf(SessionRestartError);
+    expect(sent()).toEqual(["one"]);
+  });
+
+  it("are refused unsent when a reload ends the session", async () => {
+    const { cfg, sent } = hungChild(500);
+    m = new SessionManager(cfg, undefined, { slotRestarted: async () => false });
+    const first = settle(m.prompt("doc-qa", "111", "one"));
+    await vi.waitFor(() => expect(sent()).toEqual(["one"]));
+    const second = settle(m.prompt("doc-qa", "111", "two"));
+    m.killAgentSessions("doc-qa");
+
+    expect(await first).toBeInstanceOf(SessionRestartError);
+    expect(await second).toBeInstanceOf(SessionRestartError);
+    expect(sent()).toEqual(["one"]);
+  });
+
+  it("are kept for the next bridge when it is the stopping bridge that ends the session", async () => {
+    const { cfg, sent } = hungChild(500);
+    m = new SessionManager(cfg, undefined, { slotRestarted: async () => false });
+    const first = settle(m.prompt("doc-qa", "111", "one", undefined, { opensTurn: true }));
+    await vi.waitFor(() => expect(sent()).toEqual(["one"]));
+    const second = settle(m.prompt("doc-qa", "111", "two", undefined, { opensTurn: true }));
+    m.stopStartingTurns();
+    await m.shutdown();
+
+    expect(await first).toBeInstanceOf(Error);
+    expect(await second).toBeInstanceOf(BridgeStoppingError);
+    expect(sent()).toEqual(["one"]);
+  });
 });
