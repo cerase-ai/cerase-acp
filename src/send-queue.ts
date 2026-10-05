@@ -1,6 +1,9 @@
-// Per-channel FIFO that delivers messages to Discord while respecting:
-//   - the 2000-character per-message limit (split on nice boundaries)
-//   - the rate-limit (~5 messages/sec on DMs; we space sends ≥100ms)
+// Per-reply FIFO that delivers an answer to the channel while respecting:
+//   - Discord's 2000-character per-message limit (split on nice boundaries)
+//   - Discord's rate limit (~5 messages/sec on DMs; we space sends ≥100ms)
+// A chunk the channel refuses is tried again after each of the backoff delays
+// below, and reported with a marker once it has been refused through all of
+// them.
 // Google Chat allows one write a second in a space, counting the placeholder's
 // edit; that pace is kept per space by its API client, below this queue, so a
 // Chat send target resolves only once its turn has come. A Chat answer reaches
@@ -19,6 +22,15 @@ const HARD_LIMIT = 2000;
 const CHUNK_BUDGET = 1990;
 /** Ends every part of a message cut in several but the last. */
 export const CONTINUATION = " ⏎";
+
+/**
+ * How long a refused chunk waits before each further try, in ms: three retries,
+ * each twice as far from the previous one, 3.5 s in all. Long enough for a
+ * network blip or a channel's brief refusal to pass, short enough not to hold
+ * the rest of the answer. Discord's and Slack's own clients already wait out a
+ * rate limit before they report a refusal here; Telegram's does not.
+ */
+export const SEND_RETRY_DELAYS_MS = [500, 1_000, 2_000];
 
 /**
  * Splits `text` into Discord-ready chunks. Each chunk except the last
@@ -63,6 +75,8 @@ export interface SendQueueOptions {
   failureMarker?: string;
   /** Cuts one enqueued text into the messages the channel takes. Defaults to `chunkForDiscord`. */
   split?: (text: string) => string[];
+  /** The waits before each retry of a refused chunk. Defaults to SEND_RETRY_DELAYS_MS. */
+  retryDelaysMs?: number[];
 }
 
 /**
@@ -77,8 +91,8 @@ export const DELIVERY_FAILURE_MARKER = deliveryFailureNotice("unknown");
 
 /**
  * The aggregate outcome of draining the queue. `ok` iff every chunk was
- * delivered (after at most one retry each); otherwise `failures` carries
- * the chunk + the last error for each chunk that was lost.
+ * delivered, on its first try or a retry; otherwise `failures` carries the
+ * chunk + the last error for each chunk that was lost.
  */
 export type DrainResult = { ok: true } | { ok: false; failures: Array<{ chunk: string; error: Error }> };
 
@@ -95,6 +109,7 @@ export class SendQueue {
   private readonly minIntervalMs: number;
   private readonly failureMarker: string;
   private readonly split: (text: string) => string[];
+  private readonly retryDelaysMs: number[];
   private donePromise: Promise<void> = Promise.resolve();
   private resolveDone: (() => void) | undefined;
 
@@ -103,6 +118,7 @@ export class SendQueue {
     this.minIntervalMs = opts.minIntervalMs ?? 100;
     this.failureMarker = opts.failureMarker ?? DELIVERY_FAILURE_MARKER;
     this.split = opts.split ?? chunkForDiscord;
+    this.retryDelaysMs = opts.retryDelaysMs ?? SEND_RETRY_DELAYS_MS;
   }
 
   enqueue(text: string): void {
@@ -139,10 +155,10 @@ export class SendQueue {
         const chunk = this.items.shift()!;
         const result = await this.sendWithRetry(chunk);
         if (!result.ok) {
-          // The chunk is lost after its one retry.
+          // The chunk is lost after its retries.
           // Record it (so drain() reports the failure) and emit a visible
           // delivery-failure marker once per queue instead of a silent hole.
-          logger.error({ err: result.error }, "send-queue: retry failed — dropping chunk, emitting marker");
+          logger.error({ err: result.error }, "send-queue: the last retry failed — dropping chunk, emitting marker");
           this.failures.push({ chunk, error: result.error });
           if (!this.failureMarkerQueued) {
             this.failureMarkerQueued = true;
@@ -159,15 +175,26 @@ export class SendQueue {
   }
 
   /**
-   * One send attempt, and on failure exactly one retry. The send target
-   * returns a DeliveryResult; a target that still throws is caught
-   * defensively and treated as a `!ok` result.
+   * One send attempt, and on failure a retry after each backoff delay until
+   * one is delivered. Once a chunk of this queue has been lost the channel has
+   * refused through the whole backoff, so every later chunk is tried once:
+   * waiting the backoff again for each would hold the end of the turn for the
+   * length of the answer. The send target returns a DeliveryResult; a target
+   * that still throws is caught defensively and treated as a `!ok` result.
    */
   private async sendWithRetry(chunk: string): Promise<DeliveryResult> {
-    const first = await this.invokeSend(chunk);
-    if (first.ok) return first;
-    logger.warn({ err: first.error }, "send-queue: send reported failure — retrying once");
-    return this.invokeSend(chunk);
+    let result = await this.invokeSend(chunk);
+    const delays = this.failures.length > 0 ? [] : this.retryDelaysMs;
+    for (const [i, delay] of delays.entries()) {
+      if (result.ok) return result;
+      logger.warn(
+        { err: result.error, retry: i + 1, of: delays.length, delayMs: delay },
+        "send-queue: send reported failure — retrying after a backoff",
+      );
+      await sleep(delay);
+      result = await this.invokeSend(chunk);
+    }
+    return result;
   }
 
   private async invokeSend(chunk: string): Promise<DeliveryResult> {

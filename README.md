@@ -77,7 +77,10 @@ limit and what to send instead.
 
 Replies on Discord, Telegram and Slack are sent while the assistant writes, in
 groups of sentences, cut at 2,000 characters with ` ⏎` ending every part but the
-last. Workspace Chat receives each answer as one message (see below).
+last. Workspace Chat receives each answer as one message (see below). A part the
+channel refuses is sent again after 0.5, 1 and 2 seconds. A part refused all four
+times is dropped and the person told that part of the reply did not arrive, and
+the rest of that answer is tried once each.
 
 ### Who may talk to an assistant
 
@@ -171,8 +174,8 @@ allowlist gates `/internal/inject`.
    failed turn is never asked again: provider errors keep the runtime's own
    backoff. Rule: `src/empty-turn.ts`.
 6. **Notices.** A failed turn, a turn that ran a tool and wrote nothing, a
-   fourth empty answer, and a chunk the channel refused twice each get a short
-   message in the person's language: the language of their message, else the
+   fourth empty answer, and a part of a reply the channel kept refusing each get
+   a short message in the person's language: the language of their message, else the
    last one they wrote in, else the organisation's `locale`, else English.
 
 **Platform notices** are what the console sends on the platform's account: an

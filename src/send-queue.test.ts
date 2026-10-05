@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chunkForDiscord, DELIVERY_FAILURE_MARKER, SendQueue } from "./send-queue.js";
+import { chunkForDiscord, DELIVERY_FAILURE_MARKER, SEND_RETRY_DELAYS_MS, SendQueue } from "./send-queue.js";
 
 describe("chunkForDiscord", () => {
   it("returns one chunk when text fits", () => {
@@ -126,10 +126,10 @@ describe("SendQueue", () => {
     q.enqueue("ok-1");
     q.enqueue("fail");
     q.enqueue("ok-2");
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     const result = await q.drain();
-    // The permanently-failing chunk is retried once, then a
-    // visible delivery-failure marker is emitted; the queue continues.
+    // The permanently-failing chunk is retried, then a visible
+    // delivery-failure marker is emitted; the queue continues.
     expect(sent).toEqual(["ok-1", DELIVERY_FAILURE_MARKER, "ok-2"]);
     // drain() reports the failure so the dispatcher fails loud.
     expect(result.ok).toBe(false);
@@ -154,7 +154,7 @@ describe("SendQueue", () => {
     q.enqueue("ok-1");
     q.enqueue("boom");
     q.enqueue("ok-2");
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     const result = await q.drain();
     expect(sent).toEqual(["ok-1", DELIVERY_FAILURE_MARKER, "ok-2"]);
     expect(result.ok).toBe(false);
@@ -172,58 +172,80 @@ describe("SendQueue", () => {
   });
 });
 
-// A failed chunk is retried once; persistent failure emits a
-// visible delivery-failure marker instead of silently dropping mid-reply
-// content (the user used to see a reply with a hole in it).
-describe("SendQueue delivery retry (M-ACP-2)", () => {
+// A refused chunk is tried again, waiting longer each time; one the channel
+// keeps refusing is reported with a visible delivery-failure marker instead of
+// being silently dropped mid-reply (the user used to see a reply with a hole
+// in it).
+describe("SendQueue delivery retry", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("retries a failed chunk once and delivers it", async () => {
+  /** A target that refuses the first `refusals` sends, recording when each was tried. */
+  function refusing(refusals: number) {
+    const tried: number[] = [];
     const received: string[] = [];
-    let failures = 1;
-    const q = new SendQueue({
-      send: async (text) => {
-        if (failures > 0) {
-          failures--;
-          return { ok: false, error: new Error("platform hiccup") };
-        }
-        received.push(text);
-        return { ok: true };
-      },
-    });
+    let left = refusals;
+    const send = async (text: string) => {
+      tried.push(Date.now());
+      if (left > 0) {
+        left -= 1;
+        return { ok: false as const, error: new Error("platform hiccup") };
+      }
+      received.push(text);
+      return { ok: true as const };
+    };
+    return { send, tried, received };
+  }
+
+  it("tries a refused chunk again after each backoff delay, longer each time, and delivers it", async () => {
+    expect(SEND_RETRY_DELAYS_MS.length).toBeGreaterThan(1);
+    for (let i = 1; i < SEND_RETRY_DELAYS_MS.length; i++) {
+      expect(SEND_RETRY_DELAYS_MS[i]!).toBeGreaterThan(SEND_RETRY_DELAYS_MS[i - 1]!);
+    }
+    const target = refusing(SEND_RETRY_DELAYS_MS.length);
+    const q = new SendQueue({ send: target.send });
     q.enqueue("hello");
-    await vi.advanceTimersByTimeAsync(5_000);
-    // The retry succeeds → drain() reports ok.
+    await vi.advanceTimersByTimeAsync(30_000);
+
     await expect(q.drain()).resolves.toEqual({ ok: true });
-    expect(received).toEqual(["hello"]);
+    expect(target.received).toEqual(["hello"]);
+    const waits = target.tried.slice(1).map((t, i) => t - target.tried[i]!);
+    expect(waits).toEqual(SEND_RETRY_DELAYS_MS);
   });
 
-  it("emits the delivery-failure marker once when the retry also fails", async () => {
-    const received: string[] = [];
-    let failures = 2; // first attempt + retry of chunk 1
-    const q = new SendQueue({
-      send: async (text) => {
-        if (failures > 0) {
-          failures--;
-          return { ok: false, error: new Error("platform down") };
-        }
-        received.push(text);
-        return { ok: true };
-      },
-    });
+  it("gives the chunk up after the last retry and sends the marker once", async () => {
+    const target = refusing(SEND_RETRY_DELAYS_MS.length + 1);
+    const q = new SendQueue({ send: target.send });
     q.enqueue("lost chunk");
     q.enqueue("second chunk");
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     const result = await q.drain();
-    expect(received).toContain(DELIVERY_FAILURE_MARKER);
-    expect(received).toContain("second chunk");
-    expect(received).not.toContain("lost chunk");
-    expect(received.filter((t) => t === DELIVERY_FAILURE_MARKER).length).toBe(1);
+
+    expect(target.received).toEqual([DELIVERY_FAILURE_MARKER, "second chunk"]);
     // The lost chunk is reported by drain().
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.failures.map((f) => f.chunk)).toContain("lost chunk");
+      expect(result.failures.map((f) => f.chunk)).toEqual(["lost chunk"]);
+    }
+  });
+
+  it("tries the rest of the reply once each after a chunk was lost, without the backoff again", async () => {
+    // A channel that has refused a chunk through the whole backoff is down:
+    // waiting the backoff again for every later chunk would hold the end of
+    // the turn for the length of the answer.
+    const target = refusing(Number.POSITIVE_INFINITY);
+    const q = new SendQueue({ send: target.send });
+    q.enqueue("first");
+    q.enqueue("second");
+    q.enqueue("third");
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await q.drain();
+
+    // Every try of the first chunk, then the marker, the second and the third once each.
+    expect(target.tried).toHaveLength(SEND_RETRY_DELAYS_MS.length + 1 + 3);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failures.map((f) => f.chunk)).toEqual(["first", DELIVERY_FAILURE_MARKER, "second", "third"]);
     }
   });
 });
