@@ -809,27 +809,33 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // `config` object in place once we apply each diff).
   let currentSnapshot: BridgeConfig = cloneConfig(config);
   let reloader: ConfigReloader | undefined;
-  if (opts.configPath) {
-    reloader = new ConfigReloader(opts.configPath, (nextConfig) => {
-      // Before the diff, which compares agents only: a change to the session
-      // limits alone changes no agent, and the early return below would drop it.
-      sessionManager.applySession(nextConfig.session);
-      const diff = diffConfigs(currentSnapshot, nextConfig);
-      if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
-        return;
-      }
-      logger.info(
-        {
-          added: diff.added.map((a) => a.id),
-          removed: diff.removed,
-          modified: diff.modified,
-        },
-        "auto-reload: applying config diff",
-      );
-      // Best-effort: the handler swallows individual adapter errors so
-      // a flaky start doesn't crash the bridge. Anything escaping
-      // applyConfigDiff itself indicates a bug.
-      applyConfigDiff(diff, {
+  const applyReload = async (nextConfig: BridgeConfig): Promise<void> => {
+    // A bridge that is stopping starts no adapter it would stop a moment later.
+    if (productionDispatcher.isStopping()) return;
+    // Before the diff, which compares agents only: a change to the session
+    // limits or to the organisation's language alone changes no agent, and the
+    // early return below would drop it. The dispatcher reads the language off
+    // this object for every notice it writes. The file-size limit needs
+    // nothing here: loadConfig sets it on every load.
+    sessionManager.applySession(nextConfig.session);
+    config.locale = nextConfig.locale;
+    const diff = diffConfigs(currentSnapshot, nextConfig);
+    if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
+      return;
+    }
+    logger.info(
+      {
+        added: diff.added.map((a) => a.id),
+        removed: diff.removed,
+        modified: diff.modified,
+      },
+      "auto-reload: applying config diff",
+    );
+    // Best-effort: the handler swallows individual adapter errors so
+    // a flaky start doesn't crash the bridge. Anything escaping
+    // applyConfigDiff itself indicates a bug.
+    try {
+      await applyConfigDiff(diff, {
         next: nextConfig,
         sessionManager,
         adapters,
@@ -837,13 +843,21 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         dispatcher: productionDispatcher,
         startAdapter,
         forgetAgent: (agentId) => supervisor?.cancel(agentId),
-      })
-        .then(() => {
-          currentSnapshot = cloneConfig(nextConfig);
-        })
-        .catch((err) => {
-          logger.error({ err }, "auto-reload: applyConfigDiff threw — snapshot NOT advanced");
-        });
+      });
+      currentSnapshot = cloneConfig(nextConfig);
+    } catch (err) {
+      logger.error({ err }, "auto-reload: applyConfigDiff threw — snapshot NOT advanced");
+    }
+  };
+  // Each reload is applied once the one before it has been, and is diffed
+  // against the configuration that one left. Applying a reload waits on adapter
+  // stops and starts, so a file written again in the meantime would otherwise
+  // be diffed against the configuration before both, and its adapters started
+  // while the previous ones were still starting.
+  let reloading: Promise<void> = Promise.resolve();
+  if (opts.configPath) {
+    reloader = new ConfigReloader(opts.configPath, (nextConfig) => {
+      reloading = reloading.then(() => applyReload(nextConfig));
     });
     reloader.start();
     logger.info({ configPath: opts.configPath }, "auto-reload: ConfigReloader started");
@@ -856,11 +870,13 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     drainEnv && Number.isFinite(Number(drainEnv)) && Number(drainEnv) >= 0 ? Number(drainEnv) : STOP_DRAIN_MS;
 
   // Order: stop reloader + self-heal supervisor → let the turns in flight
-  // end → stop discord clients → close test server → kill ACP children.
-  // Reverse of startup so dependents go first; stopping the supervisor first
-  // prevents a retry racing the teardown. The adapters and the internal server
-  // stay up while the turns end, because the answers go out through them and
-  // a message arriving meanwhile has to be received to be kept.
+  // end → let a reload being applied finish → stop the adapters → close test
+  // server → kill ACP children. Reverse of startup so dependents go first;
+  // stopping the supervisor first prevents a retry racing the teardown, and
+  // waiting for the reload keeps it from starting an adapter after the
+  // adapters were stopped. The adapters and the internal server stay up while
+  // the turns end, because the answers go out through them and a message
+  // arriving meanwhile has to be received to be kept.
   const stop = async (): Promise<void> => {
     if (reloader) reloader.stop();
     supervisor?.stop();
@@ -869,6 +885,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       noticeMs: STOP_NOTICE_MS,
       endSessions: () => sessionManager.shutdown(),
     });
+    await reloading;
     await Promise.allSettled(Array.from(adapters.values()).map((a) => a.stop()));
     if (testServer) await testServer.close();
     if (internalServer) await internalServer.close();

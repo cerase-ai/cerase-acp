@@ -171,6 +171,51 @@ describe("diffConfigs", () => {
     expect(diffConfigs(cfg([wc({})]), cfg([wc({})])).modified).toEqual([]);
   });
 
+  // An adapter is made for one channel, from that channel's credentials, so a
+  // change to either reaches the person only through a new adapter.
+  it("classifies a channel change and a slack_app_token rotation as `bot_token_or_spawn`", () => {
+    const respawn = [{ agentId: "a", classification: "bot_token_or_spawn" }];
+    const slack = baseAgent("a", { channel: "slack", slack_app_token: "xapp-old" });
+    expect(diffConfigs(cfg([slack]), cfg([{ ...slack, slack_app_token: "xapp-new" }])).modified).toEqual(respawn);
+    expect(diffConfigs(cfg([baseAgent("a")]), cfg([baseAgent("a", { channel: "telegram" })])).modified).toEqual(
+      respawn,
+    );
+  });
+
+  // A field reaches a running bridge only if this diff sees it change. The
+  // literal below has to name every field the schema has, so a field added to
+  // the schema fails the type check here until it is listed, and then fails
+  // this case until the diff sees it.
+  it("sees a change to every field an agent has, each changed alone", () => {
+    const before: Required<AgentConfig> = {
+      id: "a",
+      channel: "slack",
+      bot_token: "xoxb-1",
+      slack_app_token: "xapp-1",
+      allowed_users: ["U1"],
+      cwd: "/home/agent/cerase/workspace",
+      mode: "cerase",
+      model: "cerase-litellm/core",
+      workspace_chat: { project_number: "111111111111", credentials_path: "/var/cerase/a.json" },
+      spawn: { command: "docker", args: ["exec", "-i", "cerase-a", "opencode", "acp"] },
+    };
+    const after: Omit<Required<AgentConfig>, "id"> = {
+      channel: "telegram",
+      bot_token: "xoxb-2",
+      slack_app_token: "xapp-2",
+      allowed_users: ["U2"],
+      cwd: "/home/agent/elsewhere",
+      mode: "maintainer",
+      model: "cerase-litellm/pro",
+      workspace_chat: { project_number: "222222222222", credentials_path: "/var/cerase/a.json" },
+      spawn: { command: "docker", args: ["exec", "-i", "cerase-b", "opencode", "acp"] },
+    };
+    for (const field of Object.keys(after) as Array<keyof typeof after>) {
+      const d = diffConfigs(cfg([before]), cfg([{ ...before, [field]: after[field] }]));
+      expect(d.modified, field).toHaveLength(1);
+    }
+  });
+
   it("works on empty configs (zero → zero)", () => {
     const c = cfg([]);
     const d = diffConfigs(c, c);

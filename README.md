@@ -309,18 +309,19 @@ one.
 The bridge watches the directory holding `agents.yaml` and reloads the file
 50 ms after the last write, so a file replaced through a rename is seen. A file
 that does not parse or validate is logged and ignored; the running configuration
-stays. A valid one is applied agent by agent:
+stays. Reloads are applied one at a time: a file written again while a reload is
+being applied is applied after it, against the configuration it left, and a stop
+waits for the reload being applied before it stops the adapters. A valid file is
+applied agent by agent:
 
 | What changed | What the bridge does |
 |---|---|
 | only `allowed_users` | updates the allowlist in place |
-| `bot_token`, `spawn`, `cwd`, `mode`, `model` or the `workspace_chat` block | stops the agent's adapter and sessions, and starts them again |
+| `channel`, `bot_token`, `slack_app_token`, `spawn`, `cwd`, `mode`, `model` or the `workspace_chat` block | stops the agent's adapter and sessions, and starts them again, on the new channel when that changed |
 | an agent added or removed | starts or stops it |
 | the `session` block | applies the new limits to the running session manager |
+| `locale` | applies to the next notice the bridge writes |
 | `max_file_mb` | applies the new limit to the next file |
-
-A change to an agent's `channel` or `slack_app_token` alone, or to `locale`, is
-not applied by a reload: it takes effect when the bridge restarts.
 
 ### Failures and health
 
