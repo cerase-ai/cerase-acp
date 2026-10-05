@@ -10,3 +10,4 @@ a2b451833201ef1bdb11f0c9a47c18bd500eb301d67af264438a48a35b7b8257  scripts/ghcr-r
 da99bdc92e5d0cc574a93a573f7520f4f0a9dfd97d3018d4da508940d5c9102c  .github/workflows/publish-self-heal.yml
 a5f2cba7736f138a83867c2c6470be07a97da98c4b66dd56f000a36058cd4031  .github/workflows/dependabot-auto-merge.yml
 f98f7bd60b69119f328e3dad7f6d4ec75e9b03fea0c9b98713a4741ac6bf3cc0  control-plane/tests/fixtures/bridge-prompts.json
+2be0ada4b90e4b04ca3c064fecca536d3fdf2d47b1452786fa79cbf52ea81c46  control-plane/tests/fixtures/chat-channels.json

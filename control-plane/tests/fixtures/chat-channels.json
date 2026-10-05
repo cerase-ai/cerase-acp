@@ -1,0 +1,8 @@
+{
+  "about": [
+    "The chat channels an organisation may choose for its assistants. The bridge (cerase-acp) has a working adapter for each: one that sends a message and draws a platform notice.",
+    "cerase-core's console offers exactly these, OrganizationSettingsPage::channelOptions(), held to this list by tests/Feature/NothingAssertsWhichChannelsATenantMayChooseTest.php. cerase-acp holds every channel here to such an adapter in src/chat-channels-contract.test.ts. A channel offered here without an adapter there is red in cerase-acp; a channel offered in the console and missing here is red in cerase-core.",
+    "This file is cerase-core's. cerase-acp carries a copy written by scripts/sync-tooling.sh and pinned in its scripts/TOOLING.sha256: edit it here, then re-sync."
+  ],
+  "channels": ["discord", "slack", "workspace_chat", "telegram"]
+}
