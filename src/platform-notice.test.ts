@@ -102,6 +102,17 @@ describe("Discord: an embed signed by the platform, with a link button", () => {
     expect(message!.embeds[0]!.description).toBe("\\[premi\\](https://evil.example) \\*\\*ora\\*\\*\n\\# titolo");
   });
 
+  it("leaves an address in angle brackets as written, and escapes a quote only where it starts a line", () => {
+    // A forwarded mail quotes its sender as «Erin <erin@example.com>». An
+    // escaped closing bracket made Discord draw «erin@example.com\» as a
+    // link with a stray backslash; only a «>» that opens a line is markdown.
+    const [message] = discordNoticeMessages({
+      title: "T",
+      body: "- Testo: Da: Erin <erin@example.com>\n> citazione",
+    });
+    expect(message!.embeds[0]!.description).toBe("- Testo: Da: Erin <erin@example.com>\n\\> citazione");
+  });
+
   it("spells the address out when Discord would refuse it as a button", () => {
     const long = `https://acme.cerase.ai/${"x".repeat(600)}`;
     const [message] = discordNoticeMessages({ title: "T", body: "testo", link: { url: long, label: "Apri" } });

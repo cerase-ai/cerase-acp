@@ -148,9 +148,12 @@ const DISCORD_BUTTON_URL_MAX = 512;
  * Discord markdown made literal, so a meeting's title cannot become a link, a
  * quote or a heading. A line's leading «- » is left alone: the body lists an
  * action's arguments that way, and Discord drawing them as a list is right.
+ * «#» and «>» are markdown only where they open a line, and an escaped «>»
+ * elsewhere stayed on screen: «<erin@example.com\>» drew the address with
+ * a backslash after it.
  */
 export function escapeDiscordMarkdown(text: string): string {
-  return text.replace(/([\\*_~`|>[\]])/g, "\\$1").replace(/^(\s*)#/gm, "$1\\#");
+  return text.replace(/([\\*_~`|[\]])/g, "\\$1").replace(/^(\s*)([#>])/gm, "$1\\$2");
 }
 
 /**
