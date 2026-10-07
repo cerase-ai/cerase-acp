@@ -6,8 +6,9 @@
 // agents.yaml; its setup and scopes are in cerase-core's
 // docs/operator/slack-setup.md. A file the person shares is downloaded with
 // the bot token into the slot's workspace. Slack shows no typing indicator for
-// the turn, and the adapter has no sendFile, so a file the assistant attaches
-// is not sent and the bridge tells the person.
+// the turn; its status line (turn-status.ts) is a message of the app's own,
+// edited in place and deleted when the turn ends. The adapter has no sendFile,
+// so a file the assistant attaches is not sent and the bridge tells the person.
 //
 // A platform notice is posted as Block Kit blocks with its link in a URL
 // button (platform-notice.ts). Slack reports a click on that button to the app
@@ -20,12 +21,13 @@
 
 import type { App } from "@slack/bolt";
 import { extractSlackFiles } from "./channel-attachments.js";
-import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { type PlatformNotice, SLACK_NOTICE_ACTION_ID, slackNoticeMessage } from "./platform-notice.js";
+import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.slack");
@@ -108,6 +110,31 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
       } catch (err) {
         logger.warn({ err, agentId: agent.id }, "error during slack app stop");
       }
+    },
+    // A message in the direct message, edited with chat.update and deleted
+    // with chat.delete when the turn ends. Both name the conversation Slack
+    // answered the post with, which is not the user id the post was sent to.
+    statusLine(userId: string): StatusLine {
+      const chat = () => {
+        if (!app) throw new Error(`slack adapter for agent "${agent.id}" not started — no status line`);
+        return app.client.chat;
+      };
+      return messageStatusLine<{ channel: string; ts: string }>(
+        {
+          post: async (text) => {
+            const posted = await chat().postMessage({ channel: userId, text });
+            if (!posted.channel || !posted.ts) throw new Error("Slack named no message for the status line");
+            return { channel: posted.channel, ts: posted.ts };
+          },
+          edit: async (message, text) => {
+            await chat().update({ channel: message.channel, ts: message.ts, text });
+          },
+          remove: async (message) => {
+            await chat().delete({ channel: message.channel, ts: message.ts });
+          },
+        },
+        { agentId: agent.id, userId, channel: "slack" },
+      );
     },
     async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
       try {

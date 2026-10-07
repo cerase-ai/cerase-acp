@@ -47,6 +47,7 @@ import {
 import { SessionManager } from "./session-manager.js";
 import { fetchSessionSummary, postSessionSummary } from "./session-summary.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
+import { fetchToolStep } from "./tool-step.js";
 import { fetchTurnContext, formatWallClock } from "./turn-context.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
@@ -282,7 +283,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   const adapters = new Map<string, ChatAdapter>();
 
   // The control-plane's internal API: credit check, turn context, approval
-  // link and rolling summaries.
+  // link, rolling summaries and the sentences of the status line.
   const controlPlaneUrl = process.env.CERASE_CONTROL_PLANE_URL ?? "http://cerase-control-plane:8000";
   // Two distinct secrets:
   //  - controlPlaneSecret(): the CONTROL-PLANE internal bearer — to CALL
@@ -364,6 +365,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // replaces an agent's adapter in the map this reads.
     wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,
     pendingMessages,
+    // The turn's status line, on a channel that keeps one. Asked of the
+    // adapter at every turn for the same reason as `wholeAnswers`.
+    resolveStatusLine: (agentId, userId) => adapters.get(agentId)?.statusLine?.(userId),
+    // The sentence for each step the status line names, from the catalogue
+    // the control-plane holds. Without the bearer the call fails, and the
+    // line says the bridge's plain sentence.
+    toolStep: (agentId, step) =>
+      fetchToolStep(agentId, step, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
     // A platform notice goes to the adapter as it is, past every filter of the
     // send target below: those clean what the model wrote, and the platform
     // wrote this. An adapter that draws no notice gets it spelled out through

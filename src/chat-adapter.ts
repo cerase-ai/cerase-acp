@@ -151,6 +151,37 @@ export interface ChatAdapter {
    * after it is right for a turn that goes on.
    */
   sendNotice?(userId: string, notice: PlatformNotice): Promise<DeliveryResult>;
+
+  /**
+   * The status line of the turn this person's message starts: one message,
+   * posted once a tool has run a few seconds, edited in place with the step
+   * under way, and removed when the turn ends. The dispatcher decides when and
+   * what (turn-status.ts); the adapter keeps the message. Discord, Telegram and
+   * Slack post, edit and delete a message of their own; Workspace Chat writes
+   * the step into the turn's placeholder and ends it as an ellipsis.
+   *
+   * Asked for once per turn, before the dispatcher's first await, as the send
+   * target is, so a channel that hands each turn something of its own (the
+   * Workspace Chat placeholder) hands it to the right one. Optional, and it may
+   * answer undefined: a channel that cannot edit a message, and the console's
+   * transport, which shows the steps from the transcript, get no status at all
+   * rather than a message per step.
+   *
+   * It leaves the typing indicator alone. On Discord the status message clears
+   * the indicator as any message does, and the turn's keepalive, which the
+   * status does not end, raises it again at its next refresh.
+   */
+  statusLine?(userId: string): StatusLine | undefined;
+}
+
+/**
+ * The one message of a turn that says which step the assistant is on. `show`
+ * posts it the first time and edits it after; `close` takes it down. Neither
+ * rejects: a failure is logged by the adapter and costs the turn nothing.
+ */
+export interface StatusLine {
+  show(text: string): Promise<void>;
+  close(): Promise<void>;
 }
 
 /** A file the agent attaches to its chat reply (read from its workspace). */

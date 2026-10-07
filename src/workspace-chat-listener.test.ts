@@ -38,6 +38,7 @@ vi.mock("./workspace-chat-api.js", async (importOriginal) => {
   return { ...real, WorkspaceChatApi: UnpacedWorkspaceChatApi };
 });
 
+import { useBridgeClock } from "./__tests__/fake-clock.js";
 import {
   type FakeGoogle,
   makeServiceAccount,
@@ -865,6 +866,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
   let turns: {
     text: string;
     say(text: string): void;
+    tool(update: Record<string, unknown>): void;
     end(reply?: string): void;
     fail(err: Error): void;
     ended: boolean;
@@ -934,6 +936,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
             text,
             ended: false,
             say,
+            tool: (update: Record<string, unknown>) => onUpdate?.(update),
             end: (reply?: string) => {
               if (reply) say(reply);
               turn.ended = true;
@@ -952,11 +955,13 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
       sessionManager,
       turnMeta: new TurnMetaTracker(),
       resolveSendTarget: (_agentId, userId) => adapter!.makeSendTarget(userId),
+      resolveStatusLine: (_agentId, userId) => adapter!.statusLine?.(userId),
     });
     await startWith(dispatcher);
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await adapter?.stop();
     adapter = undefined;
     await google.close();
@@ -1224,5 +1229,89 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     expect(google.shown()).toEqual([BALLOON, "Ecco il riepilogo."]);
     expect(google.unserved).toEqual([]);
     expect(logs.filter((l) => l.level === "error")).toEqual([]);
+  });
+
+  // The line is the turn's status line too. A tool that runs four seconds
+  // writes the step under way into it; the bridge's plain sentence here, since
+  // this dispatcher has no catalogue to ask.
+  const WORKING = "Sto lavorando…";
+  const toolStarts = (id: string) => ({
+    sessionUpdate: "tool_call",
+    toolCallId: id,
+    title: "webfetch",
+    status: "pending",
+    rawInput: { url: "https://example.com" },
+  });
+  const toolEnds = (id: string) => ({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed" });
+
+  it("says the step under way once a tool has run four seconds, and turns into an ellipsis when the turn ends", async () => {
+    useBridgeClock();
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    const [placeholder] = google.posts;
+
+    turns[0]!.tool(toolStarts("c1"));
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(google.edits).toHaveLength(1));
+    expect(google.edits.map((e) => [e.posted, e.text])).toEqual([[placeholder, WORKING]]);
+    expect(google.shown()).toEqual([WORKING]);
+
+    turns[0]!.tool(toolEnds("c1"));
+    turns[0]!.end("Ecco il riepilogo.");
+    await vi.waitFor(() => expect(google.edits).toHaveLength(2));
+    await settle();
+    expect(google.edits.map((e) => [e.posted, e.text])).toEqual([
+      [placeholder, WORKING],
+      [placeholder, ELLIPSIS],
+    ]);
+    expect(google.shown()).toEqual([ELLIPSIS, "Ecco il riepilogo."]);
+    expect(placeholders()).toEqual([placeholder]);
+    expect(google.unserved).toEqual([]);
+  });
+
+  // What the assistant writes before a tool is posted as the tool starts, and
+  // that first post ends the balloon as before. The step comes after it, in
+  // the same line, and stays through the posts that follow until the turn
+  // ends.
+  it("says the step under way after the first part of the answer ended the balloon, and keeps it until the turn ends", async () => {
+    useBridgeClock();
+    await write();
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(1));
+    const [placeholder] = google.posts;
+
+    turns[0]!.say("Apro la pagina e la leggo.");
+    turns[0]!.tool(toolStarts("c1"));
+    await vi.waitFor(() => expect(google.edits).toHaveLength(1));
+    expect(google.shown()).toEqual([ELLIPSIS, "Apro la pagina e la leggo."]);
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(google.edits).toHaveLength(2));
+    expect(google.shown()).toEqual([WORKING, "Apro la pagina e la leggo."]);
+
+    turns[0]!.tool(toolEnds("c1"));
+    turns[0]!.say("Ho letto la pagina, ora scrivo il riepilogo.");
+    turns[0]!.tool(toolStarts("c2"));
+    await vi.waitFor(() => expect(google.posts).toHaveLength(3));
+    await settle();
+    expect(google.edits).toHaveLength(2);
+
+    turns[0]!.tool(toolEnds("c2"));
+    turns[0]!.end("Ecco il riepilogo.");
+    await vi.waitFor(() => expect(google.edits).toHaveLength(3));
+    await settle();
+    expect(google.edits.map((e) => [e.posted, e.text])).toEqual([
+      [placeholder, ELLIPSIS],
+      [placeholder, WORKING],
+      [placeholder, ELLIPSIS],
+    ]);
+    expect(google.shown()).toEqual([
+      ELLIPSIS,
+      "Apro la pagina e la leggo.",
+      "Ho letto la pagina, ora scrivo il riepilogo.",
+      "Ecco il riepilogo.",
+    ]);
+    expect(google.unserved).toEqual([]);
   });
 });

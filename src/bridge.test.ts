@@ -1162,6 +1162,92 @@ describe("the clock in front of every turn", () => {
   });
 });
 
+// The status line a turn shows while a tool runs: the bridge asks the
+// control-plane, with the bearer agents.yaml carries, for the sentence of the
+// step the assistant is on, and hands it to the channel's status line.
+describe("the step a tool is on", () => {
+  let handle: RunBridgeHandle | undefined;
+  let controlPlane: Server | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    await new Promise<void>((resolve) => (controlPlane ? controlPlane.close(() => resolve()) : resolve()));
+    controlPlane = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  it("is asked of the control-plane and shown in the turn's status line, which goes when the turn ends", async () => {
+    const asked: { url?: string; bearer?: string; body: unknown }[] = [];
+    controlPlane = createServer((req, res) => {
+      if (req.method === "POST" && req.url === "/api/internal/tool-step/doc-qa") {
+        let body = "";
+        req.on("data", (c: Buffer) => {
+          body += c.toString("utf8");
+        });
+        req.on("end", () => {
+          asked.push({ url: req.url, bearer: req.headers.authorization, body: JSON.parse(body) });
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ sentence: "Sto affidando una parte del lavoro…" }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => controlPlane?.listen(0, "127.0.0.1", () => resolve()));
+    const cpPort = (controlPlane.address() as AddressInfo).port;
+    vi.stubEnv("CERASE_INTERNAL_SECRET", "");
+    vi.stubEnv("CERASE_CONTROL_PLANE_URL", `http://127.0.0.1:${cpPort}`);
+
+    const cfg = makeConfig();
+    cfg.internal_bearer = "bearer-from-agents-yaml";
+    cfg.agents = [
+      {
+        ...cfg.agents[0]!,
+        spawn: { command: "env", args: ["--", "FAKE_TOOL_CALL_MS=4500", "FAKE_REPLY=Fatto.", "node", FAKE_CHILD] },
+      },
+    ];
+    const chat: string[] = [];
+    const status: string[] = [];
+    let dispatcher: Dispatcher | undefined;
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, d) => {
+        dispatcher = d;
+        const a = makeFakeAdapter(agent, d, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        a.statusLine = () => ({
+          show: async (text) => {
+            status.push(`show ${text}`);
+          },
+          close: async () => {
+            status.push("close");
+          },
+        });
+        return a;
+      },
+    });
+
+    expect(await dispatcher?.handleMessage("doc-qa", "111", "mi prepari il riepilogo della settimana?")).toEqual({
+      ok: true,
+    });
+    expect(chat.join("")).toBe("Fatto.");
+    await vi.waitFor(() => expect(status).toEqual(["show Sto affidando una parte del lavoro…", "close"]));
+    // The fixture's tool starts as `task` and reports no input.
+    expect(asked).toEqual([
+      {
+        url: "/api/internal/tool-step/doc-qa",
+        bearer: "Bearer bearer-from-agents-yaml",
+        body: { tool: "task", input: {}, lang: "it" },
+      },
+    ]);
+  }, 20_000);
+});
+
 // The send path withholds a chunk that is the engine's own summary whole. Its
 // title alone is enough there, and the stream's holds, which start at the
 // appliance's section headings, let it through to that point.

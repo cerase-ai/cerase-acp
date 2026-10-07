@@ -64,11 +64,11 @@ credentials. Every chat channel accepts direct messages only.
 
 | Channel | Transport | What the person sees while the assistant works | Files the person sends | Files the assistant sends |
 |---|---|---|---|---|
-| `discord` (default) | `discord.js`, one bot per agent; messages in servers are ignored | a 👀 reaction on their message, and the typing indicator (refreshed every 7 s, ended by the first reply) | yes, up to 25 MB | yes |
-| `telegram` | `telegraf`, long polling; private chats only | the typing action (refreshed every 4 s) | documents, photos, voice, audio and video, up to 20 MB | no: the person is told the channel cannot carry the file |
-| `slack` | `@slack/bolt` in Socket Mode; `im` messages only | nothing | file shares, up to 1 GB | no, as above |
-| `workspace_chat` | Google Chat app per agent; webhook in, Chat REST API out | a 💬 message, rewritten to … once the answer is posted | yes | no, as above |
-| `web` | none: replies are discarded, and the console reads the conversation from opencode | — | — | — |
+| `discord` (default) | `discord.js`, one bot per agent; messages in servers are ignored | a 👀 reaction on their message, the typing indicator (refreshed every 7 s, ended by the first reply), and the status line | yes, up to 25 MB | yes |
+| `telegram` | `telegraf`, long polling; private chats only | the typing action (refreshed every 4 s), and the status line | documents, photos, voice, audio and video, up to 20 MB | no: the person is told the channel cannot carry the file |
+| `slack` | `@slack/bolt` in Socket Mode; `im` messages only | the status line | file shares, up to 1 GB | no, as above |
+| `workspace_chat` | Google Chat app per agent; webhook in, Chat REST API out | a 💬 message, rewritten to … once the answer is posted, which also carries the status line | yes | no, as above |
+| `web` | none: replies are discarded, and the console reads the conversation from opencode | the console shows the steps from the transcript | — | — |
 
 Every per-channel ceiling above is further capped by the console's file-size
 limit (see `max_file_mb`). A file over the limit is refused from the size the
@@ -181,6 +181,24 @@ allowlist gates `/internal/inject`.
    message, else the last one they wrote in, else the organisation's `locale`,
    else English.
 
+**The status line.** When a tool has run for 4 seconds and the turn shows no
+status yet, the bridge posts one message saying the step under way («Sto
+leggendo un foglio Google…»). Each tool started after that edits the same
+message with its step, at most once every 1.5 seconds, the latest step winning;
+a step whose input arrives after it started is edited again once the input is
+known. The end of the turn, after its last follow-up, deletes the message. A
+turn whose tools all finish within 4 seconds shows nothing. The sentence comes
+from the control-plane's catalogue, `POST /api/internal/tool-step/{agent}` with
+`{"tool", "input", "lang"}`: the tool's name as it started, its latest input
+and the conversation's language. When that call fails or takes over 2 seconds,
+the line says «Sto lavorando…», «Working on it…», «Estoy trabajando…» or «Je
+travaille…». The assistant's text never goes into it, and neither creates,
+removes nor moves it. Discord, Telegram and Slack keep it as a message of the
+bot's own, sent without a notification on Discord and Telegram; on Workspace
+Chat it is the 💬 placeholder (see below); the console's own transport gets
+none. A status message the platform refuses is logged and changes nothing about
+the turn or its result. Code: `src/turn-status.ts`.
+
 **Platform notices** are what the console sends on the platform's account: an
 approval to give, a link to connect an account or set a password, a meeting the
 assistant waits in or has transcribed, a failure. They arrive on
@@ -229,7 +247,8 @@ All the control-plane calls on this page need its bearer, which the
 control-plane writes into `agents.yaml` as `internal_bearer`;
 `CERASE_INTERNAL_SECRET` is the fallback outside the appliance. Without either,
 each call fails and says so in the log: turns run without the credit check, the
-clock and the summaries, and `{{APPROVAL_LINK}}` is replaced by a note.
+clock and the summaries, the status line says its plain sentence, and
+`{{APPROVAL_LINK}}` is replaced by a note.
 
 ### Files
 
@@ -267,7 +286,11 @@ An accepted message is acknowledged at once with an empty body, because Google
 shows an error after 30 seconds and a turn routinely takes longer. The app then
 posts 💬 into the conversation (Chat offers an app no read receipt and no typing
 indicator), and edits it to … with `spaces.messages.patch` once the first part of
-the answer is posted, or when the turn ends without one. The answer is posted as
+the answer is posted, or when the turn ends without one. The same message is the
+turn's status line: once a tool has run 4 seconds it says the step under way,
+also after the first part of the answer turned the 💬 into …, and it is edited
+back to … when the turn ends; a post no longer ends it once it shows a step. The
+answer is posted as
 new messages with `spaces.messages.create` under the app's service account
 (`chat.bot` scope), into the event's space and thread, so the phone's
 notification carries the answer. A placeholder Google refuses to post or edit is

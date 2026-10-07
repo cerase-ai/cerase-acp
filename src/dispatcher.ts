@@ -12,7 +12,7 @@ import {
   attachFailureError,
   attachFailurePrompt,
 } from "./attach-outcome.js";
-import type { DeliveryResult, WholeAnswers } from "./chat-adapter.js";
+import type { DeliveryResult, StatusLine, WholeAnswers } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { EMPTY_TURN_RETRIES, emptyTurnRetryPrompt } from "./empty-turn.js";
@@ -25,6 +25,7 @@ import {
   restartOutlastedNotice,
   startedOverNotice,
   updateInterruptedNotice,
+  workingNotice,
 } from "./platform-notices.js";
 import { RESTART_HOLD_MS, RESTART_RETRY_MS } from "./restart-hold.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
@@ -45,7 +46,9 @@ import {
   toolCallMarkupRetryPrompt,
   withheldMarkupStart,
 } from "./tool-call-markup.js";
+import type { ToolStep } from "./tool-step.js";
 import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
+import { TurnStatus } from "./turn-status.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
 
@@ -128,6 +131,20 @@ export interface DispatcherDeps {
    * keep one, the person is told to send it again.
    */
   pendingMessages?: PendingMessages;
+  /**
+   * The status line of a turn on the agent's channel, or undefined where the
+   * channel keeps none: see `ChatAdapter.statusLine`. Asked once per turn,
+   * right after the send target and before the first await. Optional: the
+   * test-injection dispatcher has no channel, and absent, no turn shows a
+   * status.
+   */
+  resolveStatusLine?: (agentId: string, userId: string) => StatusLine | undefined;
+  /**
+   * The sentence naming a step, from the control-plane's catalogue. Optional
+   * for the same reason as `creditCheck`; absent, or failing, the status line
+   * says the bridge's own plain sentence.
+   */
+  toolStep?: (agentId: string, step: ToolStep) => Promise<string>;
 }
 
 /**
@@ -567,6 +584,10 @@ export class Dispatcher {
     if (this.stopping) return this.keepForNextBridge(agentId, userId, text, receivedAt);
 
     const send = this.deps.resolveSendTarget(agentId, userId);
+    // Before the first await, as the send target: on Workspace Chat both are
+    // this turn's placeholder, and a second message from the same person
+    // arriving meanwhile brings a placeholder of its own.
+    const line = this.statusLineFor(agentId, userId);
 
     // Proactive out-of-credits gate, before spawning the ACP child / calling
     // prompt(). opencode swallows the LiteLLM 429/402, so the reactive catch
@@ -605,14 +626,44 @@ export class Dispatcher {
     // the same turn, and on 6 October one queued behind the person's «??» left
     // them reading nothing while the answer to their earlier message waited.
     const release = await this.turnInOrder(agentId, userId);
+    const status = line && this.turnStatus(agentId, userId, text, line);
     try {
       // A bridge that began to stop while this message waited keeps it for
       // the next one: the assistant has not seen it.
       if (this.stopping) return await this.keepForNextBridge(agentId, userId, text, receivedAt);
-      return await this.answer(agentId, userId, text, receivedAt, send);
+      return await this.answer(agentId, userId, text, receivedAt, send, status);
     } finally {
+      // After the turn's last follow-up, and not awaited: a status line the
+      // channel is slow to take down holds up neither this turn's result nor
+      // the next turn of the conversation.
+      void status?.close();
       release();
     }
+  }
+
+  /**
+   * The status line the agent's channel keeps for this turn, if any. A channel
+   * that fails to make one costs the turn nothing: it runs without a status.
+   */
+  private statusLineFor(agentId: string, userId: string): StatusLine | undefined {
+    try {
+      return this.deps.resolveStatusLine?.(agentId, userId);
+    } catch (err) {
+      logger.warn({ err, agentId, userId }, "no status line for this turn: the channel could not make one");
+      return undefined;
+    }
+  }
+
+  /** What decides the status line of one turn: see turn-status.ts. */
+  private turnStatus(agentId: string, userId: string, text: string, line: StatusLine): TurnStatus {
+    const lang = this.noticeLang(agentId, userId, text);
+    const toolStep = this.deps.toolStep;
+    return new TurnStatus({
+      line,
+      sentence: toolStep && ((tool, input) => toolStep(agentId, { tool, input, lang })),
+      fallback: workingNotice(lang),
+      context: { agentId, userId },
+    });
   }
 
   /**
@@ -653,6 +704,7 @@ export class Dispatcher {
     text: string,
     receivedAt: number,
     send: SendTarget,
+    status: TurnStatus | undefined,
   ): Promise<DeliveryResult> {
     // Behind any turn of this conversation still waiting out a restart.
     await this.holds.get(`${agentId}:${userId}`);
@@ -701,7 +753,11 @@ export class Dispatcher {
     // A turn owns the attach outcomes recorded while it streams and nothing an
     // earlier one left behind.
     this.deps.attachOutcomes?.begin(agentId, userId);
+    // Every prompt of the turn reports its tools to the status line, the
+    // follow-ups included: they are the same turn to the person.
+    const watch: SessionUpdateHandler = (update) => status?.observe(update);
     const onUpdate: SessionUpdateHandler = (update) => {
+      watch(update);
       if (update.sessionUpdate === "tool_call") acted = true;
       if (reply.push(update)) produced = true;
     };
@@ -795,7 +851,7 @@ export class Dispatcher {
     let answerUnsent = false;
     let retryDrain: DrainResult = { ok: true };
     if (!failed && reply.endedInMarkup()) {
-      const retry = await this.retryUnsentAnswer(agentId, userId, send, text);
+      const retry = await this.retryUnsentAnswer(agentId, userId, send, text, watch);
       retryDrain = retry.drain;
       answerUnsent = !retry.answered;
     }
@@ -857,7 +913,7 @@ export class Dispatcher {
     // and the result is a failure whatever it then writes, because the outcome
     // must not depend on a second model call going well.
     if (attachFailures.length > 0) {
-      await this.correctAttachClaim(agentId, userId, send, text, attachFailures);
+      await this.correctAttachClaim(agentId, userId, send, text, attachFailures, watch);
       return { ok: false, error: attachFailureError(attachFailures) };
     }
     if (answerUnsent) {
@@ -1019,11 +1075,13 @@ export class Dispatcher {
     userId: string,
     send: SendTarget,
     text: string,
+    watch: SessionUpdateHandler,
   ): Promise<{ answered: boolean; drain: DrainResult }> {
     const { queue, reply } = this.openReply(agentId, userId, send, text);
     let failed = false;
     try {
       await this.deps.sessionManager.prompt(agentId, userId, toolCallMarkupRetryPrompt(), (update) => {
+        watch(update);
         reply.push(update);
       });
     } catch (err) {
@@ -1055,10 +1113,12 @@ export class Dispatcher {
     send: SendTarget,
     text: string,
     failures: AttachFailure[],
+    watch: SessionUpdateHandler,
   ): Promise<void> {
     const { queue, reply } = this.openReply(agentId, userId, send, text);
     try {
       await this.deps.sessionManager.prompt(agentId, userId, attachFailurePrompt(failures), (update) => {
+        watch(update);
         reply.push(update);
       });
     } catch (err) {

@@ -238,6 +238,22 @@ export function directMessagesOnlyNotice(lang: SupportedLang): string {
 }
 
 /**
+ * What a turn's status line says of a step the catalogue has no sentence for,
+ * or when the catalogue cannot be asked: that the assistant is at work.
+ */
+export function workingNotice(lang: SupportedLang): string {
+  return pick(
+    {
+      it: "Sto lavorando…",
+      en: "Working on it…",
+      es: "Estoy trabajando…",
+      fr: "Je travaille…",
+    },
+    lang,
+  );
+}
+
+/**
  * The line a Google Chat conversation shows while its answer is being written:
  * a single speech balloon, U+1F4AC, the same in every language. Chat gives an
  * app neither a read receipt nor a typing indicator, so the app posts this on

@@ -40,6 +40,10 @@
 // is a message of its own, so the phone's notification carries the answer and
 // not the placeholder.
 //
+// The same line is the turn's status line (turn-status.ts): once a tool has
+// run a few seconds it says the step under way, also after a first reply ended
+// the balloon, and it turns into the ellipsis when the turn ends.
+//
 // Direct messages only, no group spaces. The one card is a platform notice:
 // its title, the platform under it, its body and its link in a button
 // (platform-notice.ts), with the notice spelled out as the fallback text a
@@ -48,7 +52,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extractWorkspaceChatAttachments, type WorkspaceChatMessageLike } from "./channel-attachments.js";
-import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
@@ -321,28 +325,38 @@ function apiFor(app: ChatApp): WorkspaceChatApi {
 }
 
 /**
- * Ends a turn's placeholder by rewriting its text to an ellipsis. Idempotent,
- * never rejects, and resolves once the edit has been answered.
+ * A turn's placeholder: the line posted when the message is accepted, which is
+ * also the turn's status line.
+ *
+ * `answered` is the send target's, asked after each post of the turn: the
+ * first one rewrites the balloon to an ellipsis, as long as the line still
+ * shows the balloon. `status.show` writes the step under way into the line,
+ * from then until the turn ends, also after an answer's first post ended the
+ * balloon; a post no longer ends a line that shows a step. `status.close` is
+ * the turn's end, and leaves the ellipsis whatever the line showed.
  */
-type EndPlaceholder = () => Promise<void>;
+interface Placeholder {
+  answered(): Promise<void>;
+  status: StatusLine;
+}
 
 /**
  * Posts the speech balloon saying the assistant is writing, and returns what
- * ends it.
+ * edits it.
  *
- * Neither half may cost the answer anything. The post is not awaited by the
- * turn, and a refused one is logged and leaves nothing to edit. The edit waits
- * for the post it rewrites, so a placeholder that lands after the answer is
- * still ended, and it is not awaited by the send that asks for it. It is made
- * once however often it is asked for. Both failures are logged and swallowed:
- * a line that still says the assistant is writing is a cosmetic defect, an
- * answer lost to it is not.
+ * None of it may cost the answer anything. The post is not awaited by the
+ * turn, and a refused one is logged and leaves nothing to edit. Every edit
+ * waits for the post and for the edits asked for before it, so a placeholder
+ * that lands after the answer is still ended, and none is awaited by the send
+ * that asks for it. The ellipsis is written once however often the end is
+ * asked for. Every failure is logged and swallowed: a line that still says
+ * the assistant is writing is a cosmetic defect, an answer lost to it is not.
  */
 function postPlaceholder(
   api: WorkspaceChatApi,
   conversation: Conversation & { space: string },
   context: { agentId: string; userId: string },
-): EndPlaceholder {
+): Placeholder {
   const { space, thread } = conversation;
   const posted = api.createMessage(space, WRITING_NOTICE, thread).then(
     (name) => {
@@ -359,20 +373,42 @@ function postPlaceholder(
       return undefined;
     },
   );
-  let ended: Promise<void> | undefined;
-  return () => {
-    ended ??= posted.then(async (name) => {
+  // What the line shows: the balloon, the ellipsis an answer's first post left
+  // there, a step, or the ellipsis the turn's end left there for good.
+  let state: "writing" | "answered" | "step" | "closed" = "writing";
+  let edits: Promise<void> = Promise.resolve();
+  const edit = (text: string, failure: string): Promise<void> => {
+    edits = edits.then(async () => {
+      const name = await posted;
       if (name === undefined) return;
       try {
-        await api.updateMessageText(name, WRITING_ENDED_NOTICE);
+        await api.updateMessageText(name, text);
       } catch (err) {
-        logger.warn(
-          { ...context, message: name, reason: (err as Error).message },
-          "workspace-chat placeholder not edited; it still says the assistant is writing",
-        );
+        logger.warn({ ...context, message: name, reason: (err as Error).message }, failure);
       }
     });
-    return ended;
+    return edits;
+  };
+  const NOT_ENDED = "workspace-chat placeholder not edited; it still says the assistant is writing";
+  return {
+    answered: () => {
+      if (state !== "writing") return edits;
+      state = "answered";
+      return edit(WRITING_ENDED_NOTICE, NOT_ENDED);
+    },
+    status: {
+      show: (text) => {
+        if (state === "closed") return edits;
+        state = "step";
+        return edit(text, "workspace-chat placeholder not edited with the step under way");
+      },
+      close: () => {
+        const was = state;
+        if (was === "closed") return edits;
+        state = "closed";
+        return was === "answered" ? edits : edit(WRITING_ENDED_NOTICE, NOT_ENDED);
+      },
+    },
   };
 }
 
@@ -397,8 +433,11 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
   // send target takes it. Handed over rather than kept per person, because a
   // turn may end its own placeholder only: a second message from the same
   // person has a placeholder of its own, and neither the first turn's reply nor
-  // a scheduled message sent meanwhile may end it.
-  const placeholders = new Map<string, EndPlaceholder>();
+  // a scheduled message sent meanwhile may end it. The same placeholder is the
+  // turn's status line, which the dispatcher takes from `statusLines` right
+  // after the send target.
+  const placeholders = new Map<string, Placeholder["answered"]>();
+  const statusLines = new Map<string, StatusLine>();
 
   /**
    * The person's direct-message space with this app, when no event and no
@@ -441,10 +480,10 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     // Posted before the uploads are fetched, which can take longer than the
     // person should wait to see that the message arrived.
     const space = conversation.space;
-    const endPlaceholder: EndPlaceholder =
+    const placeholder: Placeholder | undefined =
       api && space !== undefined
         ? postPlaceholder(api, { ...conversation, space }, { agentId: agent.id, userId })
-        : async () => {};
+        : undefined;
     try {
       let outText = text;
       if (refs.length > 0 && api) {
@@ -474,15 +513,21 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       // the placeholder is handed over, so the placeholder still says the
       // assistant is writing after it.
       conversations.set(userId, conversation);
-      placeholders.set(userId, endPlaceholder);
+      if (placeholder) {
+        placeholders.set(userId, placeholder.answered);
+        statusLines.set(userId, placeholder.status);
+      }
       spaces?.remember(userId, conversation.space);
       await dispatcher.handleMessage(agent.id, userId, outText);
     } finally {
-      // The leak guard for a turn that posted nothing, or that threw before its
-      // send target was made. A turn that answered has already asked for this,
-      // and asking again costs nothing.
-      if (placeholders.get(userId) === endPlaceholder) placeholders.delete(userId);
-      void endPlaceholder();
+      // The leak guard for a turn that posted nothing, that showed a step the
+      // dispatcher did not close, or that threw before its send target was
+      // made. Closing a line already closed costs nothing.
+      if (placeholder) {
+        if (placeholders.get(userId) === placeholder.answered) placeholders.delete(userId);
+        if (statusLines.get(userId) === placeholder.status) statusLines.delete(userId);
+        void placeholder.status.close();
+      }
     }
   }
 
@@ -593,6 +638,13 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
       await closeServerIfUnused();
     },
     wholeAnswers: { split: splitForGoogleChat },
+    // The turn's placeholder, taken as the send target takes it: see runTurn.
+    // A turn with no placeholder, and a message no event started, has none.
+    statusLine(userId: string): StatusLine | undefined {
+      const line = statusLines.get(userId);
+      statusLines.delete(userId);
+      return line;
+    },
     makeSendTarget(userId: string) {
       // Taken now, not at send time: see runTurn.
       const conversation = conversations.get(userId);

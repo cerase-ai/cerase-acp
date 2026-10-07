@@ -13,6 +13,9 @@
 // a button whose address it will not open, a host it cannot resolve for one,
 // and the notice is then sent again with the address spelled out.
 //
+// The turn's status line is a message of the bot's own, edited in place and
+// deleted when the turn ends (turn-status.ts).
+//
 // Not handled: group chats and channels, slash commands, buttons other than
 // the notice's link, and editing a message while the answer streams.
 //
@@ -21,7 +24,7 @@
 
 import type { Telegraf } from "telegraf";
 import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
-import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import {
@@ -32,6 +35,7 @@ import {
 } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { type PlatformNotice, telegramNoticeMessages } from "./platform-notice.js";
+import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
@@ -187,6 +191,27 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
       } catch (err) {
         logger.warn({ err, agentId: agent.id }, "error during telegram bot stop");
       }
+    },
+    // A message in the private chat, edited in place and deleted when the turn
+    // ends, sent without a notification. The typing action the text handler
+    // keeps up comes back at its next refresh.
+    statusLine(userId: string): StatusLine {
+      const telegram = () => {
+        if (!bot) throw new Error(`telegram adapter for agent "${agent.id}" not started — no status line`);
+        return bot.telegram;
+      };
+      return messageStatusLine<number>(
+        {
+          post: async (text) => (await telegram().sendMessage(userId, text, { disable_notification: true })).message_id,
+          edit: async (messageId, text) => {
+            await telegram().editMessageText(userId, messageId, undefined, text);
+          },
+          remove: async (messageId) => {
+            await telegram().deleteMessage(userId, messageId);
+          },
+        },
+        { agentId: agent.id, userId, channel: "telegram" },
+      );
     },
     async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
       try {

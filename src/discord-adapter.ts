@@ -7,13 +7,14 @@
 
 import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partials, Routes } from "discord.js";
 import { extractDiscordFiles } from "./channel-attachments.js";
-import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
 import { discordNoticeMessages, type PlatformNotice } from "./platform-notice.js";
 import { isChannelReady, ReachabilityMonitor, type ReachabilitySnapshot } from "./reachability.js";
+import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
 import { TypingSessions } from "./typing-keepalive.js";
 
@@ -171,6 +172,27 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
       } catch (err) {
         logger.warn({ err, agentId: agent.id }, "error during discord client destroy");
       }
+    },
+    // A message of the bot's own in the DM, edited in place and deleted when
+    // the turn ends. It does not end the typing keepalive: the turn is still
+    // running, and the keepalive's next refresh puts the indicator back. Sent
+    // without a notification, because a step is not worth ringing a phone.
+    statusLine(userId: string): StatusLine {
+      return messageStatusLine<Message>(
+        {
+          post: async (text) => {
+            const channel = await dmChannel(userId);
+            return channel.send({ content: text, flags: "SuppressNotifications" });
+          },
+          edit: async (message, text) => {
+            await message.edit(text);
+          },
+          remove: async (message) => {
+            await message.delete();
+          },
+        },
+        { agentId: agent.id, userId, channel: "discord" },
+      );
     },
     async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
       // An embed signed by the platform with the link in a button, and no
