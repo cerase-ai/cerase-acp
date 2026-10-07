@@ -409,19 +409,22 @@ describe("workspace-chat: one Chat app per assistant", () => {
 
   // Each turn answers where its own message was written, even when a later
   // message from the same person in another thread arrives before it ends.
-  it("two turns running at once from one person are each answered in their own thread", async () => {
+  // That message's turn starts when the first one has ended.
+  it("a message sent in another thread while the first is answered is answered in its own thread", async () => {
     await post(chatEvent({ thread: "spaces/DM-MARIO/threads/TA", threadReply: true, text: "prima domanda?" }));
     await turnCount(1);
     await post(chatEvent({ thread: "spaces/DM-MARIO/threads/TB", threadReply: true, text: "seconda domanda?" }));
-    await turnCount(2);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(turns).toHaveLength(1);
 
-    turns[1]!.end("Risposta alla seconda.");
-    await replyCount(1);
     turns[0]!.end("Risposta alla prima.");
+    await replyCount(1);
+    await turnCount(2);
+    turns[1]!.end("Risposta alla seconda.");
     await replyCount(2);
     expect(replies().map((p) => [p.text, p.thread])).toEqual([
-      ["Risposta alla seconda.", "spaces/DM-MARIO/threads/TB"],
       ["Risposta alla prima.", "spaces/DM-MARIO/threads/TA"],
+      ["Risposta alla seconda.", "spaces/DM-MARIO/threads/TB"],
     ]);
   });
 
@@ -1005,12 +1008,13 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
       await write({ text, thread: `spaces/DM-MARIO/threads/L${i}`, threadReply: true });
       await vi.waitFor(() => expect(google.attemptedPosts).toHaveLength(i + 1));
     }
-    await vi.waitFor(() => expect(turns).toHaveLength(messages.length));
     expect(google.attemptedPosts.map((p) => p.text)).toEqual([BALLOON, BALLOON, BALLOON, BALLOON]);
     expect([...BALLOON].map((c) => c.codePointAt(0))).toEqual([0x1f4ac]);
 
-    for (const [i, turn] of turns.entries()) {
-      turn.end("Fatto.");
+    // The turns run one after the other, each after the one before has ended.
+    for (let i = 0; i < messages.length; i++) {
+      await vi.waitFor(() => expect(turns).toHaveLength(i + 1));
+      turns[i]!.end("Fatto.");
       await vi.waitFor(() => expect(google.edits).toHaveLength(i + 1));
     }
     await expectEachEndedOnce(...placeholders());
@@ -1112,13 +1116,14 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
 
   // Two messages in quick succession are two turns, each with its own line.
   // A turn ends its own and no other, and a message sent to the person while
-  // both run, a scheduled one, ends neither.
+  // both wait, a scheduled one, ends neither. The second turn starts when the
+  // first has ended.
   it("belongs to its own turn: two turns from one person each edit their own, and a scheduled message edits none", async () => {
     await write({ thread: "spaces/DM-MARIO/threads/TA", threadReply: true, text: "prima domanda?" });
     await vi.waitFor(() => expect(google.posts).toHaveLength(1));
     await write({ thread: "spaces/DM-MARIO/threads/TB", threadReply: true, text: "seconda domanda?" });
     await vi.waitFor(() => expect(google.posts).toHaveLength(2));
-    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
     expect(google.posts.map((p) => p.thread)).toEqual(["spaces/DM-MARIO/threads/TA", "spaces/DM-MARIO/threads/TB"]);
     const [placeholderA, placeholderB] = google.posts;
 
@@ -1132,6 +1137,7 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     expect(google.edits.map((e) => e.posted)).toEqual([placeholderA]);
     expect(google.shown()).toEqual([ELLIPSIS, BALLOON, "Promemoria.", "Risposta alla prima."]);
 
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
     turns[1]!.end("Risposta alla seconda.");
     await expectEachEndedOnce(placeholderA!, placeholderB!);
     expect(google.shown()).toEqual([

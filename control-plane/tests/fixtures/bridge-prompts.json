@@ -7,9 +7,9 @@
   ],
   "bridge": [
     {
-      "name": "the follow-up after an answer written as a tool call",
+      "name": "the follow-up after an answer written as a tool call or as tags alone",
       "made_by": "toolCallMarkupRetryPrompt()",
-      "text": "[reply_result: not sent]\n\nYour last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.\n\nThe person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words."
+      "text": "[reply_result: not sent]\n\nYour last message was not sent to the person: it was tags or a tool call written out as text instead of made through the tool interface, with no words for them, so no tool ran and nothing in it happened.\n\nThe person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words."
     },
     {
       "name": "the follow-up after a turn that ended with no text and no tool call",

@@ -23,6 +23,19 @@
 // parameter's value, which is how a cut-off block ends. A block followed by
 // prose is left alone, and so is anything inside a code fence: that is how an
 // answer quotes the syntax to somebody who asked about it.
+//
+// Two more shapes reached a person's chat on 6 October, from a line that opens
+// with a tag of any name, and are judged the same way:
+//
+//   <cerase-ok>                   text made only of tags, with no word between
+//                                 or around them, sent twice as a message
+//   <cerase-gateway_call_recipe>  a tool call spelled as elements named after
+//     <recipe_name>…</recipe_name>  the tool and its arguments: elements whose
+//     <args>{…}</args>              content is only elements, to the end
+//   </cerase-gateway_call_recipe>
+//
+// Neither is words for a person. An element with words of its own inside it,
+// `<b>Nota</b>`, is not this, and neither is an address in angle brackets.
 
 import { bridgePromptLine } from "./bridge-prompt.js";
 
@@ -31,6 +44,16 @@ const OPENER = String.raw`(?:<(?:tool_calls|function_calls)\s*>|<tool_call[\s>]|
 // An opening tag at the start of a line, indentation allowed.
 const OPENER_LINE = new RegExp(String.raw`^[ \t]*${OPENER}`, "gm");
 const OPENER_AT_START = new RegExp(`^${OPENER}`);
+
+// A line that opens with a tag of any name, or with one of DeepSeek's markers:
+// where text that is only tags, or a call spelled as elements, can start.
+const TAG_LINE = /^[ \t]*<(?:\/?[A-Za-z_]|[｜|])/gm;
+
+// A tag of any name: a name, then attributes, a slash or the closing bracket.
+// An address (`<https://…>`, `<mario@rossi.it>`) is not one: its name runs into
+// a character no tag name has.
+const ANY_TAG = /<\/?[A-Za-z_][\w.:-]*(?:\s[^<>\n]*)?\/?>/g;
+const ANY_TAG_PARTS = /^<(\/?)([A-Za-z_][\w.:-]*)(?:\s[^<>\n]*)?(\/?)>$/;
 
 // Every tag, opening or closing, of the recorded vocabulary. What sits
 // between the tags is never read: a parameter's value is free text and can
@@ -69,7 +92,7 @@ export function toolCallMarkupStart(text: string, insideFence = false): number {
  * undone.
  */
 export function toolCallMarkupHoldStart(text: string, insideFence = false): number {
-  const at = toolCallMarkupStart(text, insideFence);
+  const at = tagLineStart(text, insideFence);
   if (at >= 0) return at;
   const lineStart = text.lastIndexOf("\n") + 1;
   const last = text.slice(lineStart).trimStart();
@@ -94,10 +117,80 @@ export function isToolCallMarkup(block: string): boolean {
   return PARAMETER_OPEN.test(last[0]) && !tail.includes("\n");
 }
 
-/** Whether a whole answer ends in a tool-call block, with or without a sentence before it. */
+/** Where the first line opening with a tag of any name starts, outside a code fence, or -1. */
+function tagLineStart(text: string, insideFence: boolean): number {
+  if (!text) return -1;
+  for (const m of text.matchAll(TAG_LINE)) {
+    if (!fenceOpenAfter(text.slice(0, m.index), insideFence)) return m.index;
+  }
+  return -1;
+}
+
+/** Whether `text` is tags and nothing else: no word between, before or after them. */
+export function isOnlyTags(text: string): boolean {
+  const s = text.trim();
+  if (!s.startsWith("<")) return false;
+  return s.replace(VOCAB_TAG, "").replace(ANY_TAG, "").trim() === "";
+}
+
+/**
+ * Whether `text` is elements whose content is only elements, to its end: a
+ * tool call spelled as a tag named after the tool, its arguments as children.
+ * The outermost elements hold no words of their own; what is inside a child is
+ * a value and is not read. A block cut off inside a child counts, as a cut-off
+ * call does above.
+ */
+export function isElementCall(text: string): boolean {
+  const s = text.trim();
+  if (!s.startsWith("<")) return false;
+  const stack: string[] = [];
+  let children = 0;
+  let last = 0;
+  for (const m of s.matchAll(ANY_TAG)) {
+    const parts = ANY_TAG_PARTS.exec(m[0]);
+    if (!parts) return false;
+    const [, closing, name, selfClosing] = parts;
+    // Inside a child everything is its value, up to the tag that closes it.
+    if (stack.length >= 2 && !(closing && name === stack[stack.length - 1])) continue;
+    // Words outside any element, or directly inside an outermost one.
+    if (stack.length <= 1 && s.slice(last, m.index).trim() !== "") return false;
+    last = m.index + m[0].length;
+    if (closing) {
+      if (stack.length === 0 || stack[stack.length - 1] !== name) return false;
+      stack.pop();
+    } else if (!selfClosing) {
+      if (stack.length === 1) children += 1;
+      stack.push(name!);
+    } else if (stack.length === 1) {
+      children += 1;
+    }
+  }
+  if (stack.length <= 1 && s.slice(last).trim() !== "") return false;
+  return children > 0;
+}
+
+/** What a run of text the person must not read is: a call written out, or tags alone. */
+export type MarkupKind = "call" | "tags";
+
+/**
+ * Where the text stops being words for a person: the first line, outside a code
+ * fence, from which everything to the end is a tool call written out in any of
+ * the shapes above, or tags alone. -1 when there is none.
+ */
+export function withheldMarkupStart(text: string, insideFence = false): { at: number; kind: MarkupKind } | null {
+  if (!text) return null;
+  for (const m of text.matchAll(TAG_LINE)) {
+    if (fenceOpenAfter(text.slice(0, m.index), insideFence)) continue;
+    const rest = text.slice(m.index);
+    if (isToolCallMarkup(rest) || isElementCall(rest)) return { at: m.index, kind: "call" };
+    if (isOnlyTags(rest)) return { at: m.index, kind: "tags" };
+  }
+  return null;
+}
+
+/** Whether a whole answer ends in a tool-call block or in tags alone, with or without a sentence before it. */
 export function endsInToolCallMarkup(text: string): boolean {
-  const at = toolCallMarkupStart(text);
-  return at >= 0 && isToolCallMarkup(text.slice(at));
+  return withheldMarkupStart(text) !== null;
 }
 
 /** The first line of the follow-up prompt, which marks it as the bridge's: see bridge-prompt.ts. */
@@ -119,7 +212,7 @@ export const MARKUP_RETRY_MARKER = bridgePromptLine("reply", "not sent");
 export function toolCallMarkupRetryPrompt(): string {
   return [
     MARKUP_RETRY_MARKER,
-    "Your last message was not sent to the person: it was a tool call written out as text instead of made through the tool interface, so no tool ran and nothing in it happened.",
+    "Your last message was not sent to the person: it was tags or a tool call written out as text instead of made through the tool interface, with no words for them, so no tool ran and nothing in it happened.",
     "The person has not seen that message; do not mention it. Continue the request from where it stopped: make any tool call through the tool interface, never as text, and end with your answer to the person in plain words.",
   ].join("\n\n");
 }

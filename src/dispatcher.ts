@@ -41,10 +41,9 @@ import { type LastSummary, startedOverNote } from "./session-summary.js";
 import { StreamBuffer } from "./stream-buffer.js";
 import {
   fenceOpenAfter,
-  isToolCallMarkup,
   toolCallMarkupHoldStart,
   toolCallMarkupRetryPrompt,
-  toolCallMarkupStart,
+  withheldMarkupStart,
 } from "./tool-call-markup.js";
 import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
 
@@ -328,6 +327,11 @@ export class Dispatcher {
   // waits for both, so the assistant answers them in the order they were sent.
   private holds = new Map<string, Promise<void>>();
 
+  // Per conversation, the end of the last turn that has taken its place: see
+  // `turnInOrder`. Every turn waits for the one before it to end, follow-ups
+  // included.
+  private inOrder = new Map<string, Promise<void>>();
+
   // Per conversation, the turns `handleMessage` is running now, whoever sent
   // them: an adapter, a scheduled message, a platform note.
   private running = new Map<string, Set<Promise<DeliveryResult>>>();
@@ -593,6 +597,63 @@ export class Dispatcher {
       }
     }
 
+    // One turn of a conversation at a time, from its first prompt to its last
+    // follow-up. A message the person sends while the assistant is answering
+    // waits here, not in the session's queue: a follow-up the bridge sends
+    // after the turn's prompt ended (another try after an empty answer or a
+    // held-back one, the correction of a file that did not arrive) is part of
+    // the same turn, and on 6 October one queued behind the person's «??» left
+    // them reading nothing while the answer to their earlier message waited.
+    const release = await this.turnInOrder(agentId, userId);
+    try {
+      // A bridge that began to stop while this message waited keeps it for
+      // the next one: the assistant has not seen it.
+      if (this.stopping) return await this.keepForNextBridge(agentId, userId, text, receivedAt);
+      return await this.answer(agentId, userId, text, receivedAt, send);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Wait for every turn of this conversation that came before this one, and
+   * hold the place of this one until the returned function is called. While it
+   * waits the turn is in no queue of the session manager, so it is counted for
+   * the agent as a held turn is.
+   */
+  private async turnInOrder(agentId: string, userId: string): Promise<() => void> {
+    const key = `${agentId}:${userId}`;
+    const before = this.inOrder.get(key);
+    let done: () => void = () => {};
+    const mine = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    const tail = (before ?? Promise.resolve()).then(() => mine);
+    this.inOrder.set(key, tail);
+    const release = () => {
+      done();
+      if (this.inOrder.get(key) === tail) this.inOrder.delete(key);
+    };
+    if (before) {
+      const sm = this.deps.sessionManager;
+      const waiting = typeof sm.holdTurn === "function" ? sm.holdTurn(agentId) : () => {};
+      try {
+        await before;
+      } finally {
+        waiting();
+      }
+    }
+    return release;
+  }
+
+  /** The turn itself, once every earlier turn of its conversation has ended: see `runTurn`. */
+  private async answer(
+    agentId: string,
+    userId: string,
+    text: string,
+    receivedAt: number,
+    send: SendTarget,
+  ): Promise<DeliveryResult> {
     // Behind any turn of this conversation still waiting out a restart.
     await this.holds.get(`${agentId}:${userId}`);
 
@@ -1110,17 +1171,20 @@ export class Dispatcher {
           }
           return;
         }
-        // Judged whole, from its first opening line: a block that runs to the
-        // end of the message is held back, and the sentence before it, when
-        // there is one, is sent as it would have been. Anything else, a block
-        // followed by prose among it, is delivered unchanged.
-        const at = toolCallMarkupStart(held, fenceOpen);
-        if (at >= 0 && isToolCallMarkup(held.slice(at))) {
-          const before = held.slice(0, at).trimEnd();
+        // Judged whole, from the first line that opens with a tag: when
+        // everything from such a line to the end of the message is a tool call
+        // written out, or tags with no words, it is held back, and the sentence
+        // before it, when there is one, is sent as it would have been. Anything
+        // else, a block followed by prose among it, is delivered unchanged.
+        const markup = withheldMarkupStart(held, fenceOpen);
+        if (markup) {
+          const before = held.slice(0, markup.at).trimEnd();
           if (before.length > 0) deliver(before);
           logger.warn(
-            { agentId, userId, chars: held.length - at },
-            "egress: held back an answer written as tool-call markup",
+            { agentId, userId, chars: held.length - markup.at, kind: markup.kind },
+            markup.kind === "call"
+              ? "egress: held back an answer written as tool-call markup"
+              : "egress: held back text made only of tags",
           );
           endedInMarkup = true;
           return;
@@ -1139,7 +1203,8 @@ export class Dispatcher {
         if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;
         const next = (update as { messageId?: string }).messageId;
         if (next && messageId && next !== messageId) {
-          if (whole) buffer.flush();
+          // The message before ends here: nothing of it runs into this one.
+          buffer.flush();
           buffer.release();
           fenceOpen = false;
         }
