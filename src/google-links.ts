@@ -11,9 +11,10 @@
 // the assistant alone ahead of the person's message (PromptOptions.context),
 // each file's kind, its id written bare, outside any URL the masking would
 // hide, and the recipe of the Google Workspace connector that opens it through
-// the gateway's call_recipe, with the argument that takes the id. The recipes
-// and argument names are the connector's own, at the version the catalogue
-// installs (@piotr-agier/google-drive-mcp 2.5.0).
+// the gateway's call_recipe, with the argument that takes the id. A folder also
+// gets the recipe that uploads a file from the assistant's workspace into it.
+// The recipes and argument names are the connector's own, at the version the
+// catalogue installs (@piotr-agier/google-drive-mcp 2.5.0).
 
 import { bridgePromptLine } from "./bridge-prompt.js";
 
@@ -102,7 +103,11 @@ function howToOpen(link: GoogleFileLink): string {
         ", which saves it in your workspace and answers with the path to read."
       );
     case "folder":
-      return `a Google Drive folder, id ${id}: ${call("listFolder", { folderId: id })}.`;
+      return (
+        `a Google Drive folder, id ${id}: ${call("listFolder", { folderId: id })}, which lists what it holds; ` +
+        `${call("uploadFile", { localPath: "<the path of the file in your workspace>", parentFolderId: id })} puts that file into it. ` +
+        "Every Google Workspace tool takes the bare id, never the link."
+      );
   }
 }
 

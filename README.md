@@ -163,8 +163,11 @@ allowlist gates `/internal/inject`.
    before the model reads them, and the Google Workspace connector's recipe that
    opens it through `call_recipe`, with its arguments (`readGoogleDoc`,
    `getGoogleSheetContent`, `getGoogleSlidesContent`, `downloadFile`,
-   `listFolder`). The block also tells it never to fetch a Google address as a
-   web page. The console's chat does not show it. Rule: `src/google-links.ts`.
+   `listFolder`). A folder also gets `uploadFile`, with the folder's id as
+   `parentFolderId` and the file's path in the assistant's workspace as
+   `localPath`, and the sentence that every Google Workspace tool takes the bare
+   id, never the link. The block also tells it never to fetch a Google address
+   as a web page. The console's chat does not show it. Rule: `src/google-links.ts`.
    The slot's `opencode.json` allows `webfetch`, so a fetch never asks the
    bridge for permission and the bridge cannot refuse one.
 4. **Platform notes.** Text injected through `/internal/inject` that opens with

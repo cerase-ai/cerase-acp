@@ -109,8 +109,21 @@ describe("what the assistant is told", () => {
       '3. a file on Google Drive, id 1AbCdEfGhIjKlMnOpQrStUvW-pdf1: call_recipe with recipe_name "google-workspace.downloadFile" and args {"fileId":"1AbCdEfGhIjKlMnOpQrStUvW-pdf1","localPath":"<a name for the file>"}',
     );
     expect(note).toContain(
-      '4. a Google Drive folder, id 1AbCdEfGhIjKlMnOpQrStUvW-fld1: call_recipe with recipe_name "google-workspace.listFolder" and args {"folderId":"1AbCdEfGhIjKlMnOpQrStUvW-fld1"}.',
+      '4. a Google Drive folder, id 1AbCdEfGhIjKlMnOpQrStUvW-fld1: call_recipe with recipe_name "google-workspace.listFolder" and args {"folderId":"1AbCdEfGhIjKlMnOpQrStUvW-fld1"}',
     );
+  });
+
+  // A link passed where a tool takes the folder's id names no folder Drive
+  // knows, so the upload into it fails.
+  it("for a Drive folder: the recipe that lists it, the one that uploads into it by its bare id, and that no tool takes the link", () => {
+    const folderId = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    const note = googleLinksNote(
+      `Mi carichi il verbale in questa cartella? https://drive.google.com/drive/folders/${folderId}?usp=sharing`,
+    )!;
+    expect(note).toContain(
+      `1. a Google Drive folder, id ${folderId}: call_recipe with recipe_name "google-workspace.listFolder" and args {"folderId":"${folderId}"}, which lists what it holds; call_recipe with recipe_name "google-workspace.uploadFile" and args {"localPath":"<the path of the file in your workspace>","parentFolderId":"${folderId}"} puts that file into it. Every Google Workspace tool takes the bare id, never the link.`,
+    );
+    expect(note).not.toMatch(/https?:\/\/|usp=sharing/);
   });
 });
 
