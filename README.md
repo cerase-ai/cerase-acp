@@ -153,11 +153,25 @@ allowlist gates `/internal/inject`.
    `GET /api/internal/turn-context/{agent}`, which also supplies the previous
    message's time after a bridge restart. The rules the assistant reads it by
    are in the baseline prompt, `cerase-core/control-plane/config/defaults/agents-baseline.md`.
-3. **Platform notes.** Text injected through `/internal/inject` that opens with
+3. **Google links.** A link in the message to a Google Docs document, Sheets
+   spreadsheet, Slides presentation, Drive file or Drive folder
+   (`docs.google.com/document|spreadsheets|presentation/d/<id>`,
+   `drive.google.com/file/d/<id>`, `drive.google.com/open?id=<id>`,
+   `drive.google.com/drive/folders/<id>`, with or without `/u/<n>/`) is told to
+   the assistant in a block for it alone, ahead of the message: each file's
+   kind, its id written outside any URL, because the privacy layer masks URLs
+   before the model reads them, and the Google Workspace connector's recipe that
+   opens it through `call_recipe`, with its arguments (`readGoogleDoc`,
+   `getGoogleSheetContent`, `getGoogleSlidesContent`, `downloadFile`,
+   `listFolder`). The block also tells it never to fetch a Google address as a
+   web page. The console's chat does not show it. Rule: `src/google-links.ts`.
+   The slot's `opencode.json` allows `webfetch`, so a fetch never asks the
+   bridge for permission and the bridge cannot refuse one.
+4. **Platform notes.** Text injected through `/internal/inject` that opens with
    `[platform_note sig=` and arrives while a turn of that conversation is
    running waits for it; the notes that arrived meanwhile reach the assistant
    together as one prompt.
-4. **An answer written as a tool call.** An answer that ends in a tool call
+5. **An answer written as a tool call.** An answer that ends in a tool call
    spelled out as text (`<tool_calls>`, `<function_calls>`, `<tool_call>`, a bare
    `<invoke name=…>`, or DeepSeek's DSML markers) is held back from that block
    on; the sentence before it is sent. The assistant gets one more try on the
@@ -166,7 +180,7 @@ allowlist gates `/internal/inject`.
    answer did not come out and to ask again, and the turn reports a failure. A
    block inside a code fence, or followed by prose, is a quotation and is sent
    unchanged. Rule and recorded shapes: `src/tool-call-markup.ts`.
-5. **A turn that says nothing.** A turn that ends with no text and no tool call
+6. **A turn that says nothing.** A turn that ends with no text and no tool call
    is asked again at once on the same session, up to three times, with a prompt
    that opens `[reply_result: empty]` and tells the assistant to answer the
    person. Nothing is sent between tries, so the typing indicator stays on. A
@@ -175,7 +189,7 @@ allowlist gates `/internal/inject`.
    backoff. Text the bridge withheld whole (an internal summary, or tool-call
    markup the send path drops) reached nobody, so a turn whose only text was
    that counts as one that said nothing. Rule: `src/empty-turn.ts`.
-6. **Notices.** A failed turn, a turn that ran a tool and wrote nothing, a
+7. **Notices.** A failed turn, a turn that ran a tool and wrote nothing, a
    fourth empty answer, and a part of a reply the channel kept refusing each
    get a short message in the person's language: the language of their
    message, else the last one they wrote in, else the organisation's `locale`,

@@ -16,6 +16,7 @@ import type { DeliveryResult, StatusLine, WholeAnswers } from "./chat-adapter.js
 import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { EMPTY_TURN_RETRIES, emptyTurnRetryPrompt } from "./empty-turn.js";
+import { googleLinksNote } from "./google-links.js";
 import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
 import { noticeText, type PlatformNotice } from "./platform-notice.js";
@@ -730,8 +731,14 @@ export class Dispatcher {
       resolveLastTurn: contextLastTurnAt === undefined ? undefined : async () => contextLastTurnAt,
     });
     const promptText = prefix + text;
+    // The Google files the message links to, told to the assistant alone with
+    // their ids, which the masking of URLs at the model boundary would hide.
+    const links = googleLinksNote(text);
 
-    logger.info({ agentId, userId, textLen: text.length }, "dispatching to session manager");
+    logger.info(
+      { agentId, userId, textLen: text.length, googleLinks: links !== undefined },
+      "dispatching to session manager",
+    );
 
     // Track whether the turn answered the person and whether it failed, so
     // we can surface a user-facing message instead of silence. Text that was
@@ -773,7 +780,14 @@ export class Dispatcher {
     };
     try {
       try {
-        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, { opensTurn: true });
+        await this.promptThroughRestarts(
+          agentId,
+          userId,
+          promptText,
+          onUpdate,
+          cut,
+          links ? { opensTurn: true, context: links } : { opensTurn: true },
+        );
       } catch (err) {
         if (!(err instanceof SessionOutgrownError)) throw err;
         // The session grew past what the runtime can summarise, and the
@@ -792,7 +806,9 @@ export class Dispatcher {
         } finally {
           waiting();
         }
-        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, { context: note });
+        await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, {
+          context: links ? `${note}\n\n${links}` : note,
+        });
       }
     } catch (err) {
       if (err instanceof BridgeStoppingError) {
