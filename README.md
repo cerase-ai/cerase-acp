@@ -225,9 +225,11 @@ Each reply chunk passes these steps, in order, before a channel sends it:
 5. Tool-call markup left in the text is stripped; a chunk that was only markup
    is withheld.
 
-All the control-plane calls on this page need `CERASE_INTERNAL_SECRET`. Without
-it the bridge makes none of them: turns run without the credit check, the clock
-and the summaries, and `{{APPROVAL_LINK}}` is left in the text.
+All the control-plane calls on this page need its bearer, which the
+control-plane writes into `agents.yaml` as `internal_bearer`;
+`CERASE_INTERNAL_SECRET` is the fallback outside the appliance. Without either,
+each call fails and says so in the log: turns run without the credit check, the
+clock and the summaries, and `{{APPROVAL_LINK}}` is replaced by a note.
 
 ### Files
 
@@ -336,6 +338,7 @@ applied agent by agent:
 | the `session` block | applies the new limits to the running session manager |
 | `locale` | applies to the next notice the bridge writes |
 | `max_file_mb` | applies the new limit to the next file |
+| `internal_bearer` | applies to the next call to the control-plane |
 
 ### Failures and health
 
@@ -389,6 +392,7 @@ Top-level keys:
 | `session` | yes | Session limits, below. |
 | `locale` | no | `it`, `en`, `es` or `fr`: the language of the bridge's own notices when the person's messages have not shown theirs. |
 | `max_file_mb` | no | The console's file-size limit, in MB, for files in both directions. Absent: `CERASE_MAX_ATTACHMENT_MB`, then 64. |
+| `internal_bearer` | no | The bearer the bridge presents to the control-plane's internal API, written by the control-plane. Absent: `CERASE_INTERNAL_SECRET`. |
 
 ### Agent fields
 
@@ -452,7 +456,7 @@ that rule keeps the agent from starting, and the log names the key and the value
 | `CERASE_ACP_LOG_LEVEL` | `info` | pino level; `silent` mutes the logs. Logs go to stderr. |
 | `CERASE_ACP_INTERNAL_SECRET` | unset | The bearer the internal endpoints require. Unset: the internal server, including `/healthz`, does not start. |
 | `CERASE_ACP_INTERNAL_PORT` | `7476` | Port of the internal server. |
-| `CERASE_INTERNAL_SECRET` | unset | The bearer the bridge presents to the control-plane. It is not `CERASE_ACP_INTERNAL_SECRET`, which is the one the bridge demands. |
+| `CERASE_INTERNAL_SECRET` | unset | The bearer the bridge presents to the control-plane when `agents.yaml` has no `internal_bearer`. It is not `CERASE_ACP_INTERNAL_SECRET`, which is the one the bridge demands. |
 | `CERASE_CONTROL_PLANE_URL` | `http://cerase-control-plane:8000` | Where the control-plane's internal API is. |
 | `WORKSPACE_CHAT_PORT` | `7475` | Port of the Workspace Chat webhook listener. |
 | `CERASE_AGENT_WORKSPACE_ROOT` | `/home/agent/cerase/workspace` | The workspace directory inside a slot, for files in both directions. |

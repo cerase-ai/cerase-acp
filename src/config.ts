@@ -180,6 +180,13 @@ const BridgeConfigSchema = z
     // refused before it is downloaded, and an outbound one is read up to it.
     // Optional: a control-plane that does not write it leaves the fallback.
     max_file_mb: z.number().int().positive().optional(),
+    // The bearer the control-plane's internal API takes, written here by the
+    // control-plane from the file it checks the bearer against. The bridge
+    // reads it at every call: the clock and the last turn in front of each
+    // turn, the credit check, the approval link and the rolling summary. The
+    // environment variable CERASE_INTERNAL_SECRET is the fallback for a bridge
+    // run outside the appliance.
+    internal_bearer: z.string().min(1).optional(),
   })
   .superRefine((cfg, ctx) => {
     const seen = new Set<string>();

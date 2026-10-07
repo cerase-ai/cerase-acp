@@ -1081,6 +1081,87 @@ describe("a summary the agent streams inside a turn", () => {
   });
 });
 
+// Every turn carries the organization's clock, from the control-plane's turn
+// context. On 6 October no turn on any box carried it: the bridge read its
+// bearer from CERASE_INTERNAL_SECRET, which nothing on a box sets, and without
+// one it left the call unwired and said nothing. The bearer now comes from
+// agents.yaml, where the control-plane writes it.
+describe("the clock in front of every turn", () => {
+  let handle: RunBridgeHandle | undefined;
+  let controlPlane: Server | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    await new Promise<void>((resolve) => (controlPlane ? controlPlane.close(() => resolve()) : resolve()));
+    controlPlane = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  it("is asked of the control-plane with the bearer agents.yaml carries, and reaches the assistant", async () => {
+    const bearers: string[] = [];
+    controlPlane = createServer((req, res) => {
+      bearers.push(String(req.headers.authorization ?? ""));
+      if (req.url?.startsWith("/api/internal/turn-context/clock-probe")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ timezone: "Europe/Rome", now: new Date().toISOString(), last_turn_at: null }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => controlPlane?.listen(0, "127.0.0.1", () => resolve()));
+    const cpPort = (controlPlane.address() as AddressInfo).port;
+
+    const SECRET = "inject-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    vi.stubEnv("CERASE_INTERNAL_SECRET", "");
+    vi.stubEnv("CERASE_CONTROL_PLANE_URL", `http://127.0.0.1:${cpPort}`);
+
+    const cfg: BridgeConfig = {
+      agents: [
+        {
+          id: "clock-probe",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
+          bot_token: "irrelevant",
+          allowed_users: ["111"],
+          spawn: { command: "env", args: ["--", "FAKE_ECHO_PROMPT=1", "node", FAKE_CHILD] },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+      internal_bearer: "bearer-from-agents-yaml",
+    };
+
+    const chat: string[] = [];
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        return a;
+      },
+    });
+
+    const res = await fetch(`${handle.internalUrl}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify({ agent_id: "clock-probe", user_id: "111", text: "che ore sono?", surface_in_chat: false }),
+    });
+    expect(res.status).toBe(202);
+
+    await vi.waitFor(() => expect(chat.join("")).toContain("che ore sono?"), { timeout: 8000, interval: 50 });
+    expect(chat.join("")).toMatch(/now=\d{4}-\d{2}-\d{2} \d{2}:\d{2} Europe\/Rome\]/);
+    expect(bearers.length).toBeGreaterThan(0);
+    expect(new Set(bearers)).toEqual(new Set(["Bearer bearer-from-agents-yaml"]));
+  });
+});
+
 // The send path withholds a chunk that is the engine's own summary whole. Its
 // title alone is enough there, and the stream's holds, which start at the
 // appliance's section headings, let it through to that point.

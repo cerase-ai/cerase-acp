@@ -285,13 +285,23 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // link and rolling summaries.
   const controlPlaneUrl = process.env.CERASE_CONTROL_PLANE_URL ?? "http://cerase-control-plane:8000";
   // Two distinct secrets:
-  //  - controlPlaneSecret: the CONTROL-PLANE internal bearer (same the
-  //    gateway uses) — to CALL control-plane internal endpoints.
+  //  - controlPlaneSecret(): the CONTROL-PLANE internal bearer — to CALL
+  //    control-plane internal endpoints. The control-plane writes it into
+  //    agents.yaml (`internal_bearer`) and a reload replaces it, so it is read
+  //    at every call; CERASE_INTERNAL_SECRET is the fallback for a bridge run
+  //    outside the appliance. Until 7 October nothing on a box set either, and
+  //    every call below was left unwired without a word: no turn carried the
+  //    clock. A call made without one now fails, and the failure is logged.
   //  - acpInjectSecret: the bearer the bridge's own internal endpoints
   //    (/internal/inject, /internal/status) require; unset, the internal
   //    server does not start. Must match the control-plane's
   //    cerase.acp.internal_secret.
-  const controlPlaneSecret = process.env.CERASE_INTERNAL_SECRET ?? "";
+  const controlPlaneSecret = (): string => config.internal_bearer || process.env.CERASE_INTERNAL_SECRET || "";
+  const requireControlPlaneSecret = (): string => {
+    const secret = controlPlaneSecret();
+    if (!secret) throw new Error("no control-plane bearer: agents.yaml carries no internal_bearer");
+    return secret;
+  };
   const acpInjectSecret = process.env.CERASE_ACP_INTERNAL_SECRET ?? "";
 
   // A withheld internal summary is kept rather than discarded: posted over the
@@ -300,10 +310,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // for a summary withheld whole, and by the dispatcher for one it held back
   // while it streamed in pieces.
   const captureSummary = (agentId: string, summary: string): void => {
-    if (!controlPlaneSecret) return;
+    const secret = controlPlaneSecret();
+    if (!secret) {
+      logger.warn({ agentId }, "a withheld summary was not kept: agents.yaml carries no internal_bearer");
+      return;
+    }
     void postSessionSummary(agentId, summary, {
       controlPlaneUrl,
-      internalSecret: controlPlaneSecret,
+      internalSecret: secret,
     }).catch((err) => {
       logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
     });
@@ -321,9 +335,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // checkTenantCredit throws on any non-402/200 or network error, and the
     // dispatcher fails open on a throw — a control-plane glitch must not block
     // chat.
-    creditCheck: controlPlaneSecret
-      ? (agentId) => checkTenantCredit(agentId, { controlPlaneUrl, internalSecret: controlPlaneSecret })
-      : undefined,
+    creditCheck: (agentId) =>
+      checkTenantCredit(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
     // The organization's wall clock, and the pair's last turn when this
     // process has just started and remembers nobody. Wired on the same
     // condition as the gate above and for the same reason: without the
@@ -333,23 +346,20 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // the message, because the control-plane stores a channel identity per
     // platform and matching on the id alone would collide the day two
     // platforms hand out the same string.
-    turnContext: controlPlaneSecret
-      ? async (agentId, userId) => {
-          const platform = config.agents.find((a) => a.id === agentId)?.channel;
-          const ctx = await fetchTurnContext(
-            agentId,
-            { platform, platformUserId: userId },
-            { controlPlaneUrl, internalSecret: controlPlaneSecret },
-          );
-          return { clock: formatWallClock(Date.now(), ctx.timezone), lastTurnAt: ctx.lastTurnAt };
-        }
-      : undefined,
+    turnContext: async (agentId, userId) => {
+      const platform = config.agents.find((a) => a.id === agentId)?.channel;
+      const ctx = await fetchTurnContext(
+        agentId,
+        { platform, platformUserId: userId },
+        { controlPlaneUrl, internalSecret: requireControlPlaneSecret() },
+      );
+      return { clock: formatWallClock(Date.now(), ctx.timezone), lastTurnAt: ctx.lastTurnAt };
+    },
     onSummaryWithheld: captureSummary,
     // What a session that replaces one too large to summarise starts from.
     // Wired on the same condition as the gate above.
-    lastSummary: controlPlaneSecret
-      ? (agentId) => fetchSessionSummary(agentId, { controlPlaneUrl, internalSecret: controlPlaneSecret })
-      : undefined,
+    lastSummary: (agentId) =>
+      fetchSessionSummary(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
     // Asked of the adapter at every turn rather than once, because a reload
     // replaces an agent's adapter in the map this reads.
     wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,
@@ -382,11 +392,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // `withheld`, so the dispatcher knows the person received nothing.
       return async (chunk: string): Promise<DeliveryResult> => {
         let text = chunk;
-        if (controlPlaneSecret && needsApprovalLink(text)) {
+        if (needsApprovalLink(text)) {
           try {
             const link = await fetchPendingApprovalLink(agentId, {
               controlPlaneUrl,
-              internalSecret: controlPlaneSecret,
+              internalSecret: requireControlPlaneSecret(),
             });
             text = applyApprovalLink(text, link);
           } catch (err) {
@@ -808,6 +818,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // nothing here: loadConfig sets it on every load.
     sessionManager.applySession(nextConfig.session);
     config.locale = nextConfig.locale;
+    config.internal_bearer = nextConfig.internal_bearer;
     const diff = diffConfigs(currentSnapshot, nextConfig);
     if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
       return;
