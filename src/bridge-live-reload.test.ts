@@ -2,7 +2,7 @@
 // runBridge on a real file, rewrites the file, and reads what the bridge did
 // through the adapters it created.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -187,5 +187,158 @@ describe("a reload that changes the organisation's language", () => {
       },
       { timeout: 5_000, interval: 25 },
     );
+  });
+});
+
+// The way back from a refused credential. The refusal is fixed outside
+// agents.yaml (a switch in the Discord developer portal), so the console's
+// «Ripristina connessione» regenerates a file with the same content: the
+// control-plane then rewrites nothing and only chmods it, which the watcher
+// reports all the same. A reload whose diff is empty starts again every agent
+// held as refused, and nothing else.
+describe("a reload that changes nothing", () => {
+  const SECRET = "reload-refused-secret";
+  const PORTAL_SENTENCE =
+    "The Discord application behind this bot token is not granted the Message Content intent. Enable it in the developer portal, under Bot and then Privileged Gateway Intents.";
+
+  const twoAgents = `
+agents:
+  - id: refused
+    bot_token: tok-refused
+    allowed_users: ["111"]
+    spawn:
+      command: "true"
+      args: []
+  - id: healthy
+    bot_token: tok-healthy
+    allowed_users: ["222"]
+    spawn:
+      command: "true"
+      args: []
+session:
+  idle_timeout_minutes: 60
+  max_concurrent: 16
+`;
+
+  interface Scripted extends ChatAdapter {
+    startCalls: number;
+  }
+
+  /** `refused` throws what `failure()` returns, when it returns something; `healthy` always starts. */
+  async function boot(failure: () => Error | undefined): Promise<Record<string, Scripted>> {
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    // Short enough that a retry loop would fire several times inside a wait.
+    vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_BASE_MS", "20");
+    vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "20");
+    writeFileSync(path, twoAgents);
+    const made: Record<string, Scripted> = {};
+    handle = await runBridge({
+      config: loadConfig(path, process.env),
+      bridgeE2eTest: false,
+      configPath: path,
+      createAdapter: async (agent) => {
+        let live = false;
+        const adapter: Scripted = {
+          agentId: agent.id,
+          startCalls: 0,
+          async start() {
+            adapter.startCalls += 1;
+            const err = agent.id === "refused" ? failure() : undefined;
+            if (err) throw err;
+            live = true;
+          },
+          async stop() {
+            live = false;
+          },
+          ready: () => live,
+          makeSendTarget: () => async () => ({ ok: true }),
+        };
+        made[agent.id] = adapter;
+        return adapter;
+      },
+    });
+    return made;
+  }
+
+  async function statusOf(agentId: string) {
+    const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    const body = (await res.json()) as {
+      agents: Array<{ id: string; ready: boolean | null; failure?: Record<string, unknown> }>;
+    };
+    return body.agents.find((a) => a.id === agentId);
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
+
+  it("starts again an agent whose refusal is gone, which then reports ready with no failure", async () => {
+    let refusing = true;
+    const made = await boot(() => (refusing ? new Error("Used disallowed intents") : undefined));
+    await settle();
+    expect(made.refused?.startCalls).toBe(1);
+    expect((await statusOf("refused"))?.failure).toMatchObject({ code: "DisallowedIntents" });
+
+    refusing = false;
+    // What the console's regeneration does to a file whose content it would not change.
+    chmodSync(path, 0o640);
+
+    await vi.waitFor(() => expect(made.refused?.startCalls).toBe(2), { timeout: 5_000, interval: 10 });
+    await vi.waitFor(async () => {
+      const refused = await statusOf("refused");
+      expect(refused?.ready).toBe(true);
+      expect(refused?.failure).toBeUndefined();
+    });
+    // The healthy agent was left alone.
+    expect(made.healthy?.startCalls).toBe(1);
+  });
+
+  it("reports a refusal that still holds again, with its sentence, and does not retry it", async () => {
+    const made = await boot(() => new Error("Used disallowed intents"));
+    await settle();
+    expect(made.refused?.startCalls).toBe(1);
+
+    writeFileSync(path, twoAgents);
+
+    await vi.waitFor(() => expect(made.refused?.startCalls).toBe(2), { timeout: 5_000, interval: 10 });
+    await settle();
+    expect(made.refused?.startCalls).toBe(2);
+    const refused = await statusOf("refused");
+    expect(refused?.ready).toBe(false);
+    expect(refused?.failure).toEqual({
+      kind: "credential_rejected",
+      code: "DisallowedIntents",
+      credential: "bot_token",
+      detail: PORTAL_SENTENCE,
+    });
+    expect(made.healthy?.startCalls).toBe(1);
+  });
+
+  // Refused on a retry rather than at boot, so it is the supervisor that holds
+  // the refusal, and its record is what would keep the retries from re-arming.
+  it("hands a start that now fails for a reason that can pass to the retries", async () => {
+    const transient = new Error("Connect Timeout Error");
+    let calls = 0;
+    let afterReload = false;
+    const made = await boot(() => {
+      calls += 1;
+      if (afterReload) return transient;
+      return calls === 1 ? transient : new Error("Used disallowed intents");
+    });
+    await vi.waitFor(() => expect(made.refused?.startCalls).toBe(2), { timeout: 5_000, interval: 10 });
+    await settle();
+    expect(made.refused?.startCalls).toBe(2);
+    expect((await statusOf("refused"))?.failure).toMatchObject({ code: "DisallowedIntents" });
+
+    afterReload = true;
+    chmodSync(path, 0o640);
+
+    // The restart, then at least one retry behind it.
+    await vi.waitFor(() => expect(made.refused?.startCalls).toBeGreaterThanOrEqual(4), {
+      timeout: 5_000,
+      interval: 10,
+    });
+    expect((await statusOf("refused"))?.failure).toBeUndefined();
   });
 });

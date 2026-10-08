@@ -393,7 +393,11 @@ applied agent by agent:
   or a bot whose application lacks the Message Content intent, stops the retries
   for that agent and is reported on `/internal/status` as the failure
   `credential_rejected`, naming the credential and what to fix. The agent is
-  started again when its entry in `agents.yaml` changes or the bridge restarts.
+  started again when its entry in `agents.yaml` changes, when the file is
+  rewritten or touched without a change (which is what the console's
+  «Ripristina connessione» does once the fix was made in the provider's
+  portal), or when the bridge restarts. Agents that are not refused are left
+  alone by such a reload.
 - **No channel at all.** When every adapter fails to start and the internal
   server is configured, the bridge stays up to report it: `/healthz` answers 503
   and `/internal/status` names each agent's failure. Without the internal server
@@ -676,8 +680,9 @@ shell that starts the daemon, or pass it to the container.
 
 **`Used disallowed intents`, or `credential_rejected` with code
 `DisallowedIntents`.** The Discord application does not have the Message Content
-intent. Enable it under **Bot → Privileged Gateway Intents**, then restart the
-bridge: a refused credential is not retried.
+intent. Enable it under **Bot → Privileged Gateway Intents**, then press
+«Ripristina connessione» on the assistant's chat in the console: a refused
+credential is not retried on its own.
 
 **A `workspace_chat` agent does not start.** The log line names the agent and
 the problem: a missing `project_number` or `credentials_path`, a key the process

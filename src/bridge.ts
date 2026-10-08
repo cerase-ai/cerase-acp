@@ -817,6 +817,28 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // `config` object in place once we apply each diff).
   let currentSnapshot: BridgeConfig = cloneConfig(config);
   let reloader: ConfigReloader | undefined;
+  // A refused credential is fixed where agents.yaml cannot see it, in the
+  // provider's portal, so the console's way back is a regeneration that leaves
+  // the file as it was. A reload that changes no agent therefore starts again
+  // every agent held as refused, through startAdapter, which reports the
+  // outcome as at boot: a refusal that still holds is recorded again with its
+  // sentence, a start that succeeds clears it. Every other agent is left
+  // alone. The supervisor's own record of the refusal is dropped first, so a
+  // start that now fails for a reason that can pass is retried as usual.
+  const startRefusedAgain = async (): Promise<void> => {
+    const refused = Array.from(credentialRejections.keys()).filter((id) => adapters.has(id));
+    if (refused.length === 0) return;
+    logger.info(
+      { agentIds: refused },
+      "auto-reload: no config change; starting again the agents whose credential was refused",
+    );
+    for (const agentId of refused) {
+      const adapter = adapters.get(agentId);
+      if (!adapter) continue;
+      supervisor?.cancel(agentId);
+      await startAdapter(adapter);
+    }
+  };
   const applyReload = async (nextConfig: BridgeConfig): Promise<void> => {
     // A bridge that is stopping starts no adapter it would stop a moment later.
     if (productionDispatcher.isStopping()) return;
@@ -830,6 +852,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     config.internal_bearer = nextConfig.internal_bearer;
     const diff = diffConfigs(currentSnapshot, nextConfig);
     if (diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0) {
+      await startRefusedAgain();
       return;
     }
     logger.info(
