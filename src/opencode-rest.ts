@@ -12,9 +12,11 @@
 // shared env second, exactly as the slot's entrypoint does when it binds the
 // server, so the bridge holds no slot password at all.
 //
-// See OpenAPI spec at GET /doc for the full schema. The single endpoint
-// we use here is `GET /session/{sessionID}/message/{messageID}` →
-// `{ info: AssistantMessage, parts: Part[] }`.
+// See OpenAPI spec at GET /doc for the full schema. Two endpoints are used
+// here: `GET /session/{sessionID}/message/{messageID}` →
+// `{ info: AssistantMessage, parts: Part[] }` for the reconciliation, and
+// `GET /session/{sessionID}/message?limit=1` → the newest message alone, to
+// learn whether the session is writing its summary (see CompactionProbe).
 
 import { execFile } from "node:child_process";
 import { makeLogger } from "./logger.js";
@@ -78,6 +80,33 @@ export const dockerExec: SlotExec = (args, timeoutMs) =>
   });
 
 /**
+ * GET `path` from the opencode server inside `container`, and the JSON it
+ * answered. `null` on a 404, and on anything that is not a 2xx carrying JSON,
+ * which is logged: every reader of this surface degrades to "nothing known"
+ * rather than failing the turn it serves.
+ */
+async function readSlot(exec: SlotExec, container: string, path: string): Promise<unknown> {
+  const { stdout, ok } = await exec(["exec", container, "sh", "-c", SLOT_REST_SCRIPT, "sh", path], 5000);
+  if (!ok) {
+    logger.warn({ container, path }, "opencode REST read from inside the slot failed");
+    return null;
+  }
+  const cut = stdout.lastIndexOf("\n");
+  const status = Number(stdout.slice(cut + 1).trim());
+  if (status === 404) return null;
+  if (!(status >= 200 && status < 300)) {
+    logger.warn({ container, path, status }, "opencode REST returned non-2xx");
+    return null;
+  }
+  try {
+    return JSON.parse(cut >= 0 ? stdout.slice(0, cut) : "");
+  } catch (err) {
+    logger.warn({ container, path, err: (err as Error).message }, "opencode REST answered something that is not JSON");
+    return null;
+  }
+}
+
+/**
  * A fetcher that reads the message from inside the slot. 5s end to end: the
  * reconciliation is a "best effort" after-the-fact recovery, and a slot that
  * does not answer promptly degrades to "nothing reconciled" rather than
@@ -86,33 +115,11 @@ export const dockerExec: SlotExec = (args, timeoutMs) =>
 export function execFetcher(exec: SlotExec = dockerExec): CanonicalFetcher {
   return async (endpoint, sessionId, messageId) => {
     const path = `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
-    const container = endpoint.containerName;
-    const { stdout, ok } = await exec(["exec", container, "sh", "-c", SLOT_REST_SCRIPT, "sh", path], 5000);
-    if (!ok) {
-      logger.warn({ container, path }, "opencode REST read from inside the slot failed");
-      return null;
-    }
-    const cut = stdout.lastIndexOf("\n");
-    const status = Number(stdout.slice(cut + 1).trim());
-    if (status === 404) return null;
-    if (!(status >= 200 && status < 300)) {
-      logger.warn({ container, path, status }, "opencode REST returned non-2xx");
-      return null;
-    }
-    let body: {
+    const body = (await readSlot(exec, endpoint.containerName, path)) as {
       info?: { id?: string };
       parts?: Array<{ id: string; type: string; text?: string; ignored?: boolean }>;
-    };
-    try {
-      body = JSON.parse(cut >= 0 ? stdout.slice(0, cut) : "");
-    } catch (err) {
-      logger.warn(
-        { container, path, err: (err as Error).message },
-        "opencode REST answered something that is not JSON",
-      );
-      return null;
-    }
-    if (!body.info?.id || !Array.isArray(body.parts)) return null;
+    } | null;
+    if (!body?.info?.id || !Array.isArray(body.parts)) return null;
     const parts: CanonicalPart[] = body.parts.map((p) => ({
       id: p.id,
       type: p.type,
@@ -120,6 +127,34 @@ export function execFetcher(exec: SlotExec = dockerExec): CanonicalFetcher {
       ignored: p.ignored ?? false,
     }));
     return { id: body.info.id, parts };
+  };
+}
+
+/**
+ * Which summary of its history a session is writing right now: the id of that
+ * message, or `null` when it is writing none or the slot could not say.
+ *
+ * opencode 1.18.18 summarises a session in an assistant message of its own,
+ * flagged `summary: true` (mode and agent `compaction`), and stamps
+ * `time.completed` on it when the summary call ends. Its ACP layer sends no
+ * update for that message until the summary's text streams, and the model
+ * reads the whole conversation before it writes a word of it. So until then
+ * the only place that says a summary is under way is the session's newest
+ * message, which `GET /session/{id}/message?limit=1` returns.
+ */
+export type CompactionProbe = (container: string, sessionId: string) => Promise<string | null>;
+
+/** The probe that asks the slot's opencode server: see CompactionProbe. */
+export function execCompactionProbe(exec: SlotExec = dockerExec): CompactionProbe {
+  return async (container, sessionId) => {
+    const body = await readSlot(exec, container, `/session/${encodeURIComponent(sessionId)}/message?limit=1`);
+    if (!Array.isArray(body)) return null;
+    const info = (body.at(-1) as { info?: unknown } | undefined)?.info as
+      | { id?: unknown; role?: unknown; summary?: unknown; time?: { completed?: unknown } }
+      | undefined;
+    if (info?.role !== "assistant" || info.summary !== true) return null;
+    if (typeof info.time?.completed === "number") return null;
+    return typeof info.id === "string" && info.id.length > 0 ? info.id : null;
   };
 }
 

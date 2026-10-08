@@ -120,7 +120,15 @@ allowlist gates `/internal/inject`.
   `session.turn_silence_seconds` (default 180) is ended and its child killed,
   unless a tool call it opened is still running: a sub-agent started with the
   `task` tool sends this session nothing until it returns, so while a tool call
-  is open only the ceiling applies. A turn still running after
+  is open only the ceiling applies. Nor is it ended while the session writes
+  the summary of its history: opencode sends nothing over ACP until the
+  summary's first words, so a turn silent for 10 seconds asks the slot every 10
+  seconds for the session's newest message
+  (`GET /session/{id}/message?limit=1` from inside the slot), and an assistant
+  message with `summary: true` and no `time.completed` is a summary under way.
+  Such a turn may stay silent up to 15 minutes (`COMPACTION_SILENCE_MS`); any
+  other is ended at the silence limit, on an answer asked after the limit was
+  reached. A turn still running after
   `session.turn_ceiling_minutes` (default 45) is ended and the person asked to
   split the request. The next message spawns a new child.
 - **Text the ACP stream dropped.** After each turn the bridge reads the
@@ -209,7 +217,12 @@ from the control-plane's catalogue, `POST /api/internal/tool-step/{agent}` with
 `{"tool", "input", "lang"}`: the tool's name as it started, its latest input
 and the conversation's language. When that call fails or takes over 2 seconds,
 the line says «Sto lavorando…», «Working on it…», «Estoy trabajando…» or «Je
-travaille…». The assistant's text never goes into it, and neither creates,
+travaille…». While the session writes the summary of its history the line is
+posted at once, or edited, to say «Sto facendo il punto su quello che ci siamo
+detti finora: un paio di minuti e riprendo.» («I'm taking stock of what we've
+said so far: give me a couple of minutes and I'll pick up again.» in English);
+once the summary is written it names the tool still running or says the plain
+sentence. The assistant's text never goes into it, and neither creates,
 removes nor moves it. Discord, Telegram and Slack keep it as a message of the
 bot's own, sent without a notification on Discord and Telegram; on Workspace
 Chat it is the 💬 placeholder (see below); the console's own transport gets

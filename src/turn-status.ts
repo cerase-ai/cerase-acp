@@ -15,6 +15,11 @@
 //     after its start is edited again once the input is known, because the
 //     sentence for a recipe depends on which recipe it is.
 //   - The turn's end, after its last follow-up, takes it down.
+//   - While the assistant's session writes the summary of the conversation,
+//     which can take minutes before the assistant says anything, the line is
+//     posted at once, or edited, with the sentence saying so. Once the summary
+//     is written it names the tool still running, or says the assistant is at
+//     work, until the next tool starts.
 //
 // The text is only ever a sentence about the step: the catalogue's, or the
 // bridge's plain one when the catalogue cannot answer. What the assistant
@@ -59,6 +64,8 @@ export interface TurnStatusOptions {
   sentence?: (tool: string, input: ToolInput) => Promise<string>;
   /** The bridge's own plain sentence, in the conversation's language. */
   fallback: string;
+  /** What the line says while the session writes its summary, in the conversation's language. */
+  compaction?: string;
   /** What every log line of this turn's status carries. */
   context: Record<string, unknown>;
   showAfterMs?: number;
@@ -79,6 +86,8 @@ export class TurnStatus {
   private rendering = false;
   private stale = false;
   private warned = false;
+  // Whether the session is writing its summary now.
+  private compactingNow = false;
 
   constructor(private readonly opts: TurnStatusOptions) {}
 
@@ -98,6 +107,7 @@ export class TurnStatus {
       this.tools.set(id, tool);
       if (!tool.running) return;
       this.step = id;
+      this.compactingNow = false;
       if (this.shown) {
         this.refresh();
       } else {
@@ -114,6 +124,23 @@ export class TurnStatus {
       tool.running = false;
       clearTimeout(tool.timer);
     }
+  }
+
+  /**
+   * The session started (`true`) or finished (`false`) writing the summary of
+   * the conversation. The line says so at once, whether or not it was up.
+   */
+  compacting(on: boolean): void {
+    if (this.closed || on === this.compactingNow || this.opts.compaction === undefined) return;
+    this.compactingNow = on;
+    if (on) {
+      this.shown = true;
+    } else {
+      const tool = this.step === undefined ? undefined : this.tools.get(this.step);
+      if (!tool?.running) this.step = undefined;
+      if (!this.shown) return;
+    }
+    this.refresh();
   }
 
   /**
@@ -161,11 +188,16 @@ export class TurnStatus {
 
   private render(): void {
     const tool = this.step === undefined ? undefined : this.tools.get(this.step);
-    if (this.closed || !tool) return;
+    if (this.closed || (!tool && !this.shown)) return;
     this.rendering = true;
     this.stale = false;
     void (async () => {
-      const text = await this.sentenceFor(tool);
+      const text =
+        this.compactingNow && this.opts.compaction !== undefined
+          ? this.opts.compaction
+          : tool
+            ? await this.sentenceFor(tool)
+            : this.opts.fallback;
       if (this.closed || text === this.text) return;
       this.text = text;
       this.lastEditAt = Date.now();

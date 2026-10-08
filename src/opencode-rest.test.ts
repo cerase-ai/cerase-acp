@@ -3,7 +3,13 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultEndpointForAgent, execFetcher, SLOT_REST_SCRIPT, type SlotExec } from "./opencode-rest.js";
+import {
+  defaultEndpointForAgent,
+  execCompactionProbe,
+  execFetcher,
+  SLOT_REST_SCRIPT,
+  type SlotExec,
+} from "./opencode-rest.js";
 
 // The bridge reads a slot's canonical message from INSIDE the slot. It used to
 // fetch http://cerase-agent-N:3284 over a network it shared with every slot,
@@ -83,6 +89,49 @@ describe("execFetcher", () => {
     expect(await execFetcher(recording("denied\n401").exec)({ containerName: "cerase-agent-3" }, "s", "m")).toBeNull();
     expect(await execFetcher(recording("", false).exec)({ containerName: "cerase-agent-3" }, "s", "m")).toBeNull();
     expect(await execFetcher(recording("<html>\n200").exec)({ containerName: "cerase-agent-3" }, "s", "m")).toBeNull();
+  });
+});
+
+// opencode writes a session's summary as an assistant message of its own,
+// flagged `summary: true`, and stamps `time.completed` on it when the call
+// ends. Over ACP nothing says the summary started, so the newest message of
+// the session is what the watchdog asks about.
+describe("execCompactionProbe", () => {
+  const newest = (info: Record<string, unknown>, parts: unknown[] = []) => `${JSON.stringify([{ info, parts }])}\n200`;
+  const summary = {
+    id: "msg_sum",
+    role: "assistant",
+    mode: "compaction",
+    agent: "compaction",
+    summary: true,
+    time: { created: 1 },
+  };
+
+  it("asks the slot for the session's newest message, the session id as an argument", async () => {
+    const { exec, calls } = recording(newest(summary));
+    expect(await execCompactionProbe(exec)("cerase-agent-3", "ses_$(id)")).toBe("msg_sum");
+    expect(calls).toEqual([
+      ["exec", "cerase-agent-3", "sh", "-c", SLOT_REST_SCRIPT, "sh", "/session/ses_%24(id)/message?limit=1"],
+    ]);
+  });
+
+  it("finds no summary under way in a finished summary, an answer, or a person's message", async () => {
+    const probe = (stdout: string) => execCompactionProbe(recording(stdout).exec)("cerase-agent-3", "ses_a");
+    expect(await probe(newest({ ...summary, time: { created: 1, completed: 2 } }))).toBeNull();
+    expect(await probe(newest({ ...summary, summary: undefined, mode: "cerase", agent: "cerase" }))).toBeNull();
+    expect(
+      await probe(newest({ id: "msg_u", role: "user", time: { created: 1 } }, [{ type: "compaction", auto: true }])),
+    ).toBeNull();
+    expect(await probe("[]\n200")).toBeNull();
+  });
+
+  it("answers null when the slot cannot say", async () => {
+    const probe = (stdout: string, ok = true) =>
+      execCompactionProbe(recording(stdout, ok).exec)("cerase-agent-3", "ses_a");
+    expect(await probe('{"name":"NotFound"}\n404')).toBeNull();
+    expect(await probe("denied\n401")).toBeNull();
+    expect(await probe("", false)).toBeNull();
+    expect(await probe("<html>\n200")).toBeNull();
   });
 });
 

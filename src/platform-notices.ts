@@ -254,6 +254,24 @@ export function workingNotice(lang: SupportedLang): string {
 }
 
 /**
+ * What a turn's status line says while the assistant's session is writing the
+ * summary of the conversation so far, which can take minutes before the
+ * assistant says anything. The Italian and English sentences are the
+ * operator's own words.
+ */
+export function compactionNotice(lang: SupportedLang): string {
+  return pick(
+    {
+      it: "Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo.",
+      en: "I'm taking stock of what we've said so far: give me a couple of minutes and I'll pick up again.",
+      es: "Estoy haciendo balance de lo que nos hemos dicho hasta ahora: un par de minutos y sigo.",
+      fr: "Je fais le point sur ce que nous nous sommes dit jusqu'ici : quelques minutes et je reprends.",
+    },
+    lang,
+  );
+}
+
+/**
  * The line a Google Chat conversation shows while its answer is being written:
  * a single speech balloon, U+1F4AC, the same in every language. Chat gives an
  * app neither a read receipt nor a typing indicator, so the app posts this on

@@ -3,11 +3,18 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
-import { type CanonicalFetcher, defaultEndpointForAgent, defaultFetcher, type RestEndpoint } from "./opencode-rest.js";
+import {
+  type CanonicalFetcher,
+  type CompactionProbe,
+  defaultEndpointForAgent,
+  defaultFetcher,
+  execCompactionProbe,
+  type RestEndpoint,
+} from "./opencode-rest.js";
 import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { reconcile, type SeenState } from "./reconciler.js";
-import { dockerSlotRestartProbe, type SlotRestartProbe } from "./restart-hold.js";
+import { dockerSlotRestartProbe, type SlotRestartProbe, slotContainerOf } from "./restart-hold.js";
 import { ResumableSessions } from "./resumable-sessions.js";
 import {
   decideSessionMode,
@@ -102,7 +109,8 @@ export interface SessionManagerOptions {
    * emitting thought chunks is never ended by it. It does not fire while a
    * tool call the turn opened is still running: a sub-agent started with the
    * `task` tool sends this session nothing until it returns, and then only
-   * the ceiling applies.
+   * the ceiling applies. Nor does it fire while the session is writing the
+   * summary of its history: see COMPACTION_SILENCE_MS.
    */
   turnSilenceMs?: number;
   /**
@@ -124,6 +132,14 @@ export interface SessionManagerOptions {
    * one the record lives in memory and survives slot restarts only.
    */
   stateDir?: string;
+  /**
+   * Asks which summary of its history a session is writing now: its message
+   * id, or null. Tests pass one. Without it the slot's opencode server is
+   * asked (execCompactionProbe), for an agent whose spawn is a `docker exec`
+   * into a slot; an agent with no slot has nothing to ask, and its silent
+   * turns end at the silence limit.
+   */
+  compactionProbe?: (agent: AgentConfig, sessionId: string) => Promise<string | null>;
 }
 
 /**
@@ -155,8 +171,33 @@ export class TurnWatchdogError extends Error {
 // a resolution coarser than the limit is a limit that does not hold: a
 // half-second silence budget checked every five seconds is a five-second one.
 const WATCHDOG_TICK_MAX_MS = 5_000;
-const watchdogTick = (silenceMs: number, ceilingMs: number) =>
-  Math.max(10, Math.min(WATCHDOG_TICK_MAX_MS, silenceMs, ceilingMs));
+const watchdogTick = (...limitsMs: number[]) => Math.max(10, Math.min(WATCHDOG_TICK_MAX_MS, ...limitsMs));
+
+/**
+ * How long a turn may go without an update while its session is writing the
+ * summary of its history, in place of the silence limit: the longest a summary
+ * may take before its first word.
+ *
+ * opencode sends nothing over ACP while it summarises until the summary's text
+ * streams, and the model reads the whole conversation before writing it. A
+ * summary of a 149,367-token conversation has taken 354 s, twice the silence
+ * limit. On a window of 256k tokens the part summarised can be about 1.7 times
+ * that size, about ten minutes at the same pace; fifteen leave room above it
+ * and stay under the turn's ceiling, which still applies.
+ */
+export const COMPACTION_SILENCE_MS = 15 * 60_000;
+
+/**
+ * How often a turn that has gone silent asks whether its session is writing
+ * its summary. The first ask comes after this much silence, so the status line
+ * says so within about this long of the summary's start, and a turn whose model
+ * is only slow to answer costs one `docker exec` per interval.
+ */
+export const COMPACTION_PROBE_EVERY_MS = 10_000;
+
+// How long the watchdog waits on an ask before it takes the session for one
+// not summarising. The slot's own read gives up after 5 s.
+const COMPACTION_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * A turn that lost its session to a restart: the slot's container stopped or
@@ -251,6 +292,13 @@ export interface PromptOptions {
    * leave it out of the person's message.
    */
   context?: string;
+  /**
+   * Told `true` when the session is found writing the summary of its history
+   * during this prompt, and `false` once it no longer is: an update that
+   * belongs to another message, the slot no longer finding the summary, or the
+   * prompt's end. Each change is told once.
+   */
+  onCompaction?: (compacting: boolean) => void;
 }
 
 /**
@@ -391,6 +439,20 @@ export class SessionManager {
     this.ceilingPinned = options?.turnCeilingMs !== undefined;
     this.turnSilenceMs = options?.turnSilenceMs ?? (config.session.turn_silence_seconds ?? 180) * 1000;
     this.turnCeilingMs = options?.turnCeilingMs ?? (config.session.turn_ceiling_minutes ?? 45) * 60 * 1000;
+    this.compactionProbe = options?.compactionProbe;
+  }
+
+  // See SessionManagerOptions.compactionProbe.
+  private readonly compactionProbe?: (agent: AgentConfig, sessionId: string) => Promise<string | null>;
+  private readonly slotCompactionProbe: CompactionProbe = execCompactionProbe();
+
+  /** How this agent's sessions are asked whether they are summarising; undefined when they cannot be. */
+  private compactionProbeFor(agent: AgentConfig): ((sessionId: string) => Promise<string | null>) | undefined {
+    const injected = this.compactionProbe;
+    if (injected) return (sessionId) => injected(agent, sessionId);
+    const container = slotContainerOf(agent.spawn);
+    if (container === null) return undefined;
+    return (sessionId) => this.slotCompactionProbe(container, sessionId);
   }
 
   private turnSilenceMs: number;
@@ -746,9 +808,63 @@ export class SessionManager {
       // this one nothing until it returns, so a silence that long is the work
       // and not a hang: while one is open only the ceiling ends the turn.
       const openToolCalls = new Set<string>();
+      // The summary of its history the session was last found writing. opencode
+      // sends nothing over ACP until the summary's first words, so the slot is
+      // asked while the turn is silent. An update that belongs to another
+      // message is the session past it: a tool call, or a chunk of the answer
+      // that follows the summary.
+      const askCompaction = this.compactionProbeFor(agent);
+      let compaction: { messageId: string } | undefined;
+      let asking = false;
+      let askedAt = Number.NEGATIVE_INFINITY;
+      // When the last ask that was answered was sent.
+      let answeredAskAt = Number.NEGATIVE_INFINITY;
+      let promptOver = false;
+      const compactionIs = (next: { messageId: string } | undefined) => {
+        const was = compaction !== undefined;
+        compaction = next;
+        if (was === (next !== undefined)) return;
+        logger.info(
+          { agentId: agent.id, userId, sessionId: entry!.sessionId, summaryMessageId: next?.messageId },
+          next ? "the session is writing the summary of its history" : "the session is past its summary",
+        );
+        try {
+          options?.onCompaction?.(next !== undefined);
+        } catch (err) {
+          logger.warn({ err, agentId: agent.id, userId }, "onCompaction threw — ignored");
+        }
+      };
+      const ask = () => {
+        if (!askCompaction || asking) return;
+        asking = true;
+        const sentAt = Date.now();
+        askedAt = sentAt;
+        void askCompaction(entry!.sessionId)
+          .catch((err: unknown) => {
+            logger.warn(
+              { agentId: agent.id, userId, reason: err instanceof Error ? err.message : String(err) },
+              "could not ask the slot whether the session is summarising — taken as not",
+            );
+            return null;
+          })
+          .then((messageId) => {
+            asking = false;
+            // An update that arrived while the ask was out is newer than its answer.
+            if (promptOver || lastUpdateAt > sentAt) return;
+            answeredAskAt = sentAt;
+            compactionIs(messageId ? { messageId } : undefined);
+          });
+      };
       entry!.onUpdate = (update) => {
         lastUpdateAt = Date.now();
         chunksReceived += 1;
+        if (compaction) {
+          const mid = (update as { messageId?: string | null }).messageId;
+          const chunk =
+            update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "agent_thought_chunk";
+          const tool = update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update";
+          if (tool || (chunk && typeof mid === "string" && mid !== compaction.messageId)) compactionIs(undefined);
+        }
         if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
           const id = (update as { toolCallId?: string }).toolCallId;
           const status = (update as { status?: string | null }).status;
@@ -783,26 +899,48 @@ export class SessionManager {
         // `lastUpdateAt`, which the update handler above moves on every chunk.
         // A turn that keeps streaming keeps re-arming the silence limit and is
         // only ever ended by the ceiling.
+        //
+        // A silent turn asks every COMPACTION_PROBE_EVERY_MS whether its session
+        // is writing its summary. While it is, the silence it may keep is
+        // COMPACTION_SILENCE_MS. Otherwise it is ended at the silence limit,
+        // on an answer asked after that limit was reached: a summary that
+        // started since the previous ask would be cut by an older one.
         let watchdogId: NodeJS.Timeout | undefined;
         const watchdog = new Promise<never>((_, reject) => {
           const startedAt = Date.now();
           watchdogId = setInterval(
             () => {
-              const ranFor = Date.now() - startedAt;
-              const silentFor = Date.now() - lastUpdateAt;
+              const now = Date.now();
+              const ranFor = now - startedAt;
+              const silentFor = now - lastUpdateAt;
+              let silenceMs = this.turnSilenceMs;
               // The ceiling is checked FIRST: a turn that hits both is a turn
               // that ran too long, and saying "the child produced nothing" about
               // one that produced output for forty minutes is the wrong sentence
               // in the log and the wrong copy in front of the user.
-              const reason: TurnWatchdogReason | null =
-                ranFor >= this.turnCeilingMs
-                  ? "ceiling"
-                  : openToolCalls.size === 0 && silentFor >= this.turnSilenceMs
-                    ? "silent"
-                    : null;
+              let reason: TurnWatchdogReason | null = ranFor >= this.turnCeilingMs ? "ceiling" : null;
+              if (reason === null && openToolCalls.size === 0) {
+                if (silentFor >= COMPACTION_PROBE_EVERY_MS && now - askedAt >= COMPACTION_PROBE_EVERY_MS) ask();
+                if (compaction) {
+                  silenceMs = Math.max(this.turnSilenceMs, COMPACTION_SILENCE_MS);
+                  if (silentFor >= silenceMs) reason = "silent";
+                } else if (silentFor >= this.turnSilenceMs) {
+                  if (!askCompaction || answeredAskAt >= lastUpdateAt + this.turnSilenceMs) reason = "silent";
+                  else if (!asking) ask();
+                  else if (now - askedAt >= COMPACTION_PROBE_TIMEOUT_MS) reason = "silent";
+                }
+              }
               if (reason === null) return;
               logger.error(
-                { agentId: agent.id, userId, reason, ranFor, silentFor, chunksReceived },
+                {
+                  agentId: agent.id,
+                  userId,
+                  reason,
+                  ranFor,
+                  silentFor,
+                  chunksReceived,
+                  compacting: compaction !== undefined,
+                },
                 reason === "ceiling"
                   ? "turn watchdog fired — the turn passed its ceiling while still running"
                   : "turn watchdog fired — killing the silent opencode child",
@@ -819,9 +957,9 @@ export class SessionManager {
               // respawn, not adopt the dying connection.
               const k = sessionKey(agent.id, userId);
               if (this.entries.get(k) === entry) this.entries.delete(k);
-              reject(new TurnWatchdogError(reason, reason === "ceiling" ? this.turnCeilingMs : this.turnSilenceMs));
+              reject(new TurnWatchdogError(reason, reason === "ceiling" ? this.turnCeilingMs : silenceMs));
             },
-            watchdogTick(this.turnSilenceMs, this.turnCeilingMs),
+            watchdogTick(this.turnSilenceMs, this.turnCeilingMs, COMPACTION_PROBE_EVERY_MS),
           );
           // The interval must not be what keeps the process alive: a bridge
           // whose last turn is in flight should still be able to exit.
@@ -947,6 +1085,8 @@ export class SessionManager {
         }
         return { stopReason: response.stopReason };
       } finally {
+        compactionIs(undefined);
+        promptOver = true;
         const t2 = Date.now();
         entry!.onUpdate = undefined;
         entry!.lastTurnAt = t2;

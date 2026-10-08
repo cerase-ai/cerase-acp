@@ -9,7 +9,7 @@ import { freezeBridgeClock } from "./__tests__/fake-clock.js";
 import type { DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
 import { Dispatcher, type DispatcherDeps } from "./dispatcher.js";
-import type { SessionManager, SessionUpdateHandler } from "./session-manager.js";
+import type { PromptOptions, SessionManager, SessionUpdateHandler } from "./session-manager.js";
 import { messageStatusLine } from "./status-line.js";
 import type { ToolStep } from "./tool-step.js";
 import { TurnMetaTracker } from "./turn-meta.js";
@@ -23,6 +23,8 @@ interface HeldPrompt {
   text: string;
   update(u: Record<string, unknown>): void;
   say(text: string): void;
+  /** What the session manager tells a prompt when its session starts or stops summarising. */
+  compacting(on: boolean): void;
   end(reply?: string): void;
 }
 
@@ -119,7 +121,13 @@ describe("the status line of a turn", () => {
   };
 
   const sessionManager = {
-    prompt: (_agentId: string, _userId: string, text: string, onUpdate?: (u: Update) => void) =>
+    prompt: (
+      _agentId: string,
+      _userId: string,
+      text: string,
+      onUpdate?: (u: Update) => void,
+      options?: PromptOptions,
+    ) =>
       new Promise((resolve) => {
         const update = (u: Record<string, unknown>) => onUpdate?.(u as unknown as Update);
         const say = (t: string) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } });
@@ -127,6 +135,7 @@ describe("the status line of a turn", () => {
           text,
           update,
           say,
+          compacting: (on) => options?.onCompaction?.(on),
           end: (reply) => {
             if (reply) say(reply);
             resolve({ stopReason: "end_turn" });
@@ -416,6 +425,60 @@ describe("the status line of a turn", () => {
     prompts[1]!.end("Ecco di nuovo.");
     expect(await broken).toEqual({ ok: true });
     expect(sent).toEqual(["Ecco il riepilogo.", "Ecco di nuovo."]);
+  });
+
+  // While opencode summarises a long conversation it sends nothing for minutes,
+  // and the person would otherwise read a chat that has gone quiet. The words
+  // are the operator's.
+  it("says the assistant is taking stock while the session summarises, in the conversation's language", async () => {
+    const c = channel();
+    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.compacting(true);
+    await settle();
+    expect(c.posts).toEqual([
+      { id: 1, text: "Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo." },
+    ]);
+    // Once the summary is written the line says the assistant is at work
+    // again, and the end of the turn takes it down.
+    prompts[0]!.compacting(false);
+    await elapse(1_500);
+    expect(c.edits).toEqual([{ id: 1, text: "Sto lavorando…" }]);
+    prompts[0]!.end("Ecco il riepilogo.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.removed).toEqual([1]);
+    expect(sent).toEqual(["Ecco il riepilogo."]);
+
+    const en = channel();
+    const turnEn = dispatcher(en.line).handleMessage("agent-1", "111", EN);
+    await promptCount(2);
+    prompts[1]!.compacting(true);
+    await settle();
+    expect(en.posts).toEqual([
+      {
+        id: 1,
+        text: "I'm taking stock of what we've said so far: give me a couple of minutes and I'll pick up again.",
+      },
+    ]);
+    prompts[1]!.end("Here it is.");
+    expect(await turnEn).toEqual({ ok: true });
+  });
+
+  it("gives the line back to the step that follows the summary", async () => {
+    const c = channel();
+    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.compacting(true);
+    await settle();
+    expect(c.posts).toHaveLength(1);
+    prompts[0]!.compacting(false);
+    prompts[0]!.update(toolCall("c1", "cerase-gateway_call_recipe", SHEET));
+    await elapse(1_500);
+    expect(c.edits.at(-1)).toEqual({ id: 1, text: "Sto leggendo un foglio Google…" });
+    prompts[0]!.update(done("c1"));
+    prompts[0]!.end("Ecco.");
+    expect(await turn).toEqual({ ok: true });
   });
 
   it("stays up through a follow-up of the same turn, and is deleted after the last one", async () => {

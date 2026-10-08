@@ -14,6 +14,12 @@
 //                              it nor answer.
 //   FAKE_SILENT_AFTER_TOOL_MS — after closing the tool call, stay silent this
 //                              many ms before the reply.
+//   FAKE_SUMMARY_UNTIL_FILE — before the reply, say nothing until this file
+//                              exists, then send one message chunk of the
+//                              summary under FAKE_SUMMARY_ID. What opencode
+//                              does while it summarises a session: nothing
+//                              over ACP until the summary's first words.
+//   FAKE_SUMMARY_ID         — the messageId of that summary's chunk.
 //   FAKE_CHUNKS             — number of session/update chunks (default 3)
 //   FAKE_HANG_PROMPT        — set to "1" to NEVER answer session/prompt
 //                              (hung-child simulation for the watchdog)
@@ -404,6 +410,22 @@ rl.on("line", async (line) => {
       });
       const silentAfter = parseInt(process.env.FAKE_SILENT_AFTER_TOOL_MS ?? "0", 10);
       if (silentAfter > 0) await sleep(silentAfter);
+    }
+    const summaryUntil = process.env.FAKE_SUMMARY_UNTIL_FILE;
+    if (summaryUntil) {
+      while (!existsSync(summaryUntil)) await sleep(10);
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            messageId: process.env.FAKE_SUMMARY_ID ?? "msg_summary",
+            content: { type: "text", text: "## Goal\n- the person's request" },
+          },
+        },
+      });
     }
     // Split the reply into roughly CHUNKS pieces and emit as session/update
     // notifications with sessionUpdate: agent_message_chunk.

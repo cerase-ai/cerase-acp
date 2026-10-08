@@ -21,6 +21,7 @@ import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
 import { noticeText, type PlatformNotice } from "./platform-notice.js";
 import {
+  compactionNotice,
   deliveryFailureNotice,
   keptMessagesExpiredNotice,
   restartOutlastedNotice,
@@ -663,6 +664,7 @@ export class Dispatcher {
       line,
       sentence: toolStep && ((tool, input) => toolStep(agentId, { tool, input, lang })),
       fallback: workingNotice(lang),
+      compaction: compactionNotice(lang),
       context: { agentId, userId },
     });
   }
@@ -763,6 +765,8 @@ export class Dispatcher {
     // Every prompt of the turn reports its tools to the status line, the
     // follow-ups included: they are the same turn to the person.
     const watch: SessionUpdateHandler = (update) => status?.observe(update);
+    // Every prompt of the turn reports the session writing its summary too.
+    const onCompaction = (compacting: boolean) => status?.compacting(compacting);
     const onUpdate: SessionUpdateHandler = (update) => {
       watch(update);
       if (update.sessionUpdate === "tool_call") acted = true;
@@ -786,7 +790,7 @@ export class Dispatcher {
           promptText,
           onUpdate,
           cut,
-          links ? { opensTurn: true, context: links } : { opensTurn: true },
+          links ? { opensTurn: true, context: links, onCompaction } : { opensTurn: true, onCompaction },
         );
       } catch (err) {
         if (!(err instanceof SessionOutgrownError)) throw err;
@@ -808,6 +812,7 @@ export class Dispatcher {
         }
         await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, {
           context: links ? `${note}\n\n${links}` : note,
+          onCompaction,
         });
       }
     } catch (err) {
@@ -846,7 +851,7 @@ export class Dispatcher {
       );
       ({ queue, reply } = this.openReply(agentId, userId, send, text));
       try {
-        await this.deps.sessionManager.prompt(agentId, userId, emptyTurnRetryPrompt(), onUpdate);
+        await this.deps.sessionManager.prompt(agentId, userId, emptyTurnRetryPrompt(), onUpdate, { onCompaction });
       } catch (err) {
         failed = true;
         turnError = err instanceof Error ? err : new Error(String(err));
@@ -867,7 +872,7 @@ export class Dispatcher {
     let answerUnsent = false;
     let retryDrain: DrainResult = { ok: true };
     if (!failed && reply.endedInMarkup()) {
-      const retry = await this.retryUnsentAnswer(agentId, userId, send, text, watch);
+      const retry = await this.retryUnsentAnswer(agentId, userId, send, text, watch, onCompaction);
       retryDrain = retry.drain;
       answerUnsent = !retry.answered;
     }
@@ -929,7 +934,7 @@ export class Dispatcher {
     // and the result is a failure whatever it then writes, because the outcome
     // must not depend on a second model call going well.
     if (attachFailures.length > 0) {
-      await this.correctAttachClaim(agentId, userId, send, text, attachFailures, watch);
+      await this.correctAttachClaim(agentId, userId, send, text, attachFailures, watch, onCompaction);
       return { ok: false, error: attachFailureError(attachFailures) };
     }
     if (answerUnsent) {
@@ -1092,14 +1097,21 @@ export class Dispatcher {
     send: SendTarget,
     text: string,
     watch: SessionUpdateHandler,
+    onCompaction: (compacting: boolean) => void,
   ): Promise<{ answered: boolean; drain: DrainResult }> {
     const { queue, reply } = this.openReply(agentId, userId, send, text);
     let failed = false;
     try {
-      await this.deps.sessionManager.prompt(agentId, userId, toolCallMarkupRetryPrompt(), (update) => {
-        watch(update);
-        reply.push(update);
-      });
+      await this.deps.sessionManager.prompt(
+        agentId,
+        userId,
+        toolCallMarkupRetryPrompt(),
+        (update) => {
+          watch(update);
+          reply.push(update);
+        },
+        { onCompaction },
+      );
     } catch (err) {
       failed = true;
       logger.error({ err, agentId, userId }, "the retry after an answer written as tool-call markup failed");
@@ -1130,13 +1142,20 @@ export class Dispatcher {
     text: string,
     failures: AttachFailure[],
     watch: SessionUpdateHandler,
+    onCompaction: (compacting: boolean) => void,
   ): Promise<void> {
     const { queue, reply } = this.openReply(agentId, userId, send, text);
     try {
-      await this.deps.sessionManager.prompt(agentId, userId, attachFailurePrompt(failures), (update) => {
-        watch(update);
-        reply.push(update);
-      });
+      await this.deps.sessionManager.prompt(
+        agentId,
+        userId,
+        attachFailurePrompt(failures),
+        (update) => {
+          watch(update);
+          reply.push(update);
+        },
+        { onCompaction },
+      );
     } catch (err) {
       logger.error({ err, agentId, userId, failures }, "attach: the correction turn itself failed");
     } finally {
