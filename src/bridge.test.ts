@@ -368,6 +368,87 @@ describe("runBridge", () => {
     expect(status.agents.find((a) => a.id === "policy-qa")?.failure).toBeUndefined();
   });
 
+  // A bot whose application never had Message Content ticked in the Discord
+  // developer portal. discord.js rejects login() with a bare Error carrying
+  // the library's sentence and no code, and the bridge retried it every
+  // backoff while its replies were dropped and nobody was told. Both ways a
+  // start() can fail are covered: at boot, and on a retry armed by an earlier
+  // failure that could pass.
+  describe("production mode: a Discord application without the Message Content intent", () => {
+    const SECRET = "disallowed-intents-secret";
+    const PORTAL_SENTENCE =
+      "The Discord application behind this bot token is not granted the Message Content intent. Enable it in the developer portal, under Bot and then Privileged Gateway Intents.";
+
+    async function statusOf(agentId: string) {
+      const res = await fetch(`${handle?.internalUrl}/internal/status`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        agents: Array<{ id: string; ready: boolean | null; failure?: Record<string, unknown> }>;
+      };
+      return body.agents.find((a) => a.id === agentId);
+    }
+
+    /** doc-qa's start() throws what `failures` lists, in order, then the last one for ever. */
+    async function runWith(failures: Error[]): Promise<FakeAdapter> {
+      vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+      vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+      // Short enough that a loop still retrying would fire several times
+      // inside the wait below.
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_BASE_MS", "20");
+      vi.stubEnv("CERASE_ACP_ADAPTER_RETRY_MAX_MS", "20");
+      let docQa: FakeAdapter | undefined;
+      handle = await runBridge({
+        config: makeConfig(),
+        bridgeE2eTest: false,
+        createAdapter: async (agent, dispatcher) => {
+          const a = makeFakeAdapter(agent, dispatcher, "ok");
+          if (agent.id === "doc-qa") {
+            a.start = async () => {
+              a.startCalls += 1;
+              throw failures[Math.min(a.startCalls, failures.length) - 1];
+            };
+            docQa = a;
+          }
+          return a;
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return docQa!;
+    }
+
+    it("refused at boot: no retry, and /internal/status names the refusal with the portal sentence", async () => {
+      const docQa = await runWith([new Error("Used disallowed intents")]);
+
+      expect(docQa.startCalls).toBe(1);
+      const down = await statusOf("doc-qa");
+      expect(down?.ready).toBe(false);
+      expect(down?.failure).toEqual({
+        kind: "credential_rejected",
+        code: "DisallowedIntents",
+        credential: "bot_token",
+        detail: PORTAL_SENTENCE,
+      });
+      expect((await statusOf("policy-qa"))?.failure).toBeUndefined();
+    });
+
+    it("refused on a retry: the retries stop there, and /internal/status names the refusal", async () => {
+      const docQa = await runWith([new Error("Connect Timeout Error"), new Error("Used disallowed intents")]);
+
+      // The boot attempt, then the one retry that met the refusal.
+      expect(docQa.startCalls).toBe(2);
+      const down = await statusOf("doc-qa");
+      expect(down?.ready).toBe(false);
+      expect(down?.failure).toEqual({
+        kind: "credential_rejected",
+        code: "DisallowedIntents",
+        credential: "bot_token",
+        detail: PORTAL_SENTENCE,
+      });
+    });
+  });
+
   // /internal/inject acks 202 at acceptance (validation + allowlist) and runs
   // the turn detached, so a slow model turn no longer trips the
   // control-plane's fire-and-forget timeout. A swallowed turn/delivery

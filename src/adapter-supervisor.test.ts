@@ -193,7 +193,9 @@ describe("AdapterSupervisor", () => {
     expect(terminal).toEqual(["agent-10"]);
   });
 
-  it("treats a privileged intent the application lacks as terminal", async () => {
+  // discord.js raises this refusal as a bare Error with no code, which is how
+  // it reached this loop and was retried every backoff with nobody told.
+  it("treats a privileged intent the application lacks as terminal, in the shape discord.js raises it", async () => {
     const terminal: CredentialRejection[] = [];
     const sup = new AdapterSupervisor({
       baseDelayMs: 1000,
@@ -201,16 +203,15 @@ describe("AdapterSupervisor", () => {
       onRecovered: () => {},
       onTerminal: (_agentId, rejection) => terminal.push(rejection),
     });
-    const adapter = makeAlwaysFailing(
-      "agent-11",
-      discordError("DisallowedIntents", "Privileged intent provided is not enabled or whitelisted."),
-    );
+    const adapter = makeAlwaysFailing("agent-11", new Error("Used disallowed intents"));
 
     sup.scheduleRetry(adapter);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000); // retry 1 reaches the gateway and is refused
     await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
     expect(adapter.startCalls).toBe(1);
+    expect(sup.isScheduled("agent-11")).toBe(false);
     expect(terminal.map((r) => r.code)).toEqual(["DisallowedIntents"]);
+    expect(sup.terminalFailure("agent-11")?.credential).toBe("bot_token");
   });
 
   it("keeps retrying a transport failure, which can stop being true on its own", async () => {
