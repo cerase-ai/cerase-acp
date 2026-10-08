@@ -1,11 +1,20 @@
-// discord.js glue. One Client per configured agent, with the DirectMessages,
-// MessageContent and Guilds intents; anything posted in a server is dropped.
-// All real logic lives in Dispatcher (which knows nothing about Discord);
-// this file is kept lean and is exercised against a stand-in discord.js in
-// the unit tests and against Discord itself by cerase-core's e2e-discord
-// tier.
+// discord.js glue. One Client per configured agent and login, with the
+// DirectMessages, MessageContent and Guilds intents; anything posted in a
+// server is dropped. All real logic lives in Dispatcher (which knows nothing
+// about Discord); this file is kept lean. Its unit tests run the installed
+// discord.js against a stand-in Discord, and cerase-core's e2e-discord tier
+// runs it against Discord itself.
 
-import { Client, type DMChannel, Events, GatewayIntentBits, type Message, Partials, Routes } from "discord.js";
+import {
+  Client,
+  type ClientOptions,
+  type DMChannel,
+  Events,
+  GatewayIntentBits,
+  type Message,
+  Partials,
+  Routes,
+} from "discord.js";
 import { extractDiscordFiles } from "./channel-attachments.js";
 import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
@@ -20,7 +29,16 @@ import { TypingSessions } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
-export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
+export interface DiscordAdapterOptions {
+  /** REST settings for the client. The tests point `api` at a stand-in Discord; production passes nothing. */
+  rest?: ClientOptions["rest"];
+}
+
+export function createDiscordAdapter(
+  agent: AgentConfig,
+  dispatcher: Dispatcher,
+  options: DiscordAdapterOptions = {},
+): ChatAdapter {
   // Cache per-user DM channels so we don't re-resolve on every chunk
   // of a multi-chunk reply.
   const dmChannels = new Map<string, DMChannel>();
@@ -30,30 +48,8 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
   // and it needs somewhere to look the turn's keepalive up.
   const typing = new TypingSessions();
 
-  // Is Discord answering this adapter? `client.isReady()` cannot say: it is
-  // the library's cached view of its own socket, and it reported a live
-  // connection for the whole of a five-minute outage. The probe is the
-  // unauth'd gateway lookup, the cheapest request Discord serves, and it is
-  // deliberately unauthenticated so a refused token shows up as a credential
-  // rejection rather than as an unreachable network.
-  const reachability = new ReachabilityMonitor({
-    probe: () => client.rest.get(Routes.gateway(), { auth: false }),
-    intervalMs: Number(process.env.CERASE_ACP_REACHABILITY_INTERVAL_MS ?? "60000"),
-    staleAfterMs: Number(process.env.CERASE_ACP_REACHABILITY_STALE_MS ?? "180000"),
-    onStale: (snapshot) =>
-      logger.error(
-        { agentId: agent.id, ageMs: snapshot.ageMs },
-        "discord has stopped answering this adapter — the client still reports a live connection, so this agent is reported not-ready until it answers again",
-      ),
-    onRecovered: () => logger.info({ agentId: agent.id }, "discord is answering this adapter again"),
-  });
-
-  const client = new Client({
-    intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.Guilds],
-    partials: [Partials.Channel, Partials.Message],
-  });
-
-  client.on(Events.MessageCreate, async (msg: Message) => {
+  // Attached to every client this adapter builds; see connect() below.
+  const onMessage = async (msg: Message): Promise<void> => {
     try {
       if (msg.author.bot) return;
       // DMs only — drop everything posted in guild channels.
@@ -119,11 +115,51 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
     } catch (err) {
       logger.error({ err, agentId: agent.id }, "MessageCreate handler threw");
     }
-  });
+  };
 
-  client.on(Events.Error, (err) => {
+  const onClientError = (err: Error): void => {
     logger.error({ err, agentId: agent.id }, "discord.js client error");
-  });
+  };
+
+  // What one login is made with: the client, the handlers on it, and the
+  // monitor that probes through it.
+  //
+  // A discord.js Client serves one login. When login() fails the library
+  // destroys the client, and its WebSocketManager keeps `destroyed` set from
+  // then on. A later login on that client connects and carries messages, but
+  // isReady() stays false, so the agent would read not-ready for as long as it
+  // runs, and destroy() returns before closing anything, so stop() would leave
+  // that gateway connection open and still delivering messages. So every
+  // start() after the first builds all three afresh.
+  const connect = (): { client: Client; reachability: ReachabilityMonitor } => {
+    const fresh = new Client({
+      intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.Guilds],
+      partials: [Partials.Channel, Partials.Message],
+      ...(options.rest ? { rest: options.rest } : {}),
+    });
+    fresh.on(Events.MessageCreate, onMessage);
+    fresh.on(Events.Error, onClientError);
+    // Is Discord answering this adapter? `client.isReady()` cannot say: it is
+    // the library's cached view of its own socket, and it reported a live
+    // connection for the whole of a five-minute outage. The probe is the
+    // unauth'd gateway lookup, the cheapest request Discord serves, and it is
+    // deliberately unauthenticated so a refused token shows up as a credential
+    // rejection rather than as an unreachable network.
+    const monitor = new ReachabilityMonitor({
+      probe: () => fresh.rest.get(Routes.gateway(), { auth: false }),
+      intervalMs: Number(process.env.CERASE_ACP_REACHABILITY_INTERVAL_MS ?? "60000"),
+      staleAfterMs: Number(process.env.CERASE_ACP_REACHABILITY_STALE_MS ?? "180000"),
+      onStale: (snapshot) =>
+        logger.error(
+          { agentId: agent.id, ageMs: snapshot.ageMs },
+          "discord has stopped answering this adapter — the client still reports a live connection, so this agent is reported not-ready until it answers again",
+        ),
+      onRecovered: () => logger.info({ agentId: agent.id }, "discord is answering this adapter again"),
+    });
+    return { client: fresh, reachability: monitor };
+  };
+  let { client, reachability } = connect();
+  let loginAttempted = false;
 
   // The DM channel with `userId`, opened once and kept.
   const dmChannel = async (userId: string): Promise<DMChannel> => {
@@ -158,6 +194,20 @@ export function createDiscordAdapter(agent: AgentConfig, dispatcher: Dispatcher)
           `agent "${agent.id}" channel='discord' has no bot_token (should have been caught at config load)`,
         );
       }
+      if (loginAttempted) {
+        // Nothing may keep using the client being replaced: its handlers come
+        // off, its monitor stops, and the DM channels it opened go with it.
+        reachability.stop();
+        client.removeAllListeners();
+        await client.destroy().catch(() => {});
+        dmChannels.clear();
+        ({ client, reachability } = connect());
+        logger.info(
+          { agentId: agent.id },
+          "discord: logging in on a fresh client, the previous one cannot log in again",
+        );
+      }
+      loginAttempted = true;
       await client.login(agent.bot_token);
       // A completed login is a confirmed round-trip, so readiness starts from
       // a measured baseline rather than from an empty one.

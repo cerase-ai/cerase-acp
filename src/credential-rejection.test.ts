@@ -1,10 +1,6 @@
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { Client, fetchRecommendedShardCount, GatewayIntentBits } from "discord.js";
 import { afterEach, describe, expect, it } from "vitest";
-// The WebSocket library @discordjs/ws itself connects with, so the stand-in
-// gateway below speaks to the client in the same frames Discord's does.
-import { WebSocketServer } from "ws";
+import { startFakeDiscord } from "./__tests__/fake-discord.js";
 import { classifyCredentialRejection } from "./credential-rejection.js";
 
 /** A discord.js error as it reaches the supervisor: an Error carrying a `code`. */
@@ -96,53 +92,6 @@ describe("classifyCredentialRejection", () => {
   });
 });
 
-/**
- * A stand-in for Discord: the REST gateway lookup and the gateway itself,
- * enough for the installed discord.js to log in against. The lookup refuses
- * the token with a 401 when `refuseToken` is set, and otherwise points the
- * client at this server's own socket, where the gateway says Hello and closes
- * with `closeCode` once the client identifies.
- */
-async function fakeDiscord(opts: { refuseToken?: boolean; closeCode?: number }) {
-  const server = createServer((req, res) => {
-    res.setHeader("content-type", "application/json");
-    if (!req.url?.startsWith("/api/v10/gateway/bot")) {
-      res.writeHead(404).end("{}");
-      return;
-    }
-    if (opts.refuseToken) {
-      res.writeHead(401).end(JSON.stringify({ message: "401: Unauthorized", code: 0 }));
-      return;
-    }
-    const { port } = server.address() as AddressInfo;
-    res.writeHead(200).end(
-      JSON.stringify({
-        url: `ws://127.0.0.1:${port}`,
-        shards: 1,
-        session_start_limit: { total: 1000, remaining: 1000, reset_after: 0, max_concurrency: 1 },
-      }),
-    );
-  });
-  const gateway = new WebSocketServer({ server });
-  gateway.on("connection", (socket) => {
-    socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
-    socket.on("message", (raw) => {
-      const payload = JSON.parse(String(raw)) as { op: number };
-      if (payload.op === 2 && opts.closeCode) socket.close(opts.closeCode);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  return {
-    api: `http://127.0.0.1:${port}/api`,
-    async close() {
-      gateway.close();
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
-  };
-}
-
 /** What login() rejects with, or the resolved value if it does not reject. */
 async function loginFailure(client: Client, token: string): Promise<unknown> {
   return client.login(token).then(
@@ -174,7 +123,7 @@ describe("classifyCredentialRejection against the installed discord.js", () => {
   }
 
   it("a gateway refusing a privileged intent (close 4014) rejects login() with a DisallowedIntents refusal", async () => {
-    const discord = await fakeDiscord({ closeCode: 4014 });
+    const discord = await startFakeDiscord({ identifyCloseCode: 4014 });
     cleanups.push(() => discord.close());
 
     const err = await loginFailure(adapterClient(discord.api), "a.bot.token");
@@ -186,7 +135,7 @@ describe("classifyCredentialRejection against the installed discord.js", () => {
   });
 
   it("a gateway refusing the token at identify (close 4004) rejects login() with an AuthenticationFailed refusal", async () => {
-    const discord = await fakeDiscord({ closeCode: 4004 });
+    const discord = await startFakeDiscord({ identifyCloseCode: 4004 });
     cleanups.push(() => discord.close());
 
     const err = await loginFailure(adapterClient(discord.api), "a.bot.token");
@@ -198,7 +147,7 @@ describe("classifyCredentialRejection against the installed discord.js", () => {
   });
 
   it("a token the gateway lookup refuses rejects login() with TokenInvalid", async () => {
-    const discord = await fakeDiscord({ refuseToken: true });
+    const discord = await startFakeDiscord({ refuseToken: true });
     cleanups.push(() => discord.close());
 
     const err = await loginFailure(adapterClient(discord.api), "a.bot.token");
