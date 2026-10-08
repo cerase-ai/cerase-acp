@@ -9,7 +9,10 @@ import {
   defaultEndpointForAgent,
   defaultFetcher,
   execCompactionProbe,
+  execSummaryStateProbe,
   type RestEndpoint,
+  type SummaryState,
+  type SummaryStateProbe,
 } from "./opencode-rest.js";
 import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -140,6 +143,31 @@ export interface SessionManagerOptions {
    * turns end at the silence limit.
    */
   compactionProbe?: (agent: AgentConfig, sessionId: string) => Promise<string | null>;
+  /**
+   * Asks where a session stands with the summaries of its history before a
+   * person's message is sent to it (see SummaryState); null when it could not
+   * be read. Tests pass one. Without it the slot's opencode server is asked,
+   * for an agent whose spawn is a `docker exec` into a slot.
+   */
+  summaryState?: (agent: AgentConfig, sessionId: string) => Promise<SummaryState | null>;
+}
+
+/**
+ * What the bridge sends a session whose summary was left unfinished, before the
+ * person's message: opencode's own command for a summary, which writes a marker
+ * of its own and runs the summary under it, so the summary cuts and every
+ * marker before it is done.
+ */
+export const SUMMARY_COMMAND = "/compact";
+
+/** The session still held an unfinished summary after the bridge had it summarise again. */
+export class SummaryNotSettledError extends Error {
+  constructor(readonly sessionId: string) {
+    super(
+      `session ${sessionId} still holds an unfinished summary after it was asked to summarise again — the message was not sent, so it is not answered under a summary`,
+    );
+    this.name = "SummaryNotSettledError";
+  }
 }
 
 /**
@@ -299,6 +327,12 @@ export interface PromptOptions {
    * prompt's end. Each change is told once.
    */
   onCompaction?: (compacting: boolean) => void;
+  /**
+   * Told the text of a summary the bridge had the session write before this
+   * prompt, because one was left unfinished: the same summary a turn's own
+   * withheld one is, for the assistant's rolling summary.
+   */
+  onSummary?: (text: string) => void;
 }
 
 /**
@@ -440,6 +474,103 @@ export class SessionManager {
     this.turnSilenceMs = options?.turnSilenceMs ?? (config.session.turn_silence_seconds ?? 180) * 1000;
     this.turnCeilingMs = options?.turnCeilingMs ?? (config.session.turn_ceiling_minutes ?? 45) * 60 * 1000;
     this.compactionProbe = options?.compactionProbe;
+    this.summaryState = options?.summaryState;
+  }
+
+  // See SessionManagerOptions.summaryState.
+  private readonly summaryState?: (agent: AgentConfig, sessionId: string) => Promise<SummaryState | null>;
+  private readonly slotSummaryState: SummaryStateProbe = execSummaryStateProbe();
+
+  /** How this agent's sessions are read for an unfinished summary; undefined when they cannot be. */
+  private summaryStateFor(agent: AgentConfig): ((sessionId: string) => Promise<SummaryState | null>) | undefined {
+    const injected = this.summaryState;
+    if (injected) return (sessionId) => injected(agent, sessionId);
+    const container = slotContainerOf(agent.spawn);
+    if (container === null) return undefined;
+    return (sessionId) => this.slotSummaryState(container, sessionId);
+  }
+
+  /**
+   * Before a person's message: a summary the session is writing is waited for,
+   * and one left unfinished is written again under a marker of its own, so the
+   * message is answered and never taken as the summary's parent.
+   *
+   * The read and the wait run in the session's queue, after the turns ahead of
+   * this one; the summary is a prompt of its own, queued behind them too.
+   */
+  private async settleSummary(agent: AgentConfig, userId: string, entry: SessionEntry, options: PromptOptions) {
+    const read = this.summaryStateFor(agent);
+    if (!read) return;
+    const readSafely = async (): Promise<SummaryState | null> => {
+      try {
+        return await read(entry.sessionId);
+      } catch (err) {
+        logger.warn(
+          { agentId: agent.id, userId, reason: err instanceof Error ? err.message : String(err) },
+          "could not read whether the session holds an unfinished summary — the message is sent as it is",
+        );
+        return null;
+      }
+    };
+    const tell = (compacting: boolean) => {
+      try {
+        options.onCompaction?.(compacting);
+      } catch (err) {
+        logger.warn({ err, agentId: agent.id, userId }, "onCompaction threw — ignored");
+      }
+    };
+    const state = await entry.queue.enqueue(async () => {
+      let found = await readSafely();
+      if (found?.kind !== "writing") return found;
+      logger.info(
+        { agentId: agent.id, userId, sessionId: entry.sessionId, summaryMessageId: found.messageId },
+        "the session is writing a summary — the message waits for it",
+      );
+      tell(true);
+      const until = Date.now() + COMPACTION_SILENCE_MS;
+      try {
+        while (found?.kind === "writing" && Date.now() < until) {
+          await new Promise((r) => setTimeout(r, COMPACTION_PROBE_EVERY_MS));
+          found = await readSafely();
+        }
+      } finally {
+        tell(false);
+      }
+      if (found?.kind === "writing") {
+        logger.error(
+          { agentId: agent.id, userId, sessionId: entry.sessionId },
+          "the session was still writing a summary after the wait — the message is sent as it is",
+        );
+        return null;
+      }
+      return found;
+    });
+    if (state?.kind !== "stranded") return;
+    logger.warn(
+      { agentId: agent.id, userId, sessionId: entry.sessionId, markerId: state.markerId },
+      "the session holds a summary left unfinished — it summarises again before the message",
+    );
+    let summary = "";
+    await this.prompt(
+      agent.id,
+      userId,
+      SUMMARY_COMMAND,
+      (update) => {
+        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+          summary += update.content.text;
+        }
+      },
+      { onCompaction: options.onCompaction },
+    );
+    const after = await entry.queue.enqueue(readSafely);
+    if (after?.kind === "stranded" || after?.kind === "writing") throw new SummaryNotSettledError(entry.sessionId);
+    if (summary.trim() !== "") {
+      try {
+        options.onSummary?.(summary);
+      } catch (err) {
+        logger.warn({ err, agentId: agent.id, userId }, "onSummary threw — ignored");
+      }
+    }
   }
 
   // See SessionManagerOptions.compactionProbe.
@@ -773,6 +904,15 @@ export class SessionManager {
       }
       this.evictForCapacity(key);
       this.entries.set(key, entry);
+    }
+
+    if (options?.opensTurn) {
+      await this.settleSummary(agent, userId, entry, options);
+      // The summary may have ended the session it was written in, and a
+      // prompt queued on a session the bridge ended is refused: the message
+      // goes to the session as it now stands, respawned if need be.
+      const current = this.entries.get(key);
+      if (current !== entry) return this.prompt(agentId, userId, text, onUpdate, options);
     }
 
     return entry.queue.enqueue(async () => {

@@ -145,6 +145,20 @@ allowlist gates `/internal/inject`.
   rolling summary from the control-plane (or says there is none). A failure of
   that second try is reported as a failed turn. Code: `isCompactionOverflow` and
   `SessionOutgrownError` in `src/session-manager.ts`, `Dispatcher.startOver`.
+- **A summary left unfinished.** opencode starts a summary by writing a user
+  message holding a `compaction` part, and the next prompt runs any such marker
+  newer than the last finished assistant message under the newest user message.
+  When a summary was stopped halfway (a slot restart, a provider error), that is
+  the person's next message: the summary cuts nothing and the message gets no
+  answer. So before a person's message the bridge reads the session's newest 20
+  messages and `GET /session/status` from inside the slot. A marker whose summary
+  the slot's server is still writing is waited for, up to 15 minutes, with the
+  status line saying the assistant is taking stock; a marker nobody is writing is
+  summarised again with opencode's `/compact`, which writes a marker of its own,
+  and its text is kept as the rolling summary. A session still holding an
+  unfinished summary after that is not sent the message, and the turn fails with
+  its notice. Code: `summaryStateOf` in `src/opencode-rest.ts`,
+  `SessionManager.settleSummary`.
 
 ### Each turn
 

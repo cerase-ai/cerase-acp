@@ -767,6 +767,9 @@ export class Dispatcher {
     const watch: SessionUpdateHandler = (update) => status?.observe(update);
     // Every prompt of the turn reports the session writing its summary too.
     const onCompaction = (compacting: boolean) => status?.compacting(compacting);
+    // A summary the session is made to write again before the message, because
+    // one was left unfinished, is kept like one a turn withholds.
+    const onSummary = (summary: string) => this.deps.onSummaryWithheld?.(agentId, summary);
     const onUpdate: SessionUpdateHandler = (update) => {
       watch(update);
       if (update.sessionUpdate === "tool_call") acted = true;
@@ -790,7 +793,9 @@ export class Dispatcher {
           promptText,
           onUpdate,
           cut,
-          links ? { opensTurn: true, context: links, onCompaction } : { opensTurn: true, onCompaction },
+          links
+            ? { opensTurn: true, context: links, onCompaction, onSummary }
+            : { opensTurn: true, onCompaction, onSummary },
         );
       } catch (err) {
         if (!(err instanceof SessionOutgrownError)) throw err;

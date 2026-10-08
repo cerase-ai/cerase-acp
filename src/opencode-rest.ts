@@ -160,3 +160,103 @@ export function execCompactionProbe(exec: SlotExec = dockerExec): CompactionProb
 
 /** Production fetcher: `docker exec` through the bridge's docker proxy. */
 export const defaultFetcher: CanonicalFetcher = execFetcher();
+
+/**
+ * Where a session stands with the summaries of its history, read before a
+ * person's message is sent to it.
+ *
+ * opencode 1.18.18 starts a summary by writing a user message holding a
+ * `compaction` part, the marker, and treats every marker newer than the
+ * session's last finished assistant message as work still to do. The next
+ * prompt runs that work first, and runs it under the newest user message, which
+ * is then the person's: the summary is parented on a message that holds no
+ * marker, so it cuts nothing, and the person's message gets no answer of its
+ * own. A summary stopped halfway (a slot restart, a provider error) leaves its
+ * marker in exactly that state.
+ *
+ * - `settled`: no marker waits; the message can be sent.
+ * - `writing`: a marker waits and the slot's server is working on the session,
+ *   so its summary is being written; `messageId` is that summary, or null when
+ *   it has not been created yet.
+ * - `stranded`: a marker waits and nothing is writing its summary.
+ */
+export type SummaryState =
+  | { kind: "settled" }
+  | { kind: "writing"; messageId: string | null }
+  | { kind: "stranded"; markerId: string };
+
+interface RestMessage {
+  info?: {
+    id?: unknown;
+    role?: unknown;
+    summary?: unknown;
+    finish?: unknown;
+    error?: unknown;
+    parentID?: unknown;
+    time?: { completed?: unknown };
+  };
+  parts?: Array<{ type?: unknown }>;
+}
+
+/**
+ * The state of the newest messages of a session, oldest first as the server
+ * serves them, and whether the slot's server reports the session busy.
+ *
+ * Read the way the runtime reads it: walking back from the newest message, an
+ * assistant message carrying a `finish` ends the search, because no marker
+ * before it is still work; the first marker met before one is.
+ */
+export function summaryStateOf(messages: unknown, busy: boolean): SummaryState {
+  if (!Array.isArray(messages)) return { kind: "settled" };
+  const list = messages.filter((m): m is RestMessage => typeof m === "object" && m !== null);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const message = list[i] as RestMessage;
+    const info = message.info ?? {};
+    if (info.role === "assistant" && typeof info.finish === "string" && info.finish !== "") {
+      return { kind: "settled" };
+    }
+    const marker =
+      info.role === "user" &&
+      typeof info.id === "string" &&
+      (message.parts ?? []).some((part) => part?.type === "compaction");
+    if (!marker) continue;
+    const markerId = info.id as string;
+    const summary = list
+      .slice(i + 1)
+      .find((m) => m.info?.role === "assistant" && m.info.summary === true && m.info.parentID === markerId);
+    const unfinished =
+      summary === undefined || (!summary.info?.error && typeof summary.info?.time?.completed !== "number");
+    if (busy && unfinished) {
+      const id = summary?.info?.id;
+      return { kind: "writing", messageId: typeof id === "string" ? id : null };
+    }
+    return { kind: "stranded", markerId };
+  }
+  return { kind: "settled" };
+}
+
+/**
+ * Reads a session's SummaryState from its slot: `null` when the slot could not
+ * be read, which the caller takes as nothing known.
+ */
+export type SummaryStateProbe = (container: string, sessionId: string) => Promise<SummaryState | null>;
+
+/** How many of the newest messages are read: a marker waits behind at most a few. */
+const SUMMARY_STATE_WINDOW = 20;
+
+/** The probe that asks the slot's opencode server: see SummaryStateProbe. */
+export function execSummaryStateProbe(exec: SlotExec = dockerExec): SummaryStateProbe {
+  return async (container, sessionId) => {
+    const messages = await readSlot(
+      exec,
+      container,
+      `/session/${encodeURIComponent(sessionId)}/message?limit=${SUMMARY_STATE_WINDOW}`,
+    );
+    if (!Array.isArray(messages)) return null;
+    const status = await readSlot(exec, container, "/session/status");
+    const entry =
+      typeof status === "object" && status !== null ? (status as Record<string, unknown>)[sessionId] : undefined;
+    const type = typeof entry === "object" && entry !== null ? (entry as { type?: unknown }).type : undefined;
+    return summaryStateOf(messages, type === "busy" || type === "retry");
+  };
+}
