@@ -29,6 +29,12 @@ export interface TurnContext {
   now: string;
   /** Epoch ms of the pair's last turn, or undefined when they have never spoken. */
   lastTurnAt?: number;
+  /**
+   * Whether the assistant's instructions or skills changed after the last
+   * message of the conversation this turn continues. False when the
+   * control-plane does not say: an older one never does.
+   */
+  instructionsChanged: boolean;
 }
 
 // Long enough that a chatty hour costs one request, short enough that an
@@ -71,7 +77,12 @@ export async function fetchTurnContext(
     throw new Error(`turn-context: HTTP ${resp.status}`);
   }
 
-  const body = (await resp.json()) as { timezone?: string; now?: string; last_turn_at?: string | null };
+  const body = (await resp.json()) as {
+    timezone?: string;
+    now?: string;
+    last_turn_at?: string | null;
+    instructions_changed?: boolean;
+  };
   const timezone = body.timezone ?? "UTC";
   cachedTimezone = { value: timezone, at: Date.now() };
 
@@ -81,6 +92,7 @@ export async function fetchTurnContext(
     timezone,
     now: body.now ?? new Date().toISOString(),
     lastTurnAt: Number.isFinite(last) ? last : undefined,
+    instructionsChanged: body.instructions_changed === true,
   };
 }
 

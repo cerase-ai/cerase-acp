@@ -17,6 +17,7 @@ import type { BridgeConfig } from "./config.js";
 import { isInternalSummaryBlock, summaryHeadingStart } from "./egress-redaction.js";
 import { EMPTY_TURN_RETRIES, emptyTurnRetryPrompt } from "./empty-turn.js";
 import { googleLinksNote } from "./google-links.js";
+import { withInstructionsChanged } from "./instructions-changed.js";
 import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
 import { noticeText, type PlatformNotice } from "./platform-notice.js";
@@ -91,7 +92,10 @@ export interface DispatcherDeps {
    * than a clock. When it is absent or throws, the turn_meta block carries no
    * clock and its gap comes from this process's memory alone.
    */
-  turnContext?: (agentId: string, userId: string) => Promise<{ clock?: string; lastTurnAt?: number }>;
+  turnContext?: (
+    agentId: string,
+    userId: string,
+  ) => Promise<{ clock?: string; lastTurnAt?: number; instructionsChanged?: boolean }>;
   /**
    * Where the send path records a file that did not reach the person.
    * Optional: the test-injection dispatcher has no attach path. When it is
@@ -719,11 +723,15 @@ export class Dispatcher {
     // this process has no memory of the pair, as after a restart.
     let clock: string | undefined;
     let contextLastTurnAt: number | undefined;
+    // Whether the assistant's instructions or skills changed after this
+    // conversation's last message: it is told once, in front of this turn.
+    let instructionsChanged = false;
     if (this.deps.turnContext) {
       try {
         const ctx = await this.deps.turnContext(agentId, userId);
         clock = ctx.clock;
         contextLastTurnAt = ctx.lastTurnAt;
+        instructionsChanged = ctx.instructionsChanged === true;
       } catch (err) {
         logger.warn({ err, agentId, userId }, "turn context unavailable — proceeding without a clock");
       }
@@ -736,9 +744,10 @@ export class Dispatcher {
     // The Google files the message links to, told to the assistant alone with
     // their ids, which the masking of URLs at the model boundary would hide.
     const links = googleLinksNote(text);
+    const context = withInstructionsChanged(instructionsChanged, links);
 
     logger.info(
-      { agentId, userId, textLen: text.length, googleLinks: links !== undefined },
+      { agentId, userId, textLen: text.length, googleLinks: links !== undefined, instructionsChanged },
       "dispatching to session manager",
     );
 
@@ -793,8 +802,8 @@ export class Dispatcher {
           promptText,
           onUpdate,
           cut,
-          links
-            ? { opensTurn: true, context: links, onCompaction, onSummary }
+          context
+            ? { opensTurn: true, context, onCompaction, onSummary }
             : { opensTurn: true, onCompaction, onSummary },
         );
       } catch (err) {
@@ -816,7 +825,7 @@ export class Dispatcher {
           waiting();
         }
         await this.promptThroughRestarts(agentId, userId, promptText, onUpdate, cut, {
-          context: links ? `${note}\n\n${links}` : note,
+          context: context ? `${note}\n\n${context}` : note,
           onCompaction,
         });
       }

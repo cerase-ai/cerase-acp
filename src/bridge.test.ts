@@ -1243,6 +1243,97 @@ describe("the clock in front of every turn", () => {
   });
 });
 
+// On the first turn after an assistant's instructions or skills change, the
+// control-plane says so in the turn context and the bridge tells the assistant
+// in front of that turn; on any other turn nothing is added.
+describe("the note that the instructions changed", () => {
+  let handle: RunBridgeHandle | undefined;
+  let controlPlane: Server | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    await new Promise<void>((resolve) => (controlPlane ? controlPlane.close(() => resolve()) : resolve()));
+    controlPlane = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  it("reaches the assistant in front of the turn the control-plane names, and only that one", async () => {
+    const changed = [true, false];
+    controlPlane = createServer((req, res) => {
+      if (req.url?.startsWith("/api/internal/turn-context/rules-probe")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            timezone: "Europe/Rome",
+            now: new Date().toISOString(),
+            last_turn_at: null,
+            instructions_changed: changed.shift() ?? false,
+          }),
+        );
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => controlPlane?.listen(0, "127.0.0.1", () => resolve()));
+    const cpPort = (controlPlane.address() as AddressInfo).port;
+
+    const SECRET = "inject-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    vi.stubEnv("CERASE_CONTROL_PLANE_URL", `http://127.0.0.1:${cpPort}`);
+
+    const cfg: BridgeConfig = {
+      agents: [
+        {
+          id: "rules-probe",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
+          bot_token: "irrelevant",
+          allowed_users: ["111"],
+          spawn: { command: "env", args: ["--", "FAKE_ECHO_PROMPT=blocks", "node", FAKE_CHILD] },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+      internal_bearer: "bearer-from-agents-yaml",
+    };
+
+    const chat: string[] = [];
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        return a;
+      },
+    });
+
+    const say = async (text: string) => {
+      const before = chat.join("").length;
+      const res = await fetch(`${handle?.internalUrl}/internal/inject`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+        body: JSON.stringify({ agent_id: "rules-probe", user_id: "111", text, surface_in_chat: false }),
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => expect(chat.join("").slice(before)).toContain(text), { timeout: 8000, interval: 50 });
+      return chat.join("").slice(before);
+    };
+
+    const first = await say("rifai la revisione del preventivo");
+    const second = await say("e adesso la firma");
+
+    expect(first).toContain("assistant: [instructions_result: changed]");
+    expect(first).toContain("load a skill again before you use it");
+    expect(second).not.toContain("[instructions_result: changed]");
+  });
+});
+
 // The status line a turn shows while a tool runs: the bridge asks the
 // control-plane, with the bearer agents.yaml carries, for the sentence of the
 // step the assistant is on, and hands it to the channel's status line.

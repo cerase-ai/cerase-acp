@@ -354,7 +354,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         { platform, platformUserId: userId },
         { controlPlaneUrl, internalSecret: requireControlPlaneSecret() },
       );
-      return { clock: formatWallClock(Date.now(), ctx.timezone), lastTurnAt: ctx.lastTurnAt };
+      return {
+        clock: formatWallClock(Date.now(), ctx.timezone),
+        lastTurnAt: ctx.lastTurnAt,
+        instructionsChanged: ctx.instructionsChanged,
+      };
     },
     onSummaryWithheld: captureSummary,
     // What a session that replaces one too large to summarise starts from.
