@@ -30,7 +30,19 @@ const STOPWORDS: Record<Exclude<SupportedLang, "unknown">, RegExp> = {
   fr: /\b(?:bonjour|merci|peux|tu|m'aider|aider|le|la|les|avec|ce|cette|document|comment|pour)\b/i,
 };
 
-export function detectLanguage(text: string): SupportedLang {
+// The block of uploaded files the adapters put in front of a message: file
+// paths, not the person's words. A voice message is that block and nothing
+// else, and «files» is one of the English words below, so on guidance on 10
+// October two Italian voice messages were tagged `lang=en`.
+const UPLOADED_FILES = /^\[Uploaded files: [^\]\n]*\]\s*$/gm;
+
+/** The words of a message the person wrote, without what the bridge added to it. */
+export function personWords(text: string): string {
+  return (text ?? "").replace(UPLOADED_FILES, "").trim();
+}
+
+export function detectLanguage(raw: string): SupportedLang {
+  const text = personWords(raw);
   if (!text || text.length < 4) return "unknown";
   let best: SupportedLang = "unknown";
   let bestHits = 0;
@@ -85,9 +97,23 @@ export class TurnMetaTracker {
     const k = key(agentId, userId);
     const prev = this.state.get(k);
     const gap = formatGap(prev?.lastAt, now);
-    const lang = detectLanguage(text);
+    const lang = this.turnLanguage(k, text);
     this.record(k, now, lang);
     return makeTurnMetaBlock({ gap, lang });
+  }
+
+  /**
+   * The language a turn is tagged with: its own words', and for a turn whose
+   * words do not say — a voice message, a file, «ok» — the language this person
+   * last wrote in, then the organisation's. A turn tagged with a language the
+   * person did not write in is answered in it.
+   */
+  private turnLanguage(k: string, text: string, fallback?: SupportedLang): SupportedLang {
+    const detected = detectLanguage(text);
+    if (detected !== "unknown") return detected;
+    const last = this.state.get(k)?.lastLang;
+    if (last !== undefined && last !== "unknown") return last;
+    return fallback ?? "unknown";
   }
 
   /**
@@ -106,7 +132,7 @@ export class TurnMetaTracker {
     agentId: string,
     userId: string,
     text: string,
-    opts: { resolveLastTurn?: LastTurnResolver; clock?: string; now?: number } = {},
+    opts: { resolveLastTurn?: LastTurnResolver; clock?: string; now?: number; fallbackLang?: SupportedLang } = {},
   ): Promise<string> {
     const now = opts.now ?? Date.now();
     const k = key(agentId, userId);
@@ -125,7 +151,7 @@ export class TurnMetaTracker {
     }
 
     const gap = formatGap(prevAt, now);
-    const lang = detectLanguage(text);
+    const lang = this.turnLanguage(k, text, opts.fallbackLang);
     this.record(k, now, lang);
 
     return makeTurnMetaBlock({ gap, lang, now: opts.clock });

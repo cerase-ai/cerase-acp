@@ -746,6 +746,10 @@ export class Dispatcher {
     const prefix = await this.deps.turnMeta.prefixWithContext(agentId, userId, text, {
       clock,
       resolveLastTurn: contextLastTurnAt === undefined ? undefined : async () => contextLastTurnAt,
+      // A turn whose words do not say its language, with no earlier turn in
+      // this process to take it from, as after a restart, takes the
+      // organisation's, as the bridge's own notices do.
+      fallbackLang: this.deps.config.locale,
     });
     const promptText = prefix + text;
     // The Google files the message links to, told to the assistant alone with
