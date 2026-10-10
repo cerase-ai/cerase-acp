@@ -1259,7 +1259,9 @@ describe("the note that the instructions changed", () => {
   });
 
   it("reaches the assistant in front of the turn the control-plane names, and only that one", async () => {
-    const changed = [true, false];
+    // The conversation exists before its instructions change: the note is
+    // about a conversation that goes on, and a new one starts on them.
+    const changed = [false, true, false];
     controlPlane = createServer((req, res) => {
       if (req.url?.startsWith("/api/internal/turn-context/rules-probe")) {
         res.writeHead(200, { "content-type": "application/json" });
@@ -1325,12 +1327,115 @@ describe("the note that the instructions changed", () => {
       return chat.join("").slice(before);
     };
 
+    const before = await say("prepara il preventivo");
     const first = await say("rifai la revisione del preventivo");
     const second = await say("e adesso la firma");
 
+    expect(before).not.toContain("[instructions_result: changed]");
     expect(first).toContain("assistant: [instructions_result: changed]");
     expect(first).toContain("load a skill again before you use it");
     expect(second).not.toContain("[instructions_result: changed]");
+  });
+});
+
+// The first message of a new conversation is told how the person's previous
+// conversation with the assistant ended; a message to a conversation that goes
+// on is not, and the control-plane is not asked.
+describe("the end of the previous conversation, carried into a new one", () => {
+  let handle: RunBridgeHandle | undefined;
+  let controlPlane: Server | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    await new Promise<void>((resolve) => (controlPlane ? controlPlane.close(() => resolve()) : resolve()));
+    controlPlane = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  it("reaches the first message of a new conversation, and only that one", async () => {
+    let asked = 0;
+    controlPlane = createServer((req, res) => {
+      if (req.url?.startsWith("/api/internal/recent-conversation/carry-probe")) {
+        asked += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            conversation: {
+              ended_at: "2026-10-10 15:29 Europe/Rome",
+              turns: [
+                { role: "person", text: "Rispondi a Clelia che confermiamo giovedì" },
+                { role: "assistant", text: "Ecco la risposta per Clelia. La mando?" },
+              ],
+            },
+          }),
+        );
+        return;
+      }
+      if (req.url?.startsWith("/api/internal/turn-context/carry-probe")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ timezone: "Europe/Rome", now: new Date().toISOString(), last_turn_at: null }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => controlPlane?.listen(0, "127.0.0.1", () => resolve()));
+    const cpPort = (controlPlane.address() as AddressInfo).port;
+
+    const SECRET = "inject-secret";
+    vi.stubEnv("CERASE_ACP_INTERNAL_SECRET", SECRET);
+    vi.stubEnv("CERASE_ACP_INTERNAL_PORT", "0");
+    vi.stubEnv("CERASE_CONTROL_PLANE_URL", `http://127.0.0.1:${cpPort}`);
+
+    const cfg: BridgeConfig = {
+      agents: [
+        {
+          id: "carry-probe",
+          channel: "discord",
+          cwd: "/home/agent/cerase/workspace",
+          mode: "cerase",
+          bot_token: "irrelevant",
+          allowed_users: ["111"],
+          spawn: { command: "env", args: ["--", "FAKE_ECHO_PROMPT=blocks", "node", FAKE_CHILD] },
+        },
+      ],
+      session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+      internal_bearer: "bearer-from-agents-yaml",
+    };
+
+    const chat: string[] = [];
+    handle = await runBridge({
+      config: cfg,
+      bridgeE2eTest: false,
+      createAdapter: async (agent, dispatcher) => {
+        const a = makeFakeAdapter(agent, dispatcher, "ok");
+        a.makeSendTarget = () => async (chunk: string) => {
+          chat.push(chunk);
+          return { ok: true };
+        };
+        return a;
+      },
+    });
+
+    const say = async (text: string) => {
+      const before = chat.join("").length;
+      const res = await fetch(`${handle?.internalUrl}/internal/inject`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+        body: JSON.stringify({ agent_id: "carry-probe", user_id: "111", text, surface_in_chat: false }),
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => expect(chat.join("").slice(before)).toContain(text), { timeout: 8000, interval: 50 });
+      return chat.join("").slice(before);
+    };
+
+    const first = await say("manda pure");
+    const second = await say("grazie");
+
+    expect(first).toContain("assistant: [conversation_result: new]");
+    expect(first).toContain("You: Ecco la risposta per Clelia. La mando?");
+    expect(second).not.toContain("[conversation_result: new]");
+    expect(asked).toBe(1);
   });
 });
 

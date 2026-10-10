@@ -44,6 +44,7 @@ import {
   attachmentUnreadableNotice,
   displayFileName,
 } from "./platform-notices.js";
+import { fetchRecentConversation } from "./recent-conversation.js";
 import { SessionManager } from "./session-manager.js";
 import { fetchSessionSummary, postSessionSummary } from "./session-summary.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
@@ -360,6 +361,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         instructionsChanged: ctx.instructionsChanged,
       };
     },
+    // How the assistant's previous conversation ended, for a new one. Wired on
+    // the same condition as the gate above.
+    recentConversation: (agentId) =>
+      fetchRecentConversation(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
     onSummaryWithheld: captureSummary,
     // What a session that replaces one too large to summarise starts from.
     // Wired on the same condition as the gate above.

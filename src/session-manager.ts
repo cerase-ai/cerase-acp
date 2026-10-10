@@ -841,6 +841,16 @@ export class SessionManager {
     agent.allowed_users = [...allowedUsers];
   }
 
+  /**
+   * Whether this pair's next message goes to a conversation that already
+   * exists: a live session, one being started, or one remembered to resume.
+   * False means the next prompt starts a new conversation.
+   */
+  holdsConversation(agentId: string, userId: string): boolean {
+    const key = sessionKey(agentId, userId);
+    return this.entries.has(key) || this.inFlightSpawns.has(key) || this.resumableSessions.get(key) !== undefined;
+  }
+
   async prompt(
     agentId: string,
     userId: string,

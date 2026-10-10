@@ -30,6 +30,7 @@ import {
   updateInterruptedNotice,
   workingNotice,
 } from "./platform-notices.js";
+import { type RecentConversation, recentConversationNote } from "./recent-conversation.js";
 import { RESTART_HOLD_MS, RESTART_RETRY_MS } from "./restart-hold.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
 import {
@@ -96,6 +97,12 @@ export interface DispatcherDeps {
     agentId: string,
     userId: string,
   ) => Promise<{ clock?: string; lastTurnAt?: number; instructionsChanged?: boolean }>;
+  /**
+   * How the assistant's previous conversation ended, for the first message of a
+   * new one. Optional: the test-injection dispatcher has no control-plane, and a
+   * conversation is worth more than its carry-over.
+   */
+  recentConversation?: (agentId: string) => Promise<RecentConversation | undefined>;
   /**
    * Where the send path records a file that did not reach the person.
    * Optional: the test-injection dispatcher has no attach path. When it is
@@ -744,7 +751,27 @@ export class Dispatcher {
     // The Google files the message links to, told to the assistant alone with
     // their ids, which the masking of URLs at the model boundary would hide.
     const links = googleLinksNote(text);
-    const context = withInstructionsChanged(instructionsChanged, links);
+    // A message that starts a new conversation is told how the person's
+    // previous one ended, when it ended recently; the note that the
+    // instructions changed is about a conversation that goes on, so it goes
+    // only to one that does.
+    const fresh =
+      this.deps.recentConversation !== undefined && !this.deps.sessionManager.holdsConversation(agentId, userId);
+    let carried: string | undefined;
+    if (fresh && this.deps.recentConversation) {
+      try {
+        const recent = await this.deps.recentConversation(agentId);
+        if (recent) carried = recentConversationNote(recent);
+      } catch (err) {
+        logger.warn(
+          { err, agentId, userId },
+          "the previous conversation could not be read — the new one starts without it",
+        );
+      }
+    }
+    const context = fresh
+      ? [carried, links].filter((part): part is string => part !== undefined).join("\n\n") || undefined
+      : withInstructionsChanged(instructionsChanged, links);
 
     logger.info(
       { agentId, userId, textLen: text.length, googleLinks: links !== undefined, instructionsChanged },
