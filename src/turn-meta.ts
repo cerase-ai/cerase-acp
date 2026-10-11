@@ -19,16 +19,271 @@ export function formatGap(prevAt: number | undefined, now: number): string {
   return `${deltaD}d`;
 }
 
-// Tiny stopword-based language hint. Not a serious NLP detector — just
-// enough to give the agent's system prompt a starting bias so it
-// replies in the user's language by default. The agent itself does
-// the heavy lifting on language tracking.
-const STOPWORDS: Record<Exclude<SupportedLang, "unknown">, RegExp> = {
-  it: /\b(?:ciao|non|che|il|la|sono|come|cosa|grazie|per|con|del|della|puoi|mi|hai|fa|fare|aiutare|riassumere|domanda)\b/i,
-  en: /\b(?:hello|the|and|you|can|what|how|with|please|help|summarise|summarize|difference|between|files|document|question)\b/i,
-  es: /\b(?:hola|gracias|por|favor|puedes|ayudarme|qué|cómo|el|la|los|las|con|este|esta|documento)\b/i,
-  fr: /\b(?:bonjour|merci|peux|tu|m'aider|aider|le|la|les|avec|ce|cette|document|comment|pour)\b/i,
+// A language hint from the person's own words, not an NLP detector: enough to
+// tell the assistant which language to answer in.
+//
+// Each list holds common words of one language. A word that appears in more
+// than one list says nothing and is not counted, wherever it was written: «tu»
+// is French and Italian, «la» is in three of them. A list that held it counted
+// it for the language it happened to be filed under, and «Sì, ho cambiato idea:
+// preparala tu.» reached an assistant tagged French.
+const WORDS: Record<Exclude<SupportedLang, "unknown">, string[]> = {
+  it: [
+    "sì",
+    "ho",
+    "hai",
+    "ha",
+    "abbiamo",
+    "avete",
+    "hanno",
+    "è",
+    "e",
+    "di",
+    "che",
+    "il",
+    "lo",
+    "gli",
+    "una",
+    "uno",
+    "sono",
+    "questo",
+    "questa",
+    "quello",
+    "quella",
+    "anche",
+    "ma",
+    "perché",
+    "più",
+    "già",
+    "va",
+    "bene",
+    "grazie",
+    "ciao",
+    "per",
+    "del",
+    "della",
+    "dei",
+    "delle",
+    "nel",
+    "nella",
+    "mi",
+    "ti",
+    "ci",
+    "io",
+    "noi",
+    "voi",
+    "puoi",
+    "fare",
+    "fai",
+    "cosa",
+    "quando",
+    "dove",
+    "allora",
+    "poi",
+    "adesso",
+    "ora",
+    "domani",
+    "oggi",
+    "ieri",
+    "dopo",
+    "aspetta",
+    "giusto",
+    "così",
+    "attimo",
+    "perfetto",
+    "fatto",
+    "aiutare",
+    "riassumere",
+    "domanda",
+    "capito",
+    "mandala",
+    "mandalo",
+    "preparala",
+    "preparalo",
+    "scrivi",
+    "manda",
+    "certo",
+    "ecco",
+  ],
+  en: [
+    "yes",
+    "the",
+    "and",
+    "you",
+    "your",
+    "can",
+    "what",
+    "how",
+    "with",
+    "please",
+    "help",
+    "is",
+    "are",
+    "it",
+    "this",
+    "that",
+    "these",
+    "to",
+    "of",
+    "for",
+    "i",
+    "my",
+    "we",
+    "do",
+    "does",
+    "send",
+    "will",
+    "would",
+    "could",
+    "now",
+    "today",
+    "tomorrow",
+    "thanks",
+    "thank",
+    "fine",
+    "wait",
+    "go",
+    "ahead",
+    "sure",
+    "write",
+    "hello",
+    "hi",
+    "summarise",
+    "summarize",
+    "difference",
+    "between",
+    "files",
+    "question",
+    "two",
+    "client",
+  ],
+  es: [
+    "sí",
+    "hola",
+    "gracias",
+    "por",
+    "favor",
+    "puedes",
+    "ayudarme",
+    "qué",
+    "cómo",
+    "el",
+    "los",
+    "las",
+    "este",
+    "esta",
+    "es",
+    "está",
+    "y",
+    "yo",
+    "tú",
+    "mañana",
+    "hoy",
+    "vale",
+    "envío",
+    "espera",
+    "así",
+    "para",
+    "pero",
+    "muy",
+    "bueno",
+    "claro",
+    "también",
+    "prepáralo",
+    "mándalo",
+  ],
+  fr: [
+    "oui",
+    "bonjour",
+    "merci",
+    "je",
+    "vous",
+    "nous",
+    "est",
+    "et",
+    "les",
+    "le",
+    "avec",
+    "ce",
+    "cette",
+    "dans",
+    "des",
+    "du",
+    "au",
+    "pas",
+    "ne",
+    "qui",
+    "c'est",
+    "d'accord",
+    "peux",
+    "m'aider",
+    "aider",
+    "comment",
+    "pour",
+    "attends",
+    "peu",
+    "parfait",
+    "envoie",
+    "maintenant",
+    "occupe",
+    "voilà",
+    "très",
+  ],
 };
+
+const LANGS = ["it", "en", "es", "fr"] as const;
+
+// Each word, to the one language it belongs to; a word of two lists, to none.
+const OWNER: Map<string, Exclude<SupportedLang, "unknown">> = (() => {
+  const seen = new Map<string, Set<string>>();
+  for (const lang of LANGS) {
+    for (const word of WORDS[lang]) {
+      const langs = seen.get(word) ?? new Set<string>();
+      langs.add(lang);
+      seen.set(word, langs);
+    }
+  }
+  const owner = new Map<string, Exclude<SupportedLang, "unknown">>();
+  for (const [word, langs] of seen) {
+    if (langs.size === 1) owner.set(word, [...langs][0] as Exclude<SupportedLang, "unknown">);
+  }
+  return owner;
+})();
+
+/** The words of a text, each also split at its apostrophes: «l'ho» is «l'ho», «l» and «ho». */
+function words(text: string): string[] {
+  const out: string[] = [];
+  for (const token of text
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .match(/[\p{L}']+/gu) ?? []) {
+    const word = token.replace(/^'+|'+$/g, "");
+    if (!word) continue;
+    out.push(word);
+    if (word.includes("'")) out.push(...word.split("'").filter(Boolean));
+  }
+  return out;
+}
+
+/** The language a text's words point to, how many of them point there, and how many more than to any other. */
+export function languageEvidence(raw: string): { lang: SupportedLang; hits: number; margin: number } {
+  const text = personWords(raw);
+  if (!text || text.length < 2) return { lang: "unknown", hits: 0, margin: 0 };
+  const counts: Record<string, number> = { it: 0, en: 0, es: 0, fr: 0 };
+  for (const word of words(text)) {
+    const lang = OWNER.get(word);
+    if (lang) counts[lang] = (counts[lang] ?? 0) + 1;
+  }
+  const ranked = [...LANGS].sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
+  const top = ranked[0] ?? "it";
+  const best = counts[top] ?? 0;
+  const margin = best - (counts[ranked[1] ?? "en"] ?? 0);
+  return { lang: best > 0 && margin > 0 ? top : "unknown", hits: best, margin };
+}
+
+// A message whose words point to another language than the conversation's by
+// fewer than this many is too weak to move the conversation: «Hello», «Merci».
+const SWITCH_HITS = 2;
 
 // The block of uploaded files the adapters put in front of a message: file
 // paths, not the person's words. A voice message is that block and nothing
@@ -42,18 +297,7 @@ export function personWords(text: string): string {
 }
 
 export function detectLanguage(raw: string): SupportedLang {
-  const text = personWords(raw);
-  if (!text || text.length < 4) return "unknown";
-  let best: SupportedLang = "unknown";
-  let bestHits = 0;
-  for (const lang of ["it", "en", "es", "fr"] as const) {
-    const hits = (text.match(new RegExp(STOPWORDS[lang], "gi")) ?? []).length;
-    if (hits > bestHits) {
-      best = lang;
-      bestHits = hits;
-    }
-  }
-  return bestHits > 0 ? best : "unknown";
+  return languageEvidence(raw).lang;
 }
 
 export function makeTurnMetaBlock(parts: { gap: string; lang: SupportedLang; now?: string }): string {
@@ -104,15 +348,24 @@ export class TurnMetaTracker {
 
   /**
    * The language a turn is tagged with: its own words', and for a turn whose
-   * words do not say — a voice message, a file, «ok» — the language this person
-   * last wrote in, then the organisation's. A turn tagged with a language the
-   * person did not write in is answered in it.
+   * words do not say — a voice message, a file, «ok» — or say too little to move
+   * the conversation — «Hello» in an Italian one — the language this person last
+   * wrote in, then the organisation's. A turn tagged with a language the person
+   * did not write in is answered in it.
    */
   private turnLanguage(k: string, text: string, fallback?: SupportedLang): SupportedLang {
-    const detected = detectLanguage(text);
-    if (detected !== "unknown") return detected;
+    const evidence = languageEvidence(text);
     const last = this.state.get(k)?.lastLang;
-    if (last !== undefined && last !== "unknown") return last;
+    const known = last !== undefined && last !== "unknown" ? last : undefined;
+    // A short message with weak evidence keeps the conversation's language.
+    if (
+      evidence.lang !== "unknown" &&
+      (known === undefined || evidence.lang === known || evidence.hits >= SWITCH_HITS)
+    ) {
+      return evidence.lang;
+    }
+    if (known !== undefined) return known;
+    if (evidence.lang !== "unknown") return evidence.lang;
     return fallback ?? "unknown";
   }
 

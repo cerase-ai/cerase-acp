@@ -65,8 +65,11 @@ describe("TurnMetaTracker", () => {
     const t0 = 1_700_000_000_000;
     const first = t.prefix("doc-qa", "user-A", "ciao", t0);
     expect(first).toBe("[turn_meta: gap=first, lang=it]\n\n");
+    // One English word does not move an Italian conversation; a sentence does.
     const second = t.prefix("doc-qa", "user-A", "hello", t0 + 5 * 60 * 1000);
-    expect(second).toBe("[turn_meta: gap=5m, lang=en]\n\n");
+    expect(second).toBe("[turn_meta: gap=5m, lang=it]\n\n");
+    const third = t.prefix("doc-qa", "user-A", "hello, can you help me with this?", t0 + 6 * 60 * 1000);
+    expect(third).toBe("[turn_meta: gap=1m, lang=en]\n\n");
   });
 
   it("tracks per (agent, user) — distinct keys are independent", () => {
