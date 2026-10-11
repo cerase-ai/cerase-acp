@@ -74,6 +74,8 @@ export interface EditedMessage {
   text: string;
   /** The fields the edit asked to change, as the updateMask query parameter named them. */
   updateMask: string;
+  /** The cards the edit gave it, when its updateMask names them. */
+  cardsV2?: unknown;
 }
 
 export interface FakeGoogle {
@@ -293,7 +295,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       // saying so is ignored, as Google ignores it.
       const patch = /^\/v1\/(spaces\/[^/]+\/messages\/[^/]+)$/.exec(url.pathname);
       if (req.method === "PATCH" && patch?.[1]) {
-        const body = JSON.parse((await readBody(req)) || "{}") as { text?: string };
+        const body = JSON.parse((await readBody(req)) || "{}") as { text?: string; cardsV2?: unknown };
         if (!authorised(req)) return unauthenticated(res);
         const updateMask = url.searchParams.get("updateMask") ?? "";
         if (updateMask === "") {
@@ -311,6 +313,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         }
         if (updateMask.split(",").includes("text")) found.text = body.text ?? "";
         const edit: EditedMessage = { name: patch[1], posted: found.message, text: found.text, updateMask };
+        if (updateMask.split(",").includes("cardsV2")) edit.cardsV2 = body.cardsV2;
         fake.edits.push(edit);
         fake.onEdit?.(edit);
         return json(res, 200, { name: patch[1], text: found.text });

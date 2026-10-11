@@ -6,10 +6,12 @@ import {
   PLATFORM_COLOUR,
   PLATFORM_SENDER,
   type PlatformNotice,
+  parseNoticeRef,
   parsePlatformNotice,
   SLACK_NOTICE_ACTION_ID,
   slackNoticeMessage,
   splitAtLines,
+  telegramClosedNoticeMessage,
   telegramNoticeMessages,
 } from "./platform-notice.js";
 
@@ -215,5 +217,62 @@ describe("Telegram: a quoted block under a bold heading, with a link button", ()
     const [m] = telegramNoticeMessages(APPROVAL, true);
     expect(m!.button).toBeUndefined();
     expect(m!.html.endsWith("</blockquote>\nApprova o rifiuta: https://acme.cerase.ai/a/Xy7Kq2")).toBe(true);
+  });
+});
+
+describe("a notice's reference, as the control-plane hands it back", () => {
+  it("reads the reference of each channel", () => {
+    expect(parseNoticeRef({ channel: "discord", channelId: "1", messageId: "2" })).toEqual({
+      channel: "discord",
+      channelId: "1",
+      messageId: "2",
+    });
+    expect(parseNoticeRef({ channel: "slack", channelId: "D1", ts: "1.2" })).toEqual({
+      channel: "slack",
+      channelId: "D1",
+      ts: "1.2",
+    });
+    expect(parseNoticeRef({ channel: "telegram", chatId: "42", messageId: 7 })).toEqual({
+      channel: "telegram",
+      chatId: "42",
+      messageId: 7,
+    });
+    expect(parseNoticeRef({ channel: "workspace_chat", name: "spaces/A/messages/B" })).toEqual({
+      channel: "workspace_chat",
+      name: "spaces/A/messages/B",
+    });
+  });
+
+  it("refuses one with a part missing, or of a channel it does not know", () => {
+    expect(parseNoticeRef({ channel: "discord", channelId: "1" })).toBeUndefined();
+    expect(parseNoticeRef({ channel: "telegram", chatId: "42", messageId: "7" })).toBeUndefined();
+    expect(parseNoticeRef({ channel: "workspace_chat", name: "spaces/A" })).toBeUndefined();
+    expect(parseNoticeRef({ channel: "web", id: "x" })).toBeUndefined();
+    expect(parseNoticeRef(null)).toBeUndefined();
+  });
+});
+
+describe("a closed notice keeps what it said, and its button says how it ended", () => {
+  const notice = {
+    title: "Richiesta di approvazione",
+    body: "«Matilde» chiede la tua approvazione per: invia una mail",
+    link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+  };
+
+  it("Slack and Google Chat keep the title and the body", () => {
+    const slack = JSON.stringify(slackNoticeMessage(notice, "Scaduta").blocks);
+    const chat = JSON.stringify(googleChatNoticeMessage(notice, "Scaduta").cardsV2);
+    for (const drawn of [slack, chat]) {
+      expect(drawn).toContain("Richiesta di approvazione");
+      expect(drawn).toContain("chiede la tua approvazione");
+      expect(drawn).toContain("Scaduta");
+      expect(drawn).not.toContain("Approva o rifiuta");
+    }
+  });
+
+  it("Telegram keeps the quote and writes how it ended under it", () => {
+    const html = telegramClosedNoticeMessage(notice, "✓ Approvata");
+    expect(html).toContain("<blockquote>");
+    expect(html.endsWith("<b>✓ Approvata</b>")).toBe(true);
   });
 });

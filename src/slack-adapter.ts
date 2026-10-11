@@ -26,7 +26,7 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { type PlatformNotice, SLACK_NOTICE_ACTION_ID, slackNoticeMessage } from "./platform-notice.js";
+import { type NoticeRef, type PlatformNotice, SLACK_NOTICE_ACTION_ID, slackNoticeMessage } from "./platform-notice.js";
 import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
 
@@ -148,13 +148,31 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
         // The blocks are built SDK-free in platform-notice.ts, in Block Kit's
         // own JSON, so they are typed here as the call takes them.
         const post = app.client.chat.postMessage.bind(app.client.chat);
-        await post({
+        const posted = (await post({
           channel: userId,
           text,
           blocks,
           unfurl_links: false,
           unfurl_media: false,
-        } as unknown as Parameters<typeof post>[0]);
+        } as unknown as Parameters<typeof post>[0])) as { channel?: string; ts?: string } | undefined;
+        // The direct message Slack answers with, not the user id it was sent
+        // to: an edit names the conversation the message is in.
+        return posted?.channel && posted.ts
+          ? { ok: true, ref: { channel: "slack", channelId: posted.channel, ts: posted.ts } }
+          : { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    },
+    async closeNotice(ref: NoticeRef, notice: PlatformNotice, closed: string): Promise<DeliveryResult> {
+      // Slack draws no button that cannot be pressed: the blocks are sent again
+      // with how the notice ended in the button's place.
+      try {
+        if (ref.channel !== "slack") throw new Error(`a ${ref.channel} notice cannot be closed on Slack`);
+        if (!app) throw new Error(`slack adapter for agent "${agent.id}" not started — refusing to update`);
+        const { text, blocks } = slackNoticeMessage(notice, closed);
+        const update = app.client.chat.update.bind(app.client.chat);
+        await update({ channel: ref.channelId, ts: ref.ts, text, blocks } as unknown as Parameters<typeof update>[0]);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };

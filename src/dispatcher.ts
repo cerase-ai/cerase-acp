@@ -20,7 +20,7 @@ import { googleLinksNote } from "./google-links.js";
 import { withInstructionsChanged } from "./instructions-changed.js";
 import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
-import { noticeText, type PlatformNotice } from "./platform-notice.js";
+import { type NoticeRef, noticeText, type PlatformNotice } from "./platform-notice.js";
 import {
   compactionNotice,
   deliveryFailureNotice,
@@ -62,6 +62,8 @@ type SendTarget = (chunk: string) => Promise<DeliveryResult>;
 
 type NoticeTarget = (notice: PlatformNotice) => Promise<DeliveryResult>;
 
+type NoticeCloser = (ref: NoticeRef, notice: PlatformNotice, closed: string) => Promise<DeliveryResult>;
+
 export interface DispatcherDeps {
   config: BridgeConfig;
   sessionManager: SessionManager;
@@ -75,6 +77,11 @@ export interface DispatcherDeps {
    * notice spelled out through `resolveSendTarget`.
    */
   resolveNoticeTarget?: (agentId: string, userId: string) => NoticeTarget | undefined;
+  /**
+   * The function that closes a notice the agent's channel posted, or undefined
+   * when its adapter cannot edit one. Optional, for the same reason as above.
+   */
+  resolveNoticeCloser?: (agentId: string) => NoticeCloser | undefined;
   /**
    * Proactive out-of-credits gate. Called BEFORE the
    * ACP child is spawned / `prompt()` is invoked. Resolves `{exhausted:
@@ -566,6 +573,21 @@ export class Dispatcher {
     const target = this.deps.resolveNoticeTarget?.(agentId, userId);
     if (target) return target(notice);
     return this.sendSystemMessage(agentId, userId, noticeText(notice));
+  }
+
+  /**
+   * Close a notice the agent's channel posted: its button reads `closed` and
+   * can no longer be pressed. Undefined when the channel cannot edit a notice,
+   * which the endpoint tells apart from an edit the channel refused.
+   */
+  async closeNotice(
+    agentId: string,
+    ref: NoticeRef,
+    notice: PlatformNotice,
+    closed: string,
+  ): Promise<DeliveryResult | undefined> {
+    const closer = this.deps.resolveNoticeCloser?.(agentId);
+    return closer ? closer(ref, notice, closed) : undefined;
   }
 
   /**

@@ -282,6 +282,21 @@ export class WorkspaceChatApi {
     await resp.body?.cancel();
   }
 
+  /**
+   * `spaces.messages.patch` with `updateMask=cardsV2`: replaces the cards of
+   * the message called `name` and leaves its text as it was. Google edits only
+   * a message this app created, as for `updateMessageText`.
+   */
+  async updateMessageCards(name: string, cardsV2: unknown): Promise<void> {
+    const space = name.split("/messages/")[0] ?? name;
+    const resp = await this.write("spaces.messages.patch", name, space, `/v1/${name}?updateMask=cardsV2`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cardsV2 }),
+    });
+    await resp.body?.cancel();
+  }
+
   /** `spaces.findDirectMessage`: the direct-message space between `email` and this app. */
   async findDirectMessage(email: string): Promise<string> {
     const user = `users/${email}`;

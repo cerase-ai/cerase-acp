@@ -12,7 +12,7 @@
 
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import type { PlatformNotice } from "./platform-notice.js";
+import type { NoticeRef, PlatformNotice } from "./platform-notice.js";
 import type { ReachabilitySnapshot } from "./reachability.js";
 
 /**
@@ -29,7 +29,7 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  * person received nothing from it, and a reply that was only such chunks has
  * not answered them.
  */
-export type DeliveryResult = { ok: true; withheld?: true } | { ok: false; error: Error };
+export type DeliveryResult = { ok: true; withheld?: true; ref?: NoticeRef } | { ok: false; error: Error };
 
 /**
  * How a channel that takes each answer as one message cuts it: into one
@@ -151,6 +151,22 @@ export interface ChatAdapter {
    * after it is right for a turn that goes on.
    */
   sendNotice?(userId: string, notice: PlatformNotice): Promise<DeliveryResult>;
+
+  /**
+   * Close a notice this adapter posted, once what it asked for is decided: the
+   * message that carried its button is edited in place, the button reads
+   * `closed` (how it ended) and can no longer be pressed, and the rest of it
+   * stays as it was. Where the channel cannot disable a link button, the button
+   * goes and `closed` is written in its place.
+   *
+   * `ref` is what `sendNotice` answered, kept by the control-plane and handed
+   * back, so it may come after a restart of the bridge: the adapter reaches the
+   * message from the reference alone. A reference of another channel, a
+   * message that is gone, and a provider that refuses are returned as a failure
+   * and never thrown, since a decision has already been made and must not wait
+   * on its message.
+   */
+  closeNotice?(ref: NoticeRef, notice: PlatformNotice, closed: string): Promise<DeliveryResult>;
 
   /**
    * The status line of the turn this person's message starts: one message,

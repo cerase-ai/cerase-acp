@@ -394,6 +394,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       const send = adapter.sendNotice?.bind(adapter);
       return send ? (notice) => send(userId, notice) : undefined;
     },
+    // A notice is closed by the adapter of the agent that posted it, from the
+    // reference the control-plane kept.
+    resolveNoticeCloser: (agentId) => {
+      const adapter = adapters.get(agentId);
+      if (!adapter) {
+        throw new Error(`no chat adapter registered for agent "${agentId}"`);
+      }
+      return adapter.closeNotice?.bind(adapter);
+    },
     resolveSendTarget: (agentId, userId) => {
       const adapter = adapters.get(agentId);
       if (!adapter) {

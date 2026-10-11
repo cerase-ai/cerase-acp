@@ -5,15 +5,21 @@ import { headsUpText, type InternalServer, startInternalServer } from "./interna
 // Both methods return a DeliveryResult; an optional
 // `outcome` lets a test simulate a failed turn/delivery so we can assert the
 // endpoint surfaces it as a 500.
-function makeFakeDispatcher(outcome: import("./chat-adapter.js").DeliveryResult = { ok: true }) {
+function makeFakeDispatcher(
+  outcome: import("./chat-adapter.js").DeliveryResult = { ok: true },
+  // null: the agent's channel cannot close a notice at all.
+  closeOutcome: import("./chat-adapter.js").DeliveryResult | null = { ok: true },
+) {
   const calls: {
     handled: Array<[string, string, string]>;
     system: Array<[string, string, string]>;
     notices: Array<[string, string, unknown]>;
+    closed: Array<[string, unknown, unknown, string]>;
   } = {
     handled: [],
     system: [],
     notices: [],
+    closed: [],
   };
   const dispatcher = {
     async handleMessage(agentId: string, userId: string, text: string) {
@@ -27,6 +33,10 @@ function makeFakeDispatcher(outcome: import("./chat-adapter.js").DeliveryResult 
     async sendNotice(agentId: string, userId: string, notice: unknown) {
       calls.notices.push([agentId, userId, notice]);
       return outcome;
+    },
+    async closeNotice(agentId: string, ref: unknown, notice: unknown, closed: string) {
+      calls.closed.push([agentId, ref, notice, closed]);
+      return closeOutcome === null ? undefined : closeOutcome;
     },
   } as unknown as import("./dispatcher.js").Dispatcher;
   return { dispatcher, calls };
@@ -146,6 +156,23 @@ describe("internal-server /internal/inject", () => {
     expect(calls.notices).toEqual([["a1", "u1", NOTICE]]);
     expect(calls.system).toHaveLength(0);
     expect(calls.handled).toHaveLength(0);
+  });
+
+  it("answers a notice with where its button was posted, for the control-plane to keep", async () => {
+    await server.close();
+    const ref = { channel: "discord", channelId: "dm-1", messageId: "m-3" } as const;
+    const fake = makeFakeDispatcher({ ok: true, ref });
+    calls = fake.calls;
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+    });
+    base = `http://127.0.0.1:${server.port()}`;
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "x", system_message_only: true, notice: NOTICE });
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toEqual({ status: "accepted", ref });
   });
 
   it("400s a notice that is not one, and sends nothing", async () => {
@@ -822,5 +849,80 @@ describe("internal-server /internal/inject allowlist (M-ACP-HARDEN-1)", () => {
     const resp = await post({ agent_id: "a1", user_id: "ok", text: "ciao" });
     expect(resp.status).toBe(202);
     expect(calls.handled).toEqual([["a1", "ok", "ciao"]]);
+  });
+});
+
+// A notice is closed once what it asked for is decided: the control-plane
+// hands back the reference the inject answered, with the notice as it was sent
+// and the words its button now reads.
+describe("internal-server /internal/notice/close", () => {
+  let server: InternalServer;
+  const NOTICE = {
+    title: "Richiesta di approvazione",
+    body: "«Matilde» chiede la tua approvazione per: invia una mail",
+    link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+  };
+  const REF = { channel: "telegram", chatId: "42", messageId: 701 };
+
+  const start = async (closeOutcome: import("./chat-adapter.js").DeliveryResult | null = { ok: true }) => {
+    const fake = makeFakeDispatcher({ ok: true }, closeOutcome);
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+    });
+    return fake.calls;
+  };
+  const close = (body: unknown, auth = `Bearer ${SECRET}`) =>
+    fetch(`http://127.0.0.1:${server.port()}/internal/notice/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      body: JSON.stringify(body),
+    });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it("closes the notice through the agent's channel", async () => {
+    const calls = await start();
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "✓ Approvata" });
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ status: "closed" });
+    expect(calls.closed).toEqual([["a1", REF, NOTICE, "✓ Approvata"]]);
+  });
+
+  it("401s without the shared secret", async () => {
+    const calls = await start();
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "✓ Approvata" }, "Bearer wrong");
+    expect(resp.status).toBe(401);
+    expect(calls.closed).toHaveLength(0);
+  });
+
+  it("400s a reference, a notice or words that are not one", async () => {
+    const calls = await start();
+    for (const body of [
+      { agent_id: "a1", ref: { channel: "telegram", chatId: "42" }, notice: NOTICE, closed: "Scaduta" },
+      { agent_id: "a1", ref: REF, notice: { body: "x" }, closed: "Scaduta" },
+      { agent_id: "a1", ref: REF, notice: NOTICE, closed: "" },
+      { ref: REF, notice: NOTICE, closed: "Scaduta" },
+    ]) {
+      expect((await close(body)).status).toBe(400);
+    }
+    expect(calls.closed).toHaveLength(0);
+  });
+
+  it("409s when the agent's channel cannot close a notice", async () => {
+    await start(null);
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "Scaduta" });
+    expect(resp.status).toBe(409);
+  });
+
+  it("502s with the channel's reason when the edit is refused", async () => {
+    await start({ ok: false, error: new Error("Bad Request: message to edit not found") });
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "Scaduta" });
+    expect(resp.status).toBe(502);
+    expect(((await resp.json()) as { error: string }).error).toContain("message to edit not found");
   });
 });

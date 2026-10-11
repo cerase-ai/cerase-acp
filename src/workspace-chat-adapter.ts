@@ -57,7 +57,7 @@ import type { AgentConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundBuffers, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { googleChatNoticeMessage, type PlatformNotice } from "./platform-notice.js";
+import { googleChatNoticeMessage, type NoticeRef, type PlatformNotice } from "./platform-notice.js";
 import { directMessagesOnlyNotice, WRITING_ENDED_NOTICE, WRITING_NOTICE } from "./platform-notices.js";
 import { detectLanguage } from "./turn-meta.js";
 import {
@@ -543,7 +543,12 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
     conversation: Conversation | undefined,
     message: Record<string, unknown>,
     failure: string,
+    named = false,
   ): Promise<DeliveryResult> => {
+    // A delivery that went through. A notice's names the message Google
+    // created, since its card is closed later by that name.
+    const posted = (name: string | undefined): DeliveryResult =>
+      named && name ? { ok: true, ref: { channel: "workspace_chat", name } } : { ok: true };
     let space = conversation?.space;
     const thread = conversation?.thread;
     try {
@@ -557,8 +562,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
         } else {
           space = stored;
           try {
-            await api.createMessageWith(stored, message, thread);
-            return { ok: true };
+            return posted(await api.createMessageWith(stored, message, thread));
           } catch (err) {
             if (!wrongSpace(err)) throw err;
             // A stored space this app cannot post in was recorded for
@@ -574,8 +578,7 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
           }
         }
       }
-      await api.createMessageWith(space, message, thread);
-      return { ok: true };
+      return posted(await api.createMessageWith(space, message, thread));
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       logger.error(
@@ -672,7 +675,21 @@ export function createWorkspaceChatAdapter(agent: AgentConfig, dispatcher: Dispa
         conversations.get(userId),
         { ...googleChatNoticeMessage(notice) },
         "workspace-chat notice not delivered",
+        true,
       );
+    },
+    // The card is replaced where it is, its button reading how the notice ended
+    // and disabled; the fallback text a phone showed stays as it was.
+    async closeNotice(ref: NoticeRef, notice: PlatformNotice, closed: string): Promise<DeliveryResult> {
+      try {
+        if (ref.channel !== "workspace_chat")
+          throw new Error(`a ${ref.channel} notice cannot be closed on Google Chat`);
+        if (!api) throw new Error(`workspace-chat adapter for agent "${agent.id}" is not started, refusing to edit`);
+        await api.updateMessageCards(ref.name, googleChatNoticeMessage(notice, closed).cardsV2);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
     },
   };
 }

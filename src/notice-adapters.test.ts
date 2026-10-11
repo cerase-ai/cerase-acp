@@ -10,19 +10,26 @@ import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import {
+  discordClosedComponents,
   discordNoticeMessages,
+  type NoticeRef,
   type PlatformNotice,
   SLACK_NOTICE_ACTION_ID,
   slackNoticeMessage,
+  telegramClosedNoticeMessage,
   telegramNoticeMessages,
 } from "./platform-notice.js";
 
 const sdk = vi.hoisted(() => ({
   discordSends: [] as unknown[],
   discordFail: undefined as Error | undefined,
+  discordEdits: [] as Array<{ channelId: string; messageId: string; payload: unknown }>,
+  discordEditFail: undefined as Error | undefined,
   slackPosts: [] as Record<string, unknown>[],
+  slackUpdates: [] as Record<string, unknown>[],
   slackActions: new Map<string, (args: { ack: () => Promise<void> }) => Promise<void>>(),
   telegramSends: [] as Array<{ chatId: string; text: string; extra: Record<string, unknown> | undefined }>,
+  telegramEdits: [] as Array<{ chatId: string; messageId: number; text: string; extra: unknown }>,
   telegramRefusals: [] as Error[],
 }));
 
@@ -32,12 +39,26 @@ vi.mock("discord.js", () => {
     users = {
       fetch: async () => ({
         createDM: async () => ({
+          id: "dm-1",
           send: async (payload: unknown) => {
             if (sdk.discordFail) throw sdk.discordFail;
             sdk.discordSends.push(payload);
-            return {};
+            return { id: `m-${sdk.discordSends.length}`, channelId: "dm-1" };
           },
         }),
+      }),
+    };
+    // A DM channel fetched by id, as the bridge reaches one after a restart.
+    channels = {
+      fetch: async (channelId: string) => ({
+        id: channelId,
+        messages: {
+          edit: async (messageId: string, payload: unknown) => {
+            if (sdk.discordEditFail) throw sdk.discordEditFail;
+            sdk.discordEdits.push({ channelId, messageId, payload });
+            return {};
+          },
+        },
       }),
     };
     on() {
@@ -64,8 +85,13 @@ vi.mock("@slack/bolt", () => {
   class App {
     client = {
       chat: {
+        // Slack answers with the direct message's own id, not the user's.
         postMessage: async (args: Record<string, unknown>) => {
           sdk.slackPosts.push(args);
+          return { ok: true, channel: "D0SLACKDM", ts: `1760000000.00000${sdk.slackPosts.length}` };
+        },
+        update: async (args: Record<string, unknown>) => {
+          sdk.slackUpdates.push(args);
           return { ok: true };
         },
       },
@@ -88,7 +114,11 @@ vi.mock("telegraf", () => {
         const refusal = sdk.telegramRefusals.shift();
         if (refusal) throw refusal;
         sdk.telegramSends.push({ chatId, text, extra });
-        return {};
+        return { message_id: 700 + sdk.telegramSends.length, chat: { id: Number(chatId) } };
+      },
+      editMessageText: async (chatId: string, messageId: number, _inline: unknown, text: string, extra: unknown) => {
+        sdk.telegramEdits.push({ chatId, messageId, text, extra });
+        return true;
       },
       sendChatAction: async () => true,
       getMe: async () => ({ id: 1, username: "assistente_bot" }),
@@ -127,9 +157,13 @@ function agent(channel: AgentConfig["channel"], extra: Partial<AgentConfig> = {}
 beforeEach(() => {
   sdk.discordSends.length = 0;
   sdk.discordFail = undefined;
+  sdk.discordEdits.length = 0;
+  sdk.discordEditFail = undefined;
   sdk.slackPosts.length = 0;
+  sdk.slackUpdates.length = 0;
   sdk.slackActions.clear();
   sdk.telegramSends.length = 0;
+  sdk.telegramEdits.length = 0;
   sdk.telegramRefusals.length = 0;
 });
 
@@ -140,7 +174,7 @@ describe("Discord adapter: a notice is an embed with its link in a button", () =
     try {
       expect(adapter.sendNotice).toBeTypeOf("function");
       const result = await adapter.sendNotice!("u1", NOTICE);
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, ref: { channel: "discord", channelId: "dm-1", messageId: "m-1" } });
       expect(sdk.discordSends).toEqual(discordNoticeMessages(NOTICE));
       expect(typeof sdk.discordSends[0]).toBe("object");
     } finally {
@@ -171,7 +205,7 @@ describe("Slack adapter: a notice is blocks with its link in a button", () => {
     try {
       expect(adapter.sendNotice).toBeTypeOf("function");
       const result = await adapter.sendNotice!("U1", NOTICE);
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, ref: { channel: "slack", channelId: "D0SLACKDM", ts: "1760000000.000001" } });
       const { text, blocks } = slackNoticeMessage(NOTICE);
       expect(sdk.slackPosts).toEqual([{ channel: "U1", text, blocks, unfurl_links: false, unfurl_media: false }]);
     } finally {
@@ -204,7 +238,7 @@ describe("Telegram adapter: a notice is a quoted block under a bold heading, wit
     try {
       expect(adapter.sendNotice).toBeTypeOf("function");
       const result = await adapter.sendNotice!("42", NOTICE);
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, ref: { channel: "telegram", chatId: "42", messageId: 701 } });
       const [m] = telegramNoticeMessages(NOTICE);
       expect(sdk.telegramSends).toEqual([
         {
@@ -234,7 +268,7 @@ describe("Telegram adapter: a notice is a quoted block under a bold heading, wit
         }),
       );
       const result = await adapter.sendNotice!("42", NOTICE);
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, ref: { channel: "telegram", chatId: "42", messageId: 701 } });
       const [m] = telegramNoticeMessages(NOTICE, true);
       expect(sdk.telegramSends).toEqual([
         { chatId: "42", text: m!.html, extra: { parse_mode: "HTML", link_preview_options: { is_disabled: true } } },
@@ -257,6 +291,126 @@ describe("Telegram adapter: a notice is a quoted block under a bold heading, wit
       const result = await adapter.sendNotice!("42", NOTICE);
       expect(result.ok).toBe(false);
       expect(sdk.telegramSends).toEqual([]);
+    } finally {
+      await adapter.stop();
+    }
+  });
+});
+
+// A notice closed once what it asked for is decided: the message that carried
+// the button is edited where it is, its button reads how the notice ended and
+// can no longer be pressed, and the rest of it stays as it was. The reference
+// is the one sendNotice answered, handed back by the control-plane, which may
+// be after a restart of the bridge.
+describe("closing a notice, on every channel", () => {
+  it("Discord: the last message of a long notice is the one named, since it carries the button", async () => {
+    const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
+    await adapter.start();
+    try {
+      const long = {
+        ...NOTICE,
+        body: Array.from({ length: 12 }, (_, i) => `- riga ${i}: ${"x".repeat(3000)}`).join("\n"),
+      };
+      const result = await adapter.sendNotice!("u1", long);
+      const sent = discordNoticeMessages(long).length;
+      expect(sent).toBeGreaterThan(1);
+      expect(result).toEqual({ ok: true, ref: { channel: "discord", channelId: "dm-1", messageId: `m-${sent}` } });
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  it("Discord: the button reads how it ended and is disabled, and only the components are edited", async () => {
+    const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
+    await adapter.start();
+    try {
+      expect(adapter.closeNotice).toBeTypeOf("function");
+      const ref: NoticeRef = { channel: "discord", channelId: "dm-9", messageId: "m-4" };
+      const result = await adapter.closeNotice!(ref, NOTICE, "✓ Approvata");
+      expect(result).toEqual({ ok: true });
+      expect(sdk.discordEdits).toEqual([
+        {
+          channelId: "dm-9",
+          messageId: "m-4",
+          payload: { components: discordClosedComponents(NOTICE, "✓ Approvata") },
+        },
+      ]);
+      const [button] = discordClosedComponents(NOTICE, "✓ Approvata")[0]!.components;
+      expect(button).toMatchObject({ label: "✓ Approvata", disabled: true });
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  it("Discord: an edit Discord refuses, a deleted message, is returned and never thrown", async () => {
+    const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
+    await adapter.start();
+    try {
+      sdk.discordEditFail = new Error("Unknown Message");
+      const result = await adapter.closeNotice!(
+        { channel: "discord", channelId: "dm-1", messageId: "m-1" },
+        NOTICE,
+        "Scaduta",
+      );
+      expect(result.ok).toBe(false);
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  it("Slack: the button gives way to how it ended, in the direct message Slack named", async () => {
+    const adapter = await createChatAdapter(
+      agent("slack", { bot_token: "xoxb-1", slack_app_token: "xapp-1" }),
+      DISPATCHER,
+    );
+    await adapter.start();
+    try {
+      expect(adapter.closeNotice).toBeTypeOf("function");
+      const ref: NoticeRef = { channel: "slack", channelId: "D0SLACKDM", ts: "1760000000.000001" };
+      const result = await adapter.closeNotice!(ref, NOTICE, "✕ Rifiutata");
+      expect(result).toEqual({ ok: true });
+      const { text, blocks } = slackNoticeMessage(NOTICE, "✕ Rifiutata");
+      expect(sdk.slackUpdates).toEqual([{ channel: "D0SLACKDM", ts: "1760000000.000001", text, blocks }]);
+      expect(blocks.some((b) => b.type === "actions")).toBe(false);
+      expect(JSON.stringify(blocks)).toContain("✕ Rifiutata");
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  it("Telegram: the button goes and how it ended is written in its place", async () => {
+    const adapter = await createChatAdapter(agent("telegram", { bot_token: "123:abc" }), DISPATCHER);
+    await adapter.start();
+    try {
+      expect(adapter.closeNotice).toBeTypeOf("function");
+      const ref: NoticeRef = { channel: "telegram", chatId: "42", messageId: 701 };
+      const result = await adapter.closeNotice!(ref, NOTICE, "Scaduta");
+      expect(result).toEqual({ ok: true });
+      expect(sdk.telegramEdits).toEqual([
+        {
+          chatId: "42",
+          messageId: 701,
+          text: telegramClosedNoticeMessage(NOTICE, "Scaduta"),
+          extra: {
+            parse_mode: "HTML",
+            link_preview_options: { is_disabled: true },
+            reply_markup: { inline_keyboard: [] },
+          },
+        },
+      ]);
+      expect(telegramClosedNoticeMessage(NOTICE, "Scaduta")).toContain("Scaduta");
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  it("a reference of another channel is refused, not acted on", async () => {
+    const adapter = await createChatAdapter(agent("telegram", { bot_token: "123:abc" }), DISPATCHER);
+    await adapter.start();
+    try {
+      const result = await adapter.closeNotice!({ channel: "slack", channelId: "D1", ts: "1.2" }, NOTICE, "Scaduta");
+      expect(result.ok).toBe(false);
+      expect(sdk.telegramEdits).toEqual([]);
     } finally {
       await adapter.stop();
     }

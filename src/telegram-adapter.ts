@@ -34,7 +34,12 @@ import {
   prependUploadMarker,
 } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { type PlatformNotice, telegramNoticeMessages } from "./platform-notice.js";
+import {
+  type NoticeRef,
+  type PlatformNotice,
+  telegramClosedNoticeMessage,
+  telegramNoticeMessages,
+} from "./platform-notice.js";
 import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
@@ -221,13 +226,14 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
         const telegram = bot.telegram;
         const plain = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
         const messages = telegramNoticeMessages(notice);
+        let last: { message_id?: number } | undefined;
         for (const [i, message] of messages.entries()) {
           if (!message.button) {
-            await telegram.sendMessage(userId, message.html, plain);
+            last = await telegram.sendMessage(userId, message.html, plain);
             continue;
           }
           try {
-            await telegram.sendMessage(userId, message.html, {
+            last = await telegram.sendMessage(userId, message.html, {
               ...plain,
               reply_markup: { inline_keyboard: [[{ text: message.button.label, url: message.button.url }]] },
             });
@@ -237,9 +243,35 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
               { agentId: agent.id, reason: (err as Error).message },
               "telegram refused the notice's button; sent again with the address spelled out",
             );
-            await telegram.sendMessage(userId, telegramNoticeMessages(notice, true)[i]!.html, plain);
+            last = await telegram.sendMessage(userId, telegramNoticeMessages(notice, true)[i]!.html, plain);
           }
         }
+        // The last message carries the button, or the address in its place.
+        return typeof last?.message_id === "number"
+          ? { ok: true, ref: { channel: "telegram", chatId: userId, messageId: last.message_id } }
+          : { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    },
+    async closeNotice(ref: NoticeRef, notice: PlatformNotice, closed: string): Promise<DeliveryResult> {
+      // A button that opens a link cannot be disabled on Telegram: the message
+      // is written again with how the notice ended in the button's place, and
+      // its keyboard is emptied.
+      try {
+        if (ref.channel !== "telegram") throw new Error(`a ${ref.channel} notice cannot be closed on Telegram`);
+        if (!bot) throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to edit`);
+        await bot.telegram.editMessageText(
+          ref.chatId,
+          ref.messageId,
+          undefined,
+          telegramClosedNoticeMessage(notice, closed),
+          {
+            parse_mode: "HTML",
+            link_preview_options: { is_disabled: true },
+            reply_markup: { inline_keyboard: [] },
+          },
+        );
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };

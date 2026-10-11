@@ -505,7 +505,10 @@ describe("workspace-chat: one Chat app per assistant", () => {
     const adapter = adapters.get("agent-2")!;
     expect(adapter.sendNotice).toBeTypeOf("function");
     const result = await adapter.sendNotice!("Anna.Bianchi@example.com", notice);
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({
+      ok: true,
+      ref: { channel: "workspace_chat", name: "spaces/dm-Anna-Bianchi-example-com/messages/1" },
+    });
     const expected = googleChatNoticeMessage(notice);
     expect(google.posts).toEqual([
       expect.objectContaining({
@@ -516,6 +519,46 @@ describe("workspace-chat: one Chat app per assistant", () => {
         thread: undefined,
       }),
     ]);
+  });
+
+  // Once what it asked for is decided, the card is edited where it is: its
+  // button reads how the notice ended and is disabled, and only the card is
+  // replaced, which Google does only for a message this app posted.
+  it("a platform notice is closed in place: its button reads how it ended and is disabled", async () => {
+    const notice = {
+      title: "Richiesta di approvazione",
+      body: "«Guido» chiede la tua approvazione per: invia una mail",
+      link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+    };
+    const adapter = adapters.get("agent-2")!;
+    const sent = await adapter.sendNotice!("Anna.Bianchi@example.com", notice);
+    expect(adapter.closeNotice).toBeTypeOf("function");
+    const ref = sent.ok ? sent.ref : undefined;
+    expect(ref).toBeDefined();
+    const result = await adapter.closeNotice!(ref!, notice, "✓ Approvata");
+    expect(result).toEqual({ ok: true });
+    expect(google.edits).toEqual([
+      expect.objectContaining({
+        name: "spaces/dm-Anna-Bianchi-example-com/messages/1",
+        updateMask: "cardsV2",
+        cardsV2: googleChatNoticeMessage(notice, "✓ Approvata").cardsV2,
+      }),
+    ]);
+    expect(JSON.stringify(google.edits[0]!.cardsV2)).toContain('"disabled":true');
+  });
+
+  it("a notice Google no longer has is returned as a failure, not thrown", async () => {
+    const notice = {
+      title: "Richiesta di approvazione",
+      body: "x",
+      link: { url: "https://acme.cerase.ai/a/Q", label: "Apri" },
+    };
+    const result = await adapters.get("agent-2")!.closeNotice!(
+      { channel: "workspace_chat", name: "spaces/dm-Anna-Bianchi-example-com/messages/99" },
+      notice,
+      "Scaduta",
+    );
+    expect(result.ok).toBe(false);
   });
 
   it("a reply written in Markdown is posted in Chat's own markup", async () => {

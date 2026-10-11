@@ -30,7 +30,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Dispatcher } from "./dispatcher.js";
 import { makeLogger } from "./logger.js";
 import { NoteCoalescer } from "./note-coalescer.js";
-import { parsePlatformNotice } from "./platform-notice.js";
+import { parseNoticeRef, parsePlatformNotice } from "./platform-notice.js";
 
 const logger = makeLogger("cerase-acp.internal-server");
 
@@ -184,6 +184,52 @@ export interface InternalServerOptions {
    * caller that validates first.
    */
   isAllowed?: (agentId: string, userId: string) => boolean;
+}
+
+/**
+ * `POST /internal/notice/close`: `{agent_id, ref, notice, closed}`. The notice
+ * a decision has ended is edited where it was posted, its button reading
+ * `closed` and no longer pressable. 200 once edited, 400 for a body that is not
+ * one, 409 when the agent's channel cannot edit a notice, and 502 with the
+ * channel's reason when it refused, a message deleted or a provider down. The
+ * caller has already recorded the decision; nothing here can undo it.
+ */
+async function closeNotice(dispatcher: Dispatcher, body: unknown, res: ServerResponse): Promise<void> {
+  const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const agentId = rec.agent_id;
+  const ref = parseNoticeRef(rec.ref);
+  const notice = parsePlatformNotice(rec.notice);
+  const closed = rec.closed;
+  if (
+    typeof agentId !== "string" ||
+    agentId === "" ||
+    !ref ||
+    !notice ||
+    typeof closed !== "string" ||
+    closed.trim() === ""
+  ) {
+    sendJson(res, 400, {
+      error: "agent_id, a ref, the notice as it was sent and the words its button now reads are required",
+    });
+    return;
+  }
+  try {
+    const result = await dispatcher.closeNotice(agentId, ref, notice, closed);
+    if (result === undefined) {
+      sendJson(res, 409, { error: "this agent's channel cannot edit a notice" });
+      return;
+    }
+    if (!result.ok) {
+      logger.warn({ agentId, channel: ref.channel, reason: result.error.message }, "a notice could not be closed");
+      sendJson(res, 502, { error: result.error.message });
+      return;
+    }
+    sendJson(res, 200, { status: "closed" });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.warn({ agentId, channel: ref.channel, reason }, "a notice could not be closed");
+    sendJson(res, 502, { error: reason });
+  }
 }
 
 /** The heads-up posted before processing when surface_in_chat is set. */
@@ -348,6 +394,15 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/internal/notice/close") {
+    if (!authorized) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    await closeNotice(opts.dispatcher, await readJsonBody(req), res);
+    return;
+  }
+
   if (req.method !== "POST" || url.pathname !== "/internal/inject") {
     sendJson(res, 404, { error: "not found" });
     return;
@@ -413,13 +468,15 @@ async function handleRequest(
         sendJson(res, 500, { error: "delivery failed" });
         return;
       }
+      // Where a notice's button was posted, for the control-plane to keep and
+      // hand back when it closes the notice.
+      sendJson(res, 202, result.ref ? { status: "accepted", ref: result.ref } : { status: "accepted" });
+      return;
     } catch (err) {
       logger.error({ err, agentId, userId }, "system-message-only inject failed");
       sendJson(res, 500, { error: "dispatch failed" });
       return;
     }
-    sendJson(res, 202, { status: "accepted" });
-    return;
   }
 
   // Ack acceptance now, before the heads-up and the model turn: the caller

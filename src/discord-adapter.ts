@@ -21,7 +21,12 @@ import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
 import { makeLogger } from "./logger.js";
-import { discordNoticeMessages, type PlatformNotice } from "./platform-notice.js";
+import {
+  discordClosedComponents,
+  discordNoticeMessages,
+  type NoticeRef,
+  type PlatformNotice,
+} from "./platform-notice.js";
 import { isChannelReady, ReachabilityMonitor, type ReachabilitySnapshot } from "./reachability.js";
 import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
@@ -249,9 +254,31 @@ export function createDiscordAdapter(
       // plain text beside it: the box is what tells it from the assistant.
       try {
         const channel = await dmChannel(userId);
+        let last: { id?: string; channelId?: string } | undefined;
         for (const message of discordNoticeMessages(notice)) {
-          await channel.send(message);
+          last = (await channel.send(message)) as { id?: string; channelId?: string } | undefined;
         }
+        reachability.note();
+        // The button is on the last message, so that is the one to close.
+        const channelId = last?.channelId ?? channel.id;
+        return last?.id && channelId
+          ? { ok: true, ref: { channel: "discord", channelId, messageId: last.id } }
+          : { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    },
+    async closeNotice(ref: NoticeRef, notice: PlatformNotice, closed: string): Promise<DeliveryResult> {
+      // Only the components are sent, so Discord leaves the embeds as they
+      // were posted. The channel is fetched by id rather than taken from the
+      // DMs this client opened, which a restart of the bridge has emptied.
+      try {
+        if (ref.channel !== "discord") throw new Error(`a ${ref.channel} notice cannot be closed on Discord`);
+        const channel = (await client.channels.fetch(ref.channelId)) as {
+          messages?: { edit(messageId: string, payload: unknown): Promise<unknown> };
+        } | null;
+        if (!channel?.messages) throw new Error(`Discord channel ${ref.channelId} cannot be reached to close a notice`);
+        await channel.messages.edit(ref.messageId, { components: discordClosedComponents(notice, closed) });
         reachability.note();
         return { ok: true };
       } catch (err) {

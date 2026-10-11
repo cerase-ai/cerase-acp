@@ -41,23 +41,28 @@ describe("the channels an organisation may choose", () => {
     expect([...contract.channels].sort()).toEqual(ChatChannelSchema.options.filter((c) => c !== "web").sort());
   });
 
-  it.each(contract.channels)("%s has an adapter that sends a message and draws a notice", async (channel) => {
-    expect(CREDENTIALS[channel], `no configuration for ${channel} in this test`).toBeDefined();
-    const agent = {
-      id: "agent-1",
-      channel,
-      allowed_users: ["u1"],
-      cwd: "/home/agent/cerase/workspace",
-      mode: "cerase",
-      spawn: { command: "docker", args: [] },
-      ...CREDENTIALS[channel],
-    } as AgentConfig;
+  it.each(contract.channels)(
+    "%s has an adapter that sends a message, draws a notice and closes it",
+    async (channel) => {
+      expect(CREDENTIALS[channel], `no configuration for ${channel} in this test`).toBeDefined();
+      const agent = {
+        id: "agent-1",
+        channel,
+        allowed_users: ["u1"],
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
+        spawn: { command: "docker", args: [] },
+        ...CREDENTIALS[channel],
+      } as AgentConfig;
 
-    const adapter = await createChatAdapter(agent, {} as unknown as Dispatcher);
+      const adapter = await createChatAdapter(agent, {} as unknown as Dispatcher);
 
-    expect(adapter.agentId).toBe("agent-1");
-    expect(adapter.makeSendTarget).toBeTypeOf("function");
-    expect(adapter.sendNotice).toBeTypeOf("function");
-    expect(adapter.start).toBeTypeOf("function");
-  });
+      expect(adapter.agentId).toBe("agent-1");
+      expect(adapter.makeSendTarget).toBeTypeOf("function");
+      expect(adapter.sendNotice).toBeTypeOf("function");
+      // A decided approval's message says how it ended, on every channel core offers.
+      expect(adapter.closeNotice).toBeTypeOf("function");
+      expect(adapter.start).toBeTypeOf("function");
+    },
+  );
 });
