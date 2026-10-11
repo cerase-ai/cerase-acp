@@ -522,9 +522,9 @@ describe("workspace-chat: one Chat app per assistant", () => {
   });
 
   // Once what it asked for is decided, the card is edited where it is: its
-  // button reads how the notice ended and is disabled, and only the card is
-  // replaced, which Google does only for a message this app posted.
-  it("a platform notice is closed in place: its button reads how it ended and is disabled", async () => {
+  // button reads how the notice ended and still opens the approval's page, and
+  // only the card is replaced, which Google does only for a message this app posted.
+  it("a platform notice is closed in place: its button reads how it ended and still opens the page", async () => {
     const notice = {
       title: "Richiesta di approvazione",
       body: "«Guido» chiede la tua approvazione per: invia una mail",
@@ -544,7 +544,8 @@ describe("workspace-chat: one Chat app per assistant", () => {
         cardsV2: googleChatNoticeMessage(notice, "✓ Approvata").cardsV2,
       }),
     ]);
-    expect(JSON.stringify(google.edits[0]!.cardsV2)).toContain('"disabled":true');
+    expect(JSON.stringify(google.edits[0]!.cardsV2)).not.toContain('"disabled":true');
+    expect(JSON.stringify(google.edits[0]!.cardsV2)).toContain(notice.link.url);
   });
 
   it("a notice Google no longer has is returned as a failure, not thrown", async () => {

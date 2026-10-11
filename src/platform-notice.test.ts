@@ -259,7 +259,7 @@ describe("a closed notice keeps what it said, and its button says how it ended",
     link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
   };
 
-  it("Slack and Google Chat keep the title and the body", () => {
+  it("Slack and Google Chat keep the title and the body, and a button that still opens the page", () => {
     const slack = JSON.stringify(slackNoticeMessage(notice, "Scaduta").blocks);
     const chat = JSON.stringify(googleChatNoticeMessage(notice, "Scaduta").cardsV2);
     for (const drawn of [slack, chat]) {
@@ -267,12 +267,14 @@ describe("a closed notice keeps what it said, and its button says how it ended",
       expect(drawn).toContain("chiede la tua approvazione");
       expect(drawn).toContain("Scaduta");
       expect(drawn).not.toContain("Approva o rifiuta");
+      expect(drawn).toContain(notice.link.url);
+      expect(drawn).not.toContain('"disabled":true');
     }
   });
 
-  it("Telegram keeps the quote and writes how it ended under it", () => {
+  it("Telegram keeps the quote, and its button says how it ended", () => {
     const html = telegramClosedNoticeMessage(notice, "✓ Approvata");
     expect(html).toContain("<blockquote>");
-    expect(html.endsWith("<b>✓ Approvata</b>")).toBe(true);
+    expect(html).not.toContain(notice.link.url);
   });
 });

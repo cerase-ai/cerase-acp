@@ -37,6 +37,7 @@ import { makeLogger } from "./logger.js";
 import {
   type NoticeRef,
   type PlatformNotice,
+  telegramClosedNoticeKeyboard,
   telegramClosedNoticeMessage,
   telegramNoticeMessages,
 } from "./platform-notice.js";
@@ -255,9 +256,8 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
       }
     },
     async closeNotice(ref: NoticeRef, notice: PlatformNotice, closed: string): Promise<DeliveryResult> {
-      // A button that opens a link cannot be disabled on Telegram: the message
-      // is written again with how the notice ended in the button's place, and
-      // its keyboard is emptied.
+      // The message is written again as posted, its button reading how the
+      // notice ended and still opening the page, which shows what was decided.
       try {
         if (ref.channel !== "telegram") throw new Error(`a ${ref.channel} notice cannot be closed on Telegram`);
         if (!bot) throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to edit`);
@@ -269,7 +269,7 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
           {
             parse_mode: "HTML",
             link_preview_options: { is_disabled: true },
-            reply_markup: { inline_keyboard: [] },
+            reply_markup: { inline_keyboard: telegramClosedNoticeKeyboard(notice, closed) },
           },
         );
         return { ok: true };

@@ -254,22 +254,23 @@ export function discordNoticeMessages(notice: PlatformNotice): DiscordNoticeMess
 
 /**
  * The components a closed notice's last message carries on Discord: its button
- * reading how the notice ended, and disabled, so it can no longer be pressed.
- * Only the components are edited; the embeds stay as they were posted.
+ * reading how the notice ended and still opening the page, which shows what was
+ * decided and its parameters. Only the components are edited; the embeds stay
+ * as they were posted.
  */
 export function discordClosedComponents(notice: PlatformNotice, closed: string): DiscordNoticeMessage["components"] {
   const label = truncate(closed, DISCORD_LABEL_MAX);
-  // A link button keeps its address and takes `disabled`. A notice whose
-  // address Discord refused as a button had none, and is closed with a button
-  // that opens nothing, which needs an id of its own instead.
+  // A notice whose address Discord refused as a button had none, and spelled
+  // the address out in its body: it is closed with a button that only reads
+  // how it ended, which needs an id of its own and opens nothing.
   const button =
     notice.link && notice.link.url.length <= DISCORD_BUTTON_URL_MAX
-      ? { type: 2 as const, style: 5 as const, label, url: notice.link.url, disabled: true }
+      ? { type: 2 as const, style: 5 as const, label, url: notice.link.url }
       : { type: 2 as const, style: 2 as const, label, custom_id: DISCORD_CLOSED_NOTICE_ID, disabled: true };
   return [{ type: 1, components: [button] }];
 }
 
-/** The id of the button a closed notice carries where it had no link button to disable. */
+/** The id of the button a closed notice carries where it had no link button. */
 export const DISCORD_CLOSED_NOTICE_ID = "cerase_platform_notice_closed";
 
 // ── Slack ──────────────────────────────────────────────────────────────────
@@ -295,10 +296,7 @@ const SLACK_SECTION_MAX = 3000;
  */
 export function slackNoticeMessage(notice: PlatformNotice, closed?: string): SlackNoticeMessage {
   const button = notice.link && notice.link.url.length <= 3000 ? notice.link : undefined;
-  const body =
-    notice.link && !button && closed === undefined
-      ? `${notice.body.trim()}\n${linkLine(notice.link)}`
-      : notice.body.trim();
+  const body = notice.link && !button ? `${notice.body.trim()}\n${linkLine(notice.link)}` : notice.body.trim();
   const blocks: Array<Record<string, unknown>> = [
     { type: "context", elements: [{ type: "plain_text", text: PLATFORM_SENDER, emoji: false }] },
     { type: "header", text: { type: "plain_text", text: truncate(notice.title, 150), emoji: false } },
@@ -308,12 +306,8 @@ export function slackNoticeMessage(notice: PlatformNotice, closed?: string): Sla
       blocks.push({ type: "section", text: { type: "plain_text", text: piece, emoji: false } });
     }
   }
-  // Closed, the button is gone: Slack draws no button that cannot be pressed,
-  // so how the notice ended takes its place as a line of text.
-  if (closed !== undefined) {
-    blocks.push({ type: "context", elements: [{ type: "plain_text", text: closed, emoji: false }] });
-    return { text: `${noticeText({ ...notice, link: undefined })}\n${closed}`, blocks };
-  }
+  // Closed, the button reads how the notice ended and still opens the page,
+  // which shows what was decided. One that had no button says it in a line.
   if (button) {
     blocks.push({
       type: "actions",
@@ -321,13 +315,15 @@ export function slackNoticeMessage(notice: PlatformNotice, closed?: string): Sla
         {
           type: "button",
           action_id: SLACK_NOTICE_ACTION_ID,
-          text: { type: "plain_text", text: truncate(button.label, 75), emoji: false },
+          text: { type: "plain_text", text: truncate(closed ?? button.label, 75), emoji: false },
           url: button.url,
         },
       ],
     });
+  } else if (closed !== undefined) {
+    blocks.push({ type: "context", elements: [{ type: "plain_text", text: closed, emoji: false }] });
   }
-  return { text: noticeText(notice), blocks };
+  return { text: closed === undefined ? noticeText(notice) : `${noticeText(notice)}\n${closed}`, blocks };
 }
 
 // ── Google Chat ────────────────────────────────────────────────────────────
@@ -354,11 +350,9 @@ export function googleChatNoticeMessage(notice: PlatformNotice, closed?: string)
   const body = notice.body.trim();
   if (body !== "") widgets.push({ textParagraph: { text: escapeCardHtml(body) } });
   if (notice.link) {
-    // Closed, the button reads how the notice ended and is disabled.
-    const button =
-      closed === undefined
-        ? { text: notice.link.label, onClick: { openLink: { url: notice.link.url } } }
-        : { text: closed, disabled: true, onClick: { openLink: { url: notice.link.url } } };
+    // Closed, the button reads how the notice ended and still opens the page,
+    // which shows what was decided.
+    const button = { text: closed ?? notice.link.label, onClick: { openLink: { url: notice.link.url } } };
     widgets.push({ buttonList: { buttons: [button] } });
   }
   return {
@@ -420,13 +414,23 @@ export function telegramNoticeMessages(notice: PlatformNotice, withoutButton = f
 }
 
 /**
- * The last message of a closed notice on Telegram, which carried its button. A
- * button that opens a link cannot be disabled there, so the button goes and how
- * the notice ended is written under the quote in its place.
+ * The last message of a closed notice on Telegram, which carried its button:
+ * its text as posted, the button reading how the notice ended
+ * (telegramClosedNoticeKeyboard) and still opening the page. A notice with no
+ * link has how it ended written under the quote instead.
  */
 export function telegramClosedNoticeMessage(notice: PlatformNotice, closed: string): string {
   const messages = telegramNoticeMessages({ ...notice, link: undefined });
-  return `${messages[messages.length - 1]!.html}\n<b>${escapeTelegramHtml(closed)}</b>`;
+  const html = messages[messages.length - 1]!.html;
+  return notice.link ? html : `${html}\n<b>${escapeTelegramHtml(closed)}</b>`;
+}
+
+/** The keyboard of a closed notice on Telegram: one button, how it ended, opening the page. */
+export function telegramClosedNoticeKeyboard(
+  notice: PlatformNotice,
+  closed: string,
+): Array<Array<{ text: string; url: string }>> {
+  return notice.link ? [[{ text: closed, url: notice.link.url }]] : [];
 }
 
 function truncate(text: string, max: number): string {

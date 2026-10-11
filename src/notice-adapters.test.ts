@@ -299,7 +299,8 @@ describe("Telegram adapter: a notice is a quoted block under a bold heading, wit
 
 // A notice closed once what it asked for is decided: the message that carried
 // the button is edited where it is, its button reads how the notice ended and
-// can no longer be pressed, and the rest of it stays as it was. The reference
+// still opens the approval's page, which shows what was decided and its
+// parameters, and the rest of it stays as it was. The reference
 // is the one sendNotice answered, handed back by the control-plane, which may
 // be after a restart of the bridge.
 describe("closing a notice, on every channel", () => {
@@ -320,7 +321,7 @@ describe("closing a notice, on every channel", () => {
     }
   });
 
-  it("Discord: the button reads how it ended and is disabled, and only the components are edited", async () => {
+  it("Discord: the button reads how it ended and still opens the page, and only the components are edited", async () => {
     const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
     await adapter.start();
     try {
@@ -336,7 +337,8 @@ describe("closing a notice, on every channel", () => {
         },
       ]);
       const [button] = discordClosedComponents(NOTICE, "✓ Approvata")[0]!.components;
-      expect(button).toMatchObject({ label: "✓ Approvata", disabled: true });
+      expect(button).toMatchObject({ label: "✓ Approvata", url: NOTICE.link!.url });
+      expect(button).not.toHaveProperty("disabled");
     } finally {
       await adapter.stop();
     }
@@ -358,7 +360,7 @@ describe("closing a notice, on every channel", () => {
     }
   });
 
-  it("Slack: the button gives way to how it ended, in the direct message Slack named", async () => {
+  it("Slack: the button reads how it ended and still opens the page, in the direct message Slack named", async () => {
     const adapter = await createChatAdapter(
       agent("slack", { bot_token: "xoxb-1", slack_app_token: "xapp-1" }),
       DISPATCHER,
@@ -371,14 +373,14 @@ describe("closing a notice, on every channel", () => {
       expect(result).toEqual({ ok: true });
       const { text, blocks } = slackNoticeMessage(NOTICE, "✕ Rifiutata");
       expect(sdk.slackUpdates).toEqual([{ channel: "D0SLACKDM", ts: "1760000000.000001", text, blocks }]);
-      expect(blocks.some((b) => b.type === "actions")).toBe(false);
-      expect(JSON.stringify(blocks)).toContain("✕ Rifiutata");
+      const actions = blocks.find((b) => b.type === "actions") as { elements: Array<Record<string, unknown>> };
+      expect(actions.elements[0]).toMatchObject({ text: { text: "✕ Rifiutata" }, url: NOTICE.link!.url });
     } finally {
       await adapter.stop();
     }
   });
 
-  it("Telegram: the button goes and how it ended is written in its place", async () => {
+  it("Telegram: the button reads how it ended and still opens the page", async () => {
     const adapter = await createChatAdapter(agent("telegram", { bot_token: "123:abc" }), DISPATCHER);
     await adapter.start();
     try {
@@ -394,11 +396,10 @@ describe("closing a notice, on every channel", () => {
           extra: {
             parse_mode: "HTML",
             link_preview_options: { is_disabled: true },
-            reply_markup: { inline_keyboard: [] },
+            reply_markup: { inline_keyboard: [[{ text: "Scaduta", url: NOTICE.link!.url }]] },
           },
         },
       ]);
-      expect(telegramClosedNoticeMessage(NOTICE, "Scaduta")).toContain("Scaduta");
     } finally {
       await adapter.stop();
     }
