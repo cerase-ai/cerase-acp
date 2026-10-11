@@ -262,7 +262,7 @@ const SUMMARY_HEADING_LINES: ReadonlyArray<RegExp> = [
  * During mid-session compaction OpenCode produces a structured session-state
  * block (Anchored Summary / Constraints & Preferences / Active Tools & State /
  * Next Actions / Technical Notes / Workspace Paths & Files). It is an internal
- * artefact, not an answer, and carries masked PII tokens (`<nome …>`),
+ * artefact, not an answer, and carries masked PII tokens (`⟦nome …⟧`),
  * workspace file paths and tool state. A reply that is this block is withheld
  * from the chat at the egress boundary and posted to the control-plane as the
  * rolling summary (see the sibling call in bridge.ts).

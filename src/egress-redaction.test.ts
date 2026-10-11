@@ -88,7 +88,7 @@ describe("M-AGENT-SUMMARY-LEAK-1: internal compaction-summary suppression", () =
   const summary = [
     "Anchored Summary",
     "The user asked for a story and a plan.",
-    "Constraints & Preferences: write in Italian for <nome lfyo>.",
+    "Constraints & Preferences: write in Italian for ⟦nome lfyo⟧.",
     "Active Tools & State: cerase-tasks idle.",
     "Next Actions: create the project, then the parts.",
     "Technical Notes: PDF render pending.",
@@ -115,9 +115,9 @@ describe("M-AGENT-SUMMARY-LEAK-1: internal compaction-summary suppression", () =
   });
 
   it("a leaked summary must never reach the user with its PII token", () => {
-    // The bug: this block was forwarded verbatim incl. <nome lfyo>. It must be
+    // The bug: this block was forwarded verbatim incl. ⟦nome lfyo⟧. It must be
     // classified as internal (→ the bridge withholds it), so the token is dropped.
-    expect(summary).toContain("<nome lfyo>");
+    expect(summary).toContain("⟦nome lfyo⟧");
     expect(isInternalSummaryBlock(summary)).toBe(true);
   });
 
