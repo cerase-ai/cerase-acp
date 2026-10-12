@@ -11,6 +11,12 @@
 //      queue to chunk before Discord's 2000-char limit)
 //   3. `idleMs` elapsed since the last push and buffer is non-empty
 //
+// None of the three cuts inside an attach marker, `[[attach: <path>]]`: the
+// path has a dot before its extension, and a marker cut in two is recognised in
+// neither half. A cut falls before a marker instead, and one still being
+// written waits for the rest of it (attachment.ts says how long a `[[` may stay
+// open before it counts as text).
+//
 // A caller can also ask the buffer to stop flushing for a while (see
 // `holdFrom`): some text can only be judged whole, and once a piece of it
 // has been sent there is nothing left to judge.
@@ -46,6 +52,8 @@ export interface StreamBufferOptions {
   wholeMessages?: boolean;
 }
 
+import { markerSpans, openMarkerStart } from "./attachment.js";
+
 const SENTENCE_END = /[.!?\n]/;
 
 export class StreamBuffer {
@@ -79,19 +87,24 @@ export class StreamBuffer {
     if (this.holding || this.wholeMessages) return;
     this.resetIdleTimer();
 
-    // Boundary flush
+    // Boundary flush, when a sentence ends outside every marker.
     if (this.buffer.length >= this.sentenceMinChars && SENTENCE_END.test(this.buffer)) {
-      this.flushAtLastBoundary();
-      return;
+      if (this.flushAtLastBoundary()) return;
     }
     // Hard-cap flush: when the buffer crosses the threshold, ship the
     // whole thing in one piece and let the downstream send-queue chunk
     // it further if needed. We don't want to slice on arbitrary char
-    // boundaries here.
+    // boundaries here. A marker still being written stays behind.
     if (this.buffer.length >= this.maxChars) {
       if (this.startsHold(this.buffer)) return;
-      this.emit(this.buffer);
-      this.buffer = "";
+      const open = openMarkerStart(this.buffer);
+      if (open < 0) {
+        this.emit(this.buffer);
+        this.buffer = "";
+      } else if (open > 0) {
+        this.emit(this.buffer.slice(0, open).trimEnd());
+        this.buffer = this.buffer.slice(open);
+      }
     }
   }
 
@@ -158,22 +171,46 @@ export class StreamBuffer {
     }
   }
 
-  private flushAtLastBoundary(): void {
+  /**
+   * Flush up to the last sentence end that lies outside every marker. False
+   * when there is none, so the caller can try the size cap instead.
+   */
+  private flushAtLastBoundary(): boolean {
     // Find the LAST sentence terminator so we ship as much complete
     // text as possible without breaking a mid-sentence.
+    const spans = markerSpans(this.buffer);
     let cut = -1;
     for (let i = this.buffer.length - 1; i >= 0; i--) {
       const c = this.buffer[i]!;
-      if (c === "." || c === "!" || c === "?" || c === "\n") {
-        cut = i;
-        break;
-      }
+      if (c !== "." && c !== "!" && c !== "?" && c !== "\n") continue;
+      if (spans.some((s) => s.start <= i && i < s.end)) continue;
+      cut = i;
+      break;
     }
-    if (cut < 0) return;
-    if (this.startsHold(this.buffer.slice(0, cut + 1))) return;
+    if (cut < 0) return false;
+    if (this.startsHold(this.buffer.slice(0, cut + 1))) return true;
     const segment = this.buffer.slice(0, cut + 1).trimEnd();
     this.buffer = this.buffer.slice(cut + 1).trimStart();
     if (segment.length > 0) this.emit(segment);
+    return true;
+  }
+
+  /**
+   * What the idle timer sends: everything, as `flush()` does, except a marker
+   * still being written at the end, which waits for the next push or for
+   * `end()`. The text before it goes now.
+   */
+  private flushIdle(): void {
+    if (this.ended || this.holding || this.buffer.length === 0) return;
+    const open = openMarkerStart(this.buffer);
+    if (open < 0) {
+      this.flush();
+      return;
+    }
+    if (open === 0) return;
+    if (this.startsHold(this.buffer.slice(0, open))) return;
+    this.emit(this.buffer.slice(0, open).trimEnd());
+    this.buffer = this.buffer.slice(open);
   }
 
   /**
@@ -200,7 +237,7 @@ export class StreamBuffer {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       this.idleTimer = undefined;
-      this.flush();
+      this.flushIdle();
     }, this.idleMs);
   }
 

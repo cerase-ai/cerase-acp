@@ -26,7 +26,7 @@ import {
   needsApprovalLink,
 } from "./approval-link.js";
 import { AttachOutcomeTracker } from "./attach-outcome.js";
-import { hasAttachments, parseAttachments } from "./attachment.js";
+import { parseAttachments } from "./attachment.js";
 import { type ChatAdapter, createChatAdapter, type DeliveryResult } from "./chat-adapter.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { type ConfigDiff, diffConfigs } from "./config-diff.js";
@@ -43,6 +43,7 @@ import {
   attachmentsUnsupportedNotice,
   attachmentUnreadableNotice,
   displayFileName,
+  unnamedFile,
 } from "./platform-notices.js";
 import { fetchRecentConversation } from "./recent-conversation.js";
 import { SessionManager } from "./session-manager.js";
@@ -451,8 +452,8 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         // which are an answer of their own, and withheld when it did not.
         let withheldWhole: DeliveryResult = { ok: true, withheld: true };
 
-        if (hasAttachments(text)) {
-          const parsed = parseAttachments(text);
+        const parsed = parseAttachments(text);
+        if (parsed.text !== text) {
           const containerName = `cerase-${agentId}`;
           // The upload happens after the model has finished writing, so it
           // cannot report the outcome itself -- the assistant's baseline is
@@ -462,7 +463,17 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // closing as a success.
           const lang = turnMeta.languageFor(agentId, userId);
           const relPaths = parsed.attachments;
+          const refused = parsed.refused;
           deliverAttachments = async () => {
+            // A marker that names nothing the bridge may read promised the
+            // person a file all the same, and is reported as one that could
+            // not be read.
+            for (const marker of refused) {
+              const fileName = marker.name || unnamedFile(lang);
+              logger.warn({ agentId, reason: marker.reason }, "attach: a marker named no file that can be sent");
+              await inner(attachmentUnreadableNotice(fileName, lang));
+              attachOutcomes.record(agentId, userId, { fileName, reason: marker.reason });
+            }
             for (const relPath of relPaths) {
               const fileName = displayFileName(relPath);
               try {
@@ -495,7 +506,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             }
           };
           text = parsed.text;
-          if (relPaths.length > 0) withheldWhole = { ok: true };
+          if (relPaths.length > 0 || refused.length > 0) withheldWhole = { ok: true };
           // If the reply was only the marker, don't send an empty message —
           // the attachment(s) are the whole reply, and nothing introduces them.
           if (!text) {

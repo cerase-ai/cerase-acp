@@ -11,6 +11,7 @@
 // text and cards together (developers.google.com/workspace/chat/create-messages).
 // An answer larger than that is the one that goes out in more than one.
 
+import { cutOutsideMarkers } from "./attachment.js";
 import { CONTINUATION } from "./send-queue.js";
 
 const PLACEHOLDER = "\u0000";
@@ -66,7 +67,8 @@ function chatBytes(markdown: string): number {
  * Cuts one answer into the Google Chat messages that carry it: the answer
  * whole, unless its Chat text is larger than a message may be. Then each part
  * is as large as fits, cut where a line ends, or else where a sentence does,
- * and ends with the continuation mark Discord's parts carry.
+ * never inside an attach marker, and ends with the continuation mark Discord's
+ * parts carry.
  */
 export function splitForGoogleChat(text: string): string[] {
   if (!text) return [];
@@ -82,6 +84,7 @@ export function splitForGoogleChat(text: string): string[] {
       if (cut > 0) cut += 1;
     }
     if (cut < fits / 2) cut = fits;
+    cut = cutOutsideMarkers(rest, cut);
     parts.push(rest.slice(0, cut).trimEnd() + CONTINUATION);
     rest = rest.slice(cut).trimStart();
   }

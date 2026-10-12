@@ -100,4 +100,15 @@ describe("splitForGoogleChat", () => {
   it("answers no message for no text", () => {
     expect(splitForGoogleChat("")).toEqual([]);
   });
+
+  it("never cuts inside an attach marker, which neither half would be recognised as", () => {
+    const marker = "[[attach: outputs/riepilogo-ottobre.pdf]]";
+    const words = "parola ".repeat(4284);
+    const answer = `${words}${marker} e altro.`;
+    expect(bytes(answer)).toBeGreaterThan(30_000);
+    const parts = splitForGoogleChat(answer);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) expect(part.split("[[").length).toBe(part.split("]]").length);
+    expect(parts.some((p) => p.includes(marker))).toBe(true);
+  });
 });

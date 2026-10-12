@@ -307,7 +307,13 @@ clock and the summaries, the status line says its plain sentence, and
   limit and uploads it after the text it came with. Only Discord uploads files.
   On any other channel, and whenever an upload fails, the person is told the file
   did not arrive, the turn reports a failure, and the assistant is told what
-  happened so it does not claim the file was delivered.
+  happened so it does not claim the file was delivered. A marker naming a path
+  outside the workspace or no path at all, and one left without its closing
+  `]]`, are removed from the text and reported the same way.
+- **Where a reply is cut.** The stream buffer, Discord's 2,000-character split
+  and Google Chat's 32,000-byte split never cut inside a marker: the cut moves
+  to before it, and a marker still streaming waits for its `]]`, unless its line
+  ends or it runs past 512 characters first, when it counts as text.
 - Both directions address the slot as the container `cerase-<agent id>` (agent
   `agent-1` → `cerase-agent-1`), whatever the `spawn` command says.
 

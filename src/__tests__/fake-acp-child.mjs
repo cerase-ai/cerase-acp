@@ -21,6 +21,11 @@
 //                              over ACP until the summary's first words.
 //   FAKE_SUMMARY_ID         — the messageId of that summary's chunk.
 //   FAKE_CHUNKS             — number of session/update chunks (default 3)
+//   FAKE_PIECES             — the reply as the pieces it streams in, a JSON
+//                              array of strings, instead of FAKE_REPLY cut into
+//                              FAKE_CHUNKS equal lengths. Where a piece ends is
+//                              where the bridge's buffer first sees the text
+//                              before it, which a test of a cut has to choose.
 //   FAKE_HANG_PROMPT        — set to "1" to NEVER answer session/prompt
 //                              (hung-child simulation for the watchdog)
 //   FAKE_CRASH_AFTER_PROMPT — set to "1" to exit(0) after responding to
@@ -133,6 +138,7 @@ if (EXIT_DELAY_MS > 0) {
 
 const REPLY = process.env.FAKE_REPLY ?? "hello world";
 const CHUNKS = parseInt(process.env.FAKE_CHUNKS ?? "3", 10);
+const PIECES = process.env.FAKE_PIECES ? JSON.parse(process.env.FAKE_PIECES) : undefined;
 const CRASH_AFTER_PROMPT = process.env.FAKE_CRASH_AFTER_PROMPT === "1";
 const DELAY_MS = parseInt(process.env.FAKE_DELAY_MS_PER_CHUNK ?? "0", 10);
 // FAKE_KIND chooses which session/update kind to emit:
@@ -441,9 +447,9 @@ rl.on("line", async (line) => {
             ? (msg.params?.prompt?.[0]?.text ?? "")
             : REPLY;
     const reply = process.env.FAKE_ECHO_SESSION === "1" ? `session=${sessionId}\n${answer}` : answer;
-    const pieces = [];
+    const pieces = PIECES ? [...PIECES] : [];
     const chunkLen = Math.max(1, Math.ceil(reply.length / CHUNKS));
-    for (let i = 0; i < reply.length; i += chunkLen) {
+    for (let i = 0; !PIECES && i < reply.length; i += chunkLen) {
       pieces.push(reply.slice(i, i + chunkLen));
     }
     for (const text of pieces) {

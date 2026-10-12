@@ -52,6 +52,11 @@ export function attachmentUnreadableNotice(fileName: string, lang: SupportedLang
   );
 }
 
+/** What a notice calls a file the assistant named without a name. */
+export function unnamedFile(lang: SupportedLang): string {
+  return pick({ it: "il file", en: "the file", es: "el archivo", fr: "le fichier" }, lang);
+}
+
 /** The channel itself carries no attachments; retrying will never help. */
 export function attachmentsUnsupportedNotice(fileName: string, lang: SupportedLang): string {
   return pick(

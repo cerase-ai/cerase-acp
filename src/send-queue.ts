@@ -10,6 +10,7 @@
 // the queue whole and is cut by the channel's own `split`, at Google's message
 // size instead of Discord's.
 
+import { cutOutsideMarkers } from "./attachment.js";
 import type { DeliveryResult } from "./chat-adapter.js";
 import { makeLogger } from "./logger.js";
 import { deliveryFailureNotice } from "./platform-notices.js";
@@ -35,7 +36,8 @@ export const SEND_RETRY_DELAYS_MS = [500, 1_000, 2_000];
 /**
  * Splits `text` into Discord-ready chunks. Each chunk except the last
  * carries a trailing `" ⏎"` continuation marker. Empty input returns
- * an empty array (the queue treats it as a no-op).
+ * an empty array (the queue treats it as a no-op). No cut falls inside an
+ * attach marker: one that would is moved to before the marker.
  */
 export function chunkForDiscord(text: string): string[] {
   if (!text) return [];
@@ -53,6 +55,7 @@ export function chunkForDiscord(text: string): string[] {
       if (cut > 0) cut += 1; // include the terminator
     }
     if (cut < CHUNK_BUDGET / 2) cut = CHUNK_BUDGET;
+    cut = cutOutsideMarkers(remaining, cut);
     chunks.push(remaining.slice(0, cut).trimEnd() + CONTINUATION);
     remaining = remaining.slice(cut).trimStart();
   }

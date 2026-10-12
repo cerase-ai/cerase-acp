@@ -263,3 +263,88 @@ describe("StreamBuffer", () => {
     });
   });
 });
+
+// A reply that names a file ends on its attach marker, and the marker holds a
+// dot, the one before the file's extension. The boundary flush cuts at the last
+// sentence end in the buffer, so a reply that reached 200 characters while the
+// marker was arriving went out as two messages, one ending inside the marker and
+// one starting with its tail, and neither half was recognised as a marker.
+describe("StreamBuffer and the attach marker", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SENTENCE =
+    "Ho preparato il riepilogo di ottobre, con le ore per progetto, le note del cliente e le scadenze del mese, ";
+  const HEAD = `${SENTENCE}${SENTENCE}come mi avevi chiesto per la riunione di lunedì.`;
+  const MARKER = "[[attach: outputs/riepilogo-ottobre.pdf]]";
+
+  /** Every piece holds as many `[[` as `]]`: no marker was cut in two. */
+  const whole = (pieces: string[]) => {
+    for (const p of pieces) expect(p.split("[[").length).toBe(p.split("]]").length);
+  };
+
+  it("cuts before a marker that arrives open, not at the dot of its extension", () => {
+    expect(HEAD.length).toBeGreaterThan(200);
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(`${HEAD} [[attach: outputs/riepilogo-ottobre.`);
+    buf.push("pdf]]");
+    buf.end();
+    whole(out);
+    expect(out).toEqual([HEAD, MARKER]);
+  });
+
+  it("does not cut at a dot inside a marker that is already closed", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(`${HEAD} ${MARKER} e la versione modificabile`);
+    buf.end();
+    whole(out);
+    expect(out).toEqual([HEAD, `${MARKER} e la versione modificabile`]);
+  });
+
+  it("keeps a marker still being written out of the idle flush, and sends it whole once it closes", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), idleMs: 500 });
+    buf.push("Eccolo: [[attach: outputs/riepilogo-otto");
+    vi.advanceTimersByTime(600);
+    expect(out).toEqual(["Eccolo:"]);
+    buf.push("bre.pdf]]");
+    vi.advanceTimersByTime(600);
+    whole(out);
+    expect(out).toEqual(["Eccolo:", MARKER]);
+  });
+
+  it("keeps a marker still being written out of the size cap", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), sentenceMinChars: 1_000_000, maxChars: 300 });
+    const words = "parola ".repeat(50).trimEnd();
+    buf.push(`${words} [[attach: outputs/riepilogo-ottobre.`);
+    buf.push("pdf]]");
+    buf.end();
+    whole(out);
+    expect(out).toEqual([words, MARKER]);
+  });
+
+  it("sends the whole reply when its only sentence end is inside the marker", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), idleMs: 500 });
+    const words = `${"ecco il file che mi hai chiesto con tutti i dettagli del mese ".repeat(4)}eccolo:`;
+    buf.push(`${words} [[attach: outputs/riepilogo-ottobre.`);
+    buf.push("pdf]]");
+    vi.advanceTimersByTime(600);
+    whole(out);
+    expect(out).toEqual([`${words} ${MARKER}`]);
+  });
+
+  it("lets a [[ that never closes on its line stream as text", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), sentenceMinChars: 20 });
+    buf.push("Scrivo [[ come simbolo.\nE la frase dopo arriva da sola.\n");
+    expect(out).toEqual(["Scrivo [[ come simbolo.\nE la frase dopo arriva da sola."]);
+  });
+});

@@ -48,6 +48,31 @@ describe("chunkForDiscord", () => {
     }
     expect(chunks.at(-1)!.endsWith(" ⏎")).toBe(false);
   });
+
+  // A marker cut across two messages is recognised in neither, so the person
+  // reads both halves as text and gets no file.
+  describe("never inside an attach marker", () => {
+    const whole = (chunks: string[], marker: string) => {
+      for (const c of chunks) expect(c.split("[[").length).toBe(c.split("]]").length);
+      expect(chunks.some((c) => c.includes(marker))).toBe(true);
+    };
+
+    it("moves a cut that would fall inside the marker to before it", () => {
+      const marker = "[[attach: outputs/riepilogo-ottobre.pdf]]";
+      const words = "parola ".repeat(283);
+      const chunks = chunkForDiscord(`${words}${marker} e altro.`);
+      whole(chunks, marker);
+      expect(chunks).toEqual([`${words.trimEnd()} ⏎`, `${marker} e altro.`]);
+    });
+
+    it("does not take a sentence end inside the marker's path for a place to cut", () => {
+      const marker = "[[attach: outputs/verbale n. 12.pdf]]";
+      const words = "parola ".repeat(270);
+      const chunks = chunkForDiscord(`${words}${marker} e poi ${"altro ".repeat(30)}`);
+      whole(chunks, marker);
+      expect(chunks[0]).toBe(`${words.trimEnd()} ⏎`);
+    });
+  });
 });
 
 describe("SendQueue", () => {
