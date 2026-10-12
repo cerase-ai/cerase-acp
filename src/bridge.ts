@@ -36,6 +36,7 @@ import { checkTenantCredit } from "./credit-check.js";
 import { Dispatcher, STOP_DRAIN_MS, STOP_NOTICE_MS } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
 import { type AgentFailure, type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
+import { KeptReplies } from "./kept-replies.js";
 import { makeLogger } from "./logger.js";
 import { PendingMessages, replayPending } from "./pending-messages.js";
 import {
@@ -55,6 +56,13 @@ import { TurnMetaTracker } from "./turn-meta.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.bridge");
+
+/**
+ * How often, while a reply is kept, the bridge asks whether its channel can
+ * carry it now, in ms. A channel that comes back with a start is sent to at
+ * once; this is for one whose client reconnects by itself.
+ */
+export const KEPT_REPLY_POLL_MS = 5_000;
 
 export interface RunBridgeOptions {
   config: BridgeConfig;
@@ -267,6 +275,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   const sessionManager = new SessionManager(config, undefined, { stateDir });
   // Messages that arrive while the bridge stops, kept for the next one.
   const pendingMessages = new PendingMessages(stateDir);
+  // Replies the agent's channel could not carry when they were written, kept
+  // until it can: see kept-replies.ts.
+  const keptReplies = new KeptReplies(stateDir);
   const turnMeta = new TurnMetaTracker();
   // Shared by the send path (which records) and the production dispatcher
   // (which reads at the end of the turn). Only the production dispatcher has
@@ -324,6 +335,225 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     }).catch((err) => {
       logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
     });
+  };
+
+  /**
+   * Whether an agent's channel can carry a message now, through `through` when
+   * one is named: the agent's adapter is that one, its last start did not fail,
+   * and it does not report itself down. An adapter with no readiness of its own
+   * is taken at its start.
+   */
+  const channelCanCarry = (agentId: string, through?: ChatAdapter): boolean => {
+    const current = adapters.get(agentId);
+    if (!current || (through !== undefined && current !== through)) return false;
+    if (startFailures.has(agentId)) return false;
+    return current.ready ? current.ready() : true;
+  };
+
+  /** A chunk with `{{APPROVAL_LINK}}` replaced, as it is sent now or kept for later. */
+  const withApprovalLink = async (agentId: string, chunk: string): Promise<string> => {
+    // Substitute {{APPROVAL_LINK}} in outgoing chunks with the signed link
+    // (fetched over the internal channel — never given to the agent). Only acts
+    // on chunks carrying the placeholder, so the common path pays no extra HTTP.
+    // Done before a reply is kept, so a kept reply carries the link of the
+    // approval it was written about rather than of the one pending when the
+    // channel is back.
+    if (!needsApprovalLink(chunk)) return chunk;
+    try {
+      const link = await fetchPendingApprovalLink(agentId, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+      });
+      return applyApprovalLink(chunk, link);
+    } catch (err) {
+      // Fetch failed (≠ no pending approval) — explain
+      // instead of silently stripping the placeholder.
+      logger.warn({ err, agentId }, "approval-link fetch failed — substituting fallback note");
+      return applyApprovalLinkFallback(chunk);
+    }
+  };
+
+  /**
+   * The send path of one person's chunks after the approval link, through
+   * `adapter`: the files a chunk names, the filters, and the channel. The send
+   * target is made once, here, because a channel may hand each turn something
+   * of its own through it (Workspace Chat's placeholder).
+   *
+   * It forwards the adapter's DeliveryResult so a swallowed send failure can
+   * surface. A chunk that was only files reports `{ ok: true }`: the files are
+   * the reply. A chunk withheld whole as an internal summary or as tool-call
+   * markup reports `withheld`, so the dispatcher knows the person received
+   * nothing.
+   */
+  const sendThrough = (adapter: ChatAdapter, agentId: string, userId: string) => {
+    const inner = adapter.makeSendTarget(userId);
+    return async (chunk: string): Promise<DeliveryResult> => {
+      let text = chunk;
+      // Upload workspace files referenced by [[attach: <path>]].
+      // The agent emits the marker; we read the file from its slot
+      // container's workspace and send it as a channel attachment, never
+      // showing the raw marker. Container name follows the cerase-<id>
+      // convention (agents.yaml id `agent-1` → container `cerase-agent-1`).
+      // The files this reply carries, held until the sentence introducing
+      // them has been sent. Uploading first put the file ABOVE the words
+      // "here it is", so a reader met a bare attachment and then the
+      // explanation for it. The text cannot simply be sent here instead:
+      // every filter below it -- the internal-summary suppression, the
+      // engine-identity redaction, the tool-call stripping -- runs after this
+      // point, and sending ahead of them would put unredacted text in the
+      // chat. So the upload moves down rather than the text moving up.
+      let deliverAttachments = async (): Promise<void> => {};
+      // What a chunk withheld whole reports: delivered when it carried files,
+      // which are an answer of their own, and withheld when it did not.
+      let withheldWhole: DeliveryResult = { ok: true, withheld: true };
+
+      const parsed = parseAttachments(text);
+      if (parsed.text !== text) {
+        const containerName = `cerase-${agentId}`;
+        // The upload happens after the model has finished writing, so it
+        // cannot report the outcome itself -- the assistant's baseline is
+        // explicit that it must not claim delivery. The person learns here
+        // that an attachment did not arrive. Every failure below is also
+        // recorded against the turn, which is what stops the same turn from
+        // closing as a success.
+        const lang = turnMeta.languageFor(agentId, userId);
+        const relPaths = parsed.attachments;
+        const refused = parsed.refused;
+        deliverAttachments = async () => {
+          // A marker that names nothing the bridge may read promised the
+          // person a file all the same, and is reported as one that could
+          // not be read.
+          for (const marker of refused) {
+            const fileName = marker.name || unnamedFile(lang);
+            logger.warn({ agentId, reason: marker.reason }, "attach: a marker named no file that can be sent");
+            await inner(attachmentUnreadableNotice(fileName, lang));
+            attachOutcomes.record(agentId, userId, { fileName, reason: marker.reason });
+          }
+          for (const relPath of relPaths) {
+            const fileName = displayFileName(relPath);
+            try {
+              const file = await readAgentWorkspaceFile(containerName, relPath);
+              if (adapter.sendFile) {
+                const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
+                if (!fileResult.ok) {
+                  logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
+                  await inner(attachmentFailedNotice(file.name, lang));
+                  attachOutcomes.record(agentId, userId, {
+                    fileName: file.name,
+                    reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
+                  });
+                }
+              } else {
+                await inner(attachmentsUnsupportedNotice(file.name, lang));
+                attachOutcomes.record(agentId, userId, {
+                  fileName: file.name,
+                  reason: "this channel cannot carry attachments at all",
+                });
+              }
+            } catch (err) {
+              logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
+              await inner(attachmentUnreadableNotice(fileName, lang));
+              attachOutcomes.record(agentId, userId, {
+                fileName,
+                reason: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        };
+        text = parsed.text;
+        if (relPaths.length > 0 || refused.length > 0) withheldWhole = { ok: true };
+        // If the reply was only the marker, don't send an empty message —
+        // the attachment(s) are the whole reply, and nothing introduces them.
+        if (!text) {
+          await deliverAttachments();
+
+          return { ok: true };
+        }
+      }
+      // The engine's internal context-compaction summary block (session
+      // state / next actions / workspace paths, and any masked PII token
+      // inside it) must never be user-facing. If this reply is that block,
+      // withhold it entirely — it is not an answer.
+      if (isInternalSummaryBlock(text)) {
+        logger.warn({ agentId }, "egress: suppressed an internal engine summary/compaction block");
+        // Capture it instead of discarding it.
+        captureSummary(agentId, text);
+        await deliverAttachments();
+
+        return withheldWhole;
+      }
+      // Deterministic engine-identity redaction — never reveal we run on
+      // OpenCode, even if the model ignored the prompt-level rule.
+      text = redactEngineIdentifiers(text);
+      // A tool call the model spelled out as text (DSML) must never reach
+      // the chat. Strip it; if that was the whole reply, withhold it (it is
+      // scaffolding, not an answer).
+      text = stripToolCallArtifacts(text);
+      if (!text.trim()) {
+        logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
+        await deliverAttachments();
+
+        return withheldWhole;
+      }
+      const textResult = await inner(text);
+      // A text the channel refused because it is down is kept whole, files
+      // and all, and the files go with it when it is sent again: see
+      // `resolveSendTarget`.
+      if (!textResult.ok && !channelCanCarry(agentId, adapter)) return textResult;
+      // After the text, always. A failed text send does not withhold the
+      // file: the file is the deliverable, and its own failure has its own
+      // notice.
+      await deliverAttachments();
+
+      return textResult;
+    };
+  };
+
+  /**
+   * Send what is kept for one person through the agent's adapter, for as long
+   * as its channel can carry it. The send target is made only when there is
+   * something to send.
+   */
+  const deliverKept = (agentId: string, userId: string): Promise<number> => {
+    const adapter = adapters.get(agentId);
+    if (!adapter) return Promise.resolve(0);
+    let send: ((text: string) => Promise<DeliveryResult>) | undefined;
+    return keptReplies.deliver(
+      agentId,
+      userId,
+      (text) => {
+        send ??= sendThrough(adapter, agentId, userId);
+        return send(text);
+      },
+      () => channelCanCarry(agentId, adapter),
+    );
+  };
+
+  /** Send what is kept for every person of an agent, when its channel can carry it. */
+  const deliverKeptFor = (agentId: string): void => {
+    if (!channelCanCarry(agentId)) return;
+    for (const userId of keptReplies.people(agentId)) {
+      deliverKept(agentId, userId).catch((err) => {
+        logger.error({ err, agentId, userId }, "sending the kept replies failed");
+      });
+    }
+  };
+
+  /**
+   * Keep a chunk the channel cannot carry, and answer the send queue that it
+   * is taken care of: the queue has nothing to retry and no failure to report,
+   * and the turn has answered the person, who reads the answer once the channel
+   * is back. An agent whose adapter was replaced while the chunk was being
+   * sent can carry it through the new one at once.
+   */
+  const keepReply = (agentId: string, userId: string, text: string): DeliveryResult => {
+    keptReplies.keep(agentId, userId, text);
+    logger.warn(
+      { agentId, userId, chars: text.length },
+      "the channel cannot carry this reply now — kept, and sent once it can",
+    );
+    deliverKeptFor(agentId);
+    return { ok: true, kept: true };
   };
 
   const productionDispatcher = new Dispatcher({
@@ -409,144 +639,21 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       if (!adapter) {
         throw new Error(`no chat adapter registered for agent "${agentId}"`);
       }
-      const inner = adapter.makeSendTarget(userId);
-      // Substitute {{APPROVAL_LINK}} in outgoing chunks with the signed link
-      // (fetched over the internal channel — never given to the agent). Only acts on chunks carrying the placeholder, so the
-      // common path pays no extra HTTP.
-      // The wrapper forwards the inner adapter's DeliveryResult so a
-      // swallowed send failure can surface. A chunk that was only files
-      // reports `{ ok: true }`: the files are the reply. A chunk withheld
-      // whole as an internal summary or as tool-call markup reports
-      // `withheld`, so the dispatcher knows the person received nothing.
+      const sendNow = sendThrough(adapter, agentId, userId);
+      // A chunk the channel cannot carry is kept and sent once it can, behind
+      // whatever is already kept for this person: a channel that refused its
+      // bot, a client that reports itself down, an adapter replaced since this
+      // turn began. A chunk the channel refuses while it can carry it is the
+      // channel's answer to that message, and goes back to the send queue.
       return async (chunk: string): Promise<DeliveryResult> => {
-        let text = chunk;
-        if (needsApprovalLink(text)) {
-          try {
-            const link = await fetchPendingApprovalLink(agentId, {
-              controlPlaneUrl,
-              internalSecret: requireControlPlaneSecret(),
-            });
-            text = applyApprovalLink(text, link);
-          } catch (err) {
-            // Fetch failed (≠ no pending approval) — explain
-            // instead of silently stripping the placeholder.
-            logger.warn({ err, agentId }, "approval-link fetch failed — substituting fallback note");
-            text = applyApprovalLinkFallback(text);
-          }
+        const text = await withApprovalLink(agentId, chunk);
+        if (keptReplies.pending(agentId, userId)) await deliverKept(agentId, userId);
+        if (keptReplies.has(agentId, userId) || !channelCanCarry(agentId, adapter)) {
+          return keepReply(agentId, userId, text);
         }
-        // Upload workspace files referenced by [[attach: <path>]].
-        // The agent emits the marker; we read the file from its slot
-        // container's workspace and send it as a channel attachment, never
-        // showing the raw marker. Container name follows the cerase-<id>
-        // convention (agents.yaml id `agent-1` → container `cerase-agent-1`).
-        // The files this reply carries, held until the sentence introducing
-        // them has been sent. Uploading first put the file ABOVE the words
-        // "here it is", so a reader met a bare attachment and then the
-        // explanation for it. The text cannot simply be sent here instead:
-        // every filter below it -- the internal-summary suppression, the
-        // engine-identity redaction, the tool-call stripping -- runs after this
-        // point, and sending ahead of them would put unredacted text in the
-        // chat. So the upload moves down rather than the text moving up.
-        let deliverAttachments = async (): Promise<void> => {};
-        // What a chunk withheld whole reports: delivered when it carried files,
-        // which are an answer of their own, and withheld when it did not.
-        let withheldWhole: DeliveryResult = { ok: true, withheld: true };
-
-        const parsed = parseAttachments(text);
-        if (parsed.text !== text) {
-          const containerName = `cerase-${agentId}`;
-          // The upload happens after the model has finished writing, so it
-          // cannot report the outcome itself -- the assistant's baseline is
-          // explicit that it must not claim delivery. The person learns here
-          // that an attachment did not arrive. Every failure below is also
-          // recorded against the turn, which is what stops the same turn from
-          // closing as a success.
-          const lang = turnMeta.languageFor(agentId, userId);
-          const relPaths = parsed.attachments;
-          const refused = parsed.refused;
-          deliverAttachments = async () => {
-            // A marker that names nothing the bridge may read promised the
-            // person a file all the same, and is reported as one that could
-            // not be read.
-            for (const marker of refused) {
-              const fileName = marker.name || unnamedFile(lang);
-              logger.warn({ agentId, reason: marker.reason }, "attach: a marker named no file that can be sent");
-              await inner(attachmentUnreadableNotice(fileName, lang));
-              attachOutcomes.record(agentId, userId, { fileName, reason: marker.reason });
-            }
-            for (const relPath of relPaths) {
-              const fileName = displayFileName(relPath);
-              try {
-                const file = await readAgentWorkspaceFile(containerName, relPath);
-                if (adapter.sendFile) {
-                  const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
-                  if (!fileResult.ok) {
-                    logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
-                    await inner(attachmentFailedNotice(file.name, lang));
-                    attachOutcomes.record(agentId, userId, {
-                      fileName: file.name,
-                      reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
-                    });
-                  }
-                } else {
-                  await inner(attachmentsUnsupportedNotice(file.name, lang));
-                  attachOutcomes.record(agentId, userId, {
-                    fileName: file.name,
-                    reason: "this channel cannot carry attachments at all",
-                  });
-                }
-              } catch (err) {
-                logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
-                await inner(attachmentUnreadableNotice(fileName, lang));
-                attachOutcomes.record(agentId, userId, {
-                  fileName,
-                  reason: err instanceof Error ? err.message : String(err),
-                });
-              }
-            }
-          };
-          text = parsed.text;
-          if (relPaths.length > 0 || refused.length > 0) withheldWhole = { ok: true };
-          // If the reply was only the marker, don't send an empty message —
-          // the attachment(s) are the whole reply, and nothing introduces them.
-          if (!text) {
-            await deliverAttachments();
-
-            return { ok: true };
-          }
-        }
-        // The engine's internal context-compaction summary block (session
-        // state / next actions / workspace paths, and any masked PII token
-        // inside it) must never be user-facing. If this reply is that block,
-        // withhold it entirely — it is not an answer.
-        if (isInternalSummaryBlock(text)) {
-          logger.warn({ agentId }, "egress: suppressed an internal engine summary/compaction block");
-          // Capture it instead of discarding it.
-          captureSummary(agentId, text);
-          await deliverAttachments();
-
-          return withheldWhole;
-        }
-        // Deterministic engine-identity redaction — never reveal we run on
-        // OpenCode, even if the model ignored the prompt-level rule.
-        text = redactEngineIdentifiers(text);
-        // A tool call the model spelled out as text (DSML) must never reach
-        // the chat. Strip it; if that was the whole reply, withhold it (it is
-        // scaffolding, not an answer).
-        text = stripToolCallArtifacts(text);
-        if (!text.trim()) {
-          logger.warn({ agentId }, "egress: suppressed a malformed tool-call (DSML) artifact");
-          await deliverAttachments();
-
-          return withheldWhole;
-        }
-        const textResult = await inner(text);
-        // After the text, always. A failed text send does not withhold the
-        // file: the file is the deliverable, and its own failure has its own
-        // notice.
-        await deliverAttachments();
-
-        return textResult;
+        const result = await sendNow(text);
+        if (!result.ok && !channelCanCarry(agentId, adapter)) return keepReply(agentId, userId, text);
+        return result;
       };
     },
   });
@@ -579,6 +686,26 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     });
   };
 
+  // An agent's channel has come up: what was kept for its people while it was
+  // down goes first, then the messages the previous bridge kept are answered,
+  // whose replies queue behind it.
+  const channelBack = (agentId: string): void => {
+    deliverKeptFor(agentId);
+    answerKept(agentId);
+  };
+
+  // A channel can come back with no start to say so, a client reconnecting by
+  // itself: while anything is kept, each agent is asked at this interval
+  // whether its channel can carry it now. The variable is for tests.
+  const keptPollEnv = Number(process.env.CERASE_ACP_KEPT_REPLY_POLL_MS?.trim() || "");
+  const keptPoll = setInterval(
+    () => {
+      for (const agentId of keptReplies.agents()) deliverKeptFor(agentId);
+    },
+    Number.isFinite(keptPollEnv) && keptPollEnv > 0 ? keptPollEnv : KEPT_REPLY_POLL_MS,
+  );
+  keptPoll.unref();
+
   // agentIds whose most recent start() rejected.
   // Tracked so getAgentStatus reports them ready:false (not null) even for
   // adapters that expose no ready() signal of their own. Cleared on a
@@ -606,7 +733,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         onRecovered: (agentId) => {
           startFailures.delete(agentId);
           credentialRejections.delete(agentId);
-          answerKept(agentId);
+          channelBack(agentId);
         },
         onStillFailing: (agentId) => startFailures.add(agentId),
         onTerminal: (agentId, rejection) => {
@@ -627,7 +754,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       startFailures.delete(agentId);
       credentialRejections.delete(agentId);
       supervisor?.noteStarted(agentId);
-      answerKept(agentId);
+      channelBack(agentId);
       return undefined;
     }
     startFailures.add(agentId);
@@ -825,6 +952,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       "every adapter failed to start and no internal endpoint is configured — nothing could report the reason, tearing down",
     );
     supervisor?.stop();
+    clearInterval(keptPoll);
     await Promise.allSettled([...Array.from(adapters.values()).map((a) => a.stop()), sessionManager.shutdown()]);
     throw new Error("all chat adapters failed to start");
   }
@@ -903,7 +1031,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         createAdapter,
         dispatcher: productionDispatcher,
         startAdapter,
-        forgetAgent: (agentId) => supervisor?.cancel(agentId),
+        forgetAgent: (agentId) => {
+          supervisor?.cancel(agentId);
+          const dropped = keptReplies.forget(agentId);
+          if (dropped > 0)
+            logger.warn({ agentId, dropped }, "auto-reload: an agent removed with replies still kept — dropped");
+        },
       });
       currentSnapshot = cloneConfig(nextConfig);
     } catch (err) {
@@ -941,6 +1074,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   const stop = async (): Promise<void> => {
     if (reloader) reloader.stop();
     supervisor?.stop();
+    clearInterval(keptPoll);
     await productionDispatcher.stop({
       limitMs: stopDrainMs,
       noticeMs: STOP_NOTICE_MS,

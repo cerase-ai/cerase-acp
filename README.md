@@ -439,6 +439,16 @@ applied agent by agent:
   every minute whether it is answering, and every message sent or received counts
   as an answer. After three minutes without one the adapter reports
   `ready: false`, even when the client still believes its socket is open.
+- **A reply the channel cannot carry is kept.** While an agent's adapter failed
+  to start, reports `ready: false`, or was replaced since the turn began, what
+  the bridge sends that agent's people (a reply, a heads-up, a notice spelled
+  out) is kept in `kept-replies.json` in the state directory instead of being
+  retried and lost. It is sent once the channel is back, in the order it was
+  written and once each: when the adapter starts, and otherwise at the first
+  check, every 5 seconds, that finds it ready. A later message to the same person
+  waits behind it. A message the channel refuses while it reports itself ready
+  is not kept: the send queue retries it and the person is told it was lost.
+  Code: `src/kept-replies.ts`.
 
 ### Internal HTTP endpoints
 
@@ -529,7 +539,7 @@ that rule keeps the agent from starting, and the log names the key and the value
 | Variable | Default | Description |
 |---|---|---|
 | `CERASE_ACP_CONFIG` | `/etc/cerase-acp/agents.yaml` | The configuration file. |
-| `CERASE_ACP_STATE_DIR` | `/var/lib/cerase-acp/state` in the image; unset outside it | Where `resumable-sessions.json`, `pending-messages.json` and `workspace-chat-spaces.json` are kept. Unset: the first two live in memory only, and messages arriving during a stop are not kept. |
+| `CERASE_ACP_STATE_DIR` | `/var/lib/cerase-acp/state` in the image; unset outside it | Where `resumable-sessions.json`, `pending-messages.json`, `kept-replies.json` and `workspace-chat-spaces.json` are kept. Unset: sessions and kept replies live in memory only, and messages arriving during a stop are not kept. |
 | `CERASE_ACP_LOG_LEVEL` | `info` | pino level; `silent` mutes the logs. Logs go to stderr. |
 | `CERASE_ACP_INTERNAL_SECRET` | unset | The bearer the internal endpoints require. Unset: the internal server, including `/healthz`, does not start. |
 | `CERASE_ACP_INTERNAL_PORT` | `7476` | Port of the internal server. |
@@ -543,6 +553,7 @@ that rule keeps the agent from starting, and the log names the key and the value
 | `CERASE_ACP_REACHABILITY_INTERVAL_MS` | `60000` | How often a Discord adapter probes Discord's gateway endpoint. |
 | `CERASE_ACP_REACHABILITY_STALE_MS` | `180000` | How long Discord may stay silent before the adapter reports `ready: false`. |
 | `CERASE_ACP_STOP_DRAIN_MS` | `180000` | How long a stop waits for turns in flight. Meant for tests. |
+| `CERASE_ACP_KEPT_REPLY_POLL_MS` | `5000` | How often, while a reply is kept, the bridge checks whether its channel can carry it. Meant for tests. |
 | `BRIDGE_E2E_TEST` | unset | `1` starts the test-injection server on 127.0.0.1:7474 and disables adapter retries. The bridge logs a warning when it is set. Never in production. |
 
 Channel credentials are not environment variables: they are in `agents.yaml`,

@@ -28,8 +28,12 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  * chat whole: an internal summary, or tool-call markup and nothing else. The
  * person received nothing from it, and a reply that was only such chunks has
  * not answered them.
+ *
+ * `kept` is set by the bridge's send path on a chunk the channel could not
+ * carry when it was written: it is kept and sent once the channel can
+ * (kept-replies.ts), so the person receives it, later.
  */
-export type DeliveryResult = { ok: true; withheld?: true; ref?: NoticeRef } | { ok: false; error: Error };
+export type DeliveryResult = { ok: true; withheld?: true; kept?: true; ref?: NoticeRef } | { ok: false; error: Error };
 
 /**
  * How a channel that takes each answer as one message cuts it: into one
