@@ -109,9 +109,19 @@ export function cachedTimezoneIfFresh(now: number = Date.now()): string | undefi
  * year-month-day, which sorts and cannot be read as month-first by an assistant
  * that has seen both conventions. The zone travels with the value so the reader
  * is never left to assume UTC.
+ *
+ * The day of the week is spelled out because an assistant asked to work one out
+ * from a date gets it wrong: on 13 October one called Wednesday 14 October
+ * «martedì». It is written in Italian, as the control-plane's `OrgClock::say()`
+ * writes days, because every sentence the platform writes for a person names
+ * them in Italian.
  */
 export function formatWallClock(at: number, timezone: string): string {
   try {
+    const weekday = new Intl.DateTimeFormat("it-IT", {
+      timeZone: timezone,
+      weekday: "long",
+    }).format(at);
     const date = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezone,
       year: "numeric",
@@ -125,11 +135,17 @@ export function formatWallClock(at: number, timezone: string): string {
       hour12: false,
     }).format(at);
 
-    return `${date} ${time} ${timezone}`;
+    return `${weekday} ${date} ${time} ${timezone}`;
   } catch {
     // An unknown zone name reaches here rather than throwing mid-turn. A turn
     // that fails because somebody typed a timezone wrong in a settings form is
-    // a worse outcome than a turn stamped in UTC.
-    return `${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    // a worse outcome than a turn stamped in UTC, so the UTC weekday is named
+    // the same way.
+    const utc = new Date(at);
+    const weekday = new Intl.DateTimeFormat("it-IT", {
+      timeZone: "UTC",
+      weekday: "long",
+    }).format(utc);
+    return `${weekday} ${utc.toISOString().slice(0, 16).replace("T", " ")} UTC`;
   }
 }

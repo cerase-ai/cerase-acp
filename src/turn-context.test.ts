@@ -76,7 +76,7 @@ describe("formatWallClock", () => {
   it("renders the organization's wall clock, not the machine's", () => {
     const at = Date.parse("2026-08-16T22:30:00Z");
 
-    expect(formatWallClock(at, "Europe/Rome")).toBe("2026-08-17 00:30 Europe/Rome");
+    expect(formatWallClock(at, "Europe/Rome")).toBe("lunedì 2026-08-17 00:30 Europe/Rome");
   });
 
   it("is the case the assistant used to get wrong", () => {
@@ -88,8 +88,37 @@ describe("formatWallClock", () => {
     expect(formatWallClock(at, "Europe/Rome")).toContain("2026-08-17");
   });
 
+  it("names the zone's day of the week, not the machine's", () => {
+    // In Europe/Rome it is already Wednesday just after midnight; UTC, and the
+    // machine the bridge runs on, is still on Tuesday. The weekday has to come
+    // from the organization's zone, the same as the date and the time.
+    const at = Date.parse("2026-10-13T22:30:00Z");
+
+    expect(formatWallClock(at, "Europe/Rome")).toBe("mercoledì 2026-10-14 00:30 Europe/Rome");
+  });
+
+  it("names every day of the week in Italian", () => {
+    const week: Array<[string, string]> = [
+      ["2026-10-12T12:00:00Z", "lunedì 2026-10-12 14:00 Europe/Rome"],
+      ["2026-10-13T12:00:00Z", "martedì 2026-10-13 14:00 Europe/Rome"],
+      ["2026-10-14T12:00:00Z", "mercoledì 2026-10-14 14:00 Europe/Rome"],
+      ["2026-10-15T12:00:00Z", "giovedì 2026-10-15 14:00 Europe/Rome"],
+      ["2026-10-16T12:00:00Z", "venerdì 2026-10-16 14:00 Europe/Rome"],
+      ["2026-10-17T12:00:00Z", "sabato 2026-10-17 14:00 Europe/Rome"],
+      ["2026-10-18T12:00:00Z", "domenica 2026-10-18 14:00 Europe/Rome"],
+    ];
+
+    for (const [at, expected] of week) {
+      expect(formatWallClock(Date.parse(at), "Europe/Rome")).toBe(expected);
+    }
+  });
+
   it("falls back to UTC rather than failing a turn on a bad zone name", () => {
     expect(formatWallClock(Date.parse("2026-08-16T10:00:00Z"), "Not/AZone")).toContain("UTC");
+  });
+
+  it("names the UTC weekday too when it falls back on a bad zone name", () => {
+    expect(formatWallClock(Date.parse("2026-08-16T10:00:00Z"), "Not/AZone")).toBe("domenica 2026-08-16 10:00 UTC");
   });
 });
 
@@ -161,10 +190,12 @@ describe("TurnMetaTracker.prefixWithContext", () => {
   it("carries the clock when it has one and stays silent when it does not", async () => {
     const tracker = new TurnMetaTracker();
 
-    const withClock = await tracker.prefixWithContext("a", "u", "hello", { clock: "2026-08-17 00:30 Europe/Rome" });
+    const withClock = await tracker.prefixWithContext("a", "u", "hello", {
+      clock: "lunedì 2026-08-17 00:30 Europe/Rome",
+    });
     const withoutClock = await tracker.prefixWithContext("b", "u", "hello", {});
 
-    expect(withClock).toContain("now=2026-08-17 00:30 Europe/Rome");
+    expect(withClock).toContain("now=lunedì 2026-08-17 00:30 Europe/Rome");
     expect(withoutClock).not.toContain("now=");
   });
 });
