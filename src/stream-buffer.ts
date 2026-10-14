@@ -56,6 +56,22 @@ import { markerSpans, openMarkerStart } from "./attachment.js";
 
 const SENTENCE_END = /[.!?\n]/;
 
+// The start of a marker naming a file, matched loosely because the marker may
+// still be arriving: the buffer only has to know that the words it just held
+// are introducing a file, not yet where that file lives.
+const ATTACH_START = /\[\[\s*attach\s*:/i;
+
+/**
+ * How long a held-back piece waits for the next words of the reply before it
+ * goes out on its own. A sentence that ends just before a file's `[[attach: …]]`
+ * marker is the sentence that introduces the file, and the marker arrives in a
+ * later push: this is the window in which it may follow, so the two can leave as
+ * one piece. It is long enough to cover the gap between one reply's last words
+ * and its marker, and short enough that a model which stopped mid-reply never
+ * keeps a finished sentence from the person.
+ */
+export const MARKER_HOLD_MS = 1500;
+
 export class StreamBuffer {
   private buffer = "";
   private idleTimer?: NodeJS.Timeout;
@@ -68,6 +84,14 @@ export class StreamBuffer {
   private readonly wholeMessages: boolean;
   private ended = false;
   private holding = false;
+  // The cut of a piece held back for the next non-whitespace text, -1 when none.
+  // The buffer is left whole; the piece leaves when the next words are read, or
+  // when the hold ceiling passes.
+  private deferredCut = -1;
+  private deferredTimer?: NodeJS.Timeout;
+  // No boundary cut may fall before this index: set once a held sentence is
+  // known to introduce an attach marker, so it cannot be split from it again.
+  private cutFloor = 0;
 
   constructor(opts: StreamBufferOptions) {
     this.onFlush = opts.onFlush;
@@ -81,7 +105,21 @@ export class StreamBuffer {
 
   push(text: string): void {
     if (this.ended || !text) return;
-    this.buffer += text;
+
+    // A held-back piece waits for the next words, which say whether it is the
+    // sentence a file marker introduces.
+    if (this.deferredCut >= 0) {
+      if (text.trim().length === 0) {
+        // Only whitespace: nothing to decide, and it cannot open a marker.
+        this.buffer += text;
+        return;
+      }
+      this.buffer += text;
+      this.settleDeferred();
+    } else {
+      this.buffer += text;
+    }
+
     // Held text waits for release() or end(); no boundary, cap or timer
     // applies to it, nor to any text of a buffer that keeps messages whole.
     if (this.holding || this.wholeMessages) return;
@@ -89,7 +127,7 @@ export class StreamBuffer {
 
     // Boundary flush, when a sentence ends outside every marker.
     if (this.buffer.length >= this.sentenceMinChars && SENTENCE_END.test(this.buffer)) {
-      if (this.flushAtLastBoundary()) return;
+      if (this.holdAtBoundary()) return;
     }
     // Hard-cap flush: when the buffer crosses the threshold, ship the
     // whole thing in one piece and let the downstream send-queue chunk
@@ -101,9 +139,11 @@ export class StreamBuffer {
       if (open < 0) {
         this.emit(this.buffer);
         this.buffer = "";
+        this.cutFloor = 0;
       } else if (open > 0) {
         this.emit(this.buffer.slice(0, open).trimEnd());
         this.buffer = this.buffer.slice(open);
+        this.cutFloor = 0;
       }
     }
   }
@@ -119,6 +159,10 @@ export class StreamBuffer {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
+    // An explicit flush sends what is held together with the rest.
+    this.cancelDeferredTimer();
+    this.deferredCut = -1;
+    this.cutFloor = 0;
     if (this.startsHold(this.buffer)) return;
     this.emit(this.buffer.trimEnd());
     this.buffer = "";
@@ -132,6 +176,7 @@ export class StreamBuffer {
     if (!this.holding) return;
     const held = this.buffer.trim();
     this.buffer = "";
+    this.cutFloor = 0;
     this.holding = false;
     if (held.length > 0) this.onHeld(held);
   }
@@ -147,7 +192,10 @@ export class StreamBuffer {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
+    this.cancelDeferredTimer();
+    this.deferredCut = -1;
     this.buffer = "";
+    this.cutFloor = 0;
     this.holding = false;
   }
 
@@ -157,6 +205,9 @@ export class StreamBuffer {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
+    // end() sends what is held together with the rest.
+    this.cancelDeferredTimer();
+    this.deferredCut = -1;
     if (this.holding) {
       this.release();
       return;
@@ -168,19 +219,24 @@ export class StreamBuffer {
       }
       this.emit(this.buffer.trimEnd());
       this.buffer = "";
+      this.cutFloor = 0;
     }
   }
 
   /**
-   * Flush up to the last sentence end that lies outside every marker. False
-   * when there is none, so the caller can try the size cap instead.
+   * The sentence-boundary flush, held back for the next words. The piece it
+   * would send is the head of the buffer up to the last sentence end; a sentence
+   * that ends just before a file's `[[attach: …]]` marker must leave together
+   * with that marker, and the marker arrives in a later push. A piece whose
+   * marker is already after it is kept with no wait. False when there is no
+   * boundary to cut at, so the caller can try the size cap instead.
    */
-  private flushAtLastBoundary(): boolean {
+  private holdAtBoundary(): boolean {
     // Find the LAST sentence terminator so we ship as much complete
     // text as possible without breaking a mid-sentence.
     const spans = markerSpans(this.buffer);
     let cut = -1;
-    for (let i = this.buffer.length - 1; i >= 0; i--) {
+    for (let i = this.buffer.length - 1; i >= this.cutFloor; i--) {
       const c = this.buffer[i]!;
       if (c !== "." && c !== "!" && c !== "?" && c !== "\n") continue;
       if (spans.some((s) => s.start <= i && i < s.end)) continue;
@@ -189,19 +245,71 @@ export class StreamBuffer {
     }
     if (cut < 0) return false;
     if (this.startsHold(this.buffer.slice(0, cut + 1))) return true;
+    // The marker is already here: keep the sentence with it, and let no cut
+    // split the two again.
+    if (ATTACH_START.test(this.buffer.slice(cut + 1))) {
+      this.cutFloor = cut + 1;
+      return true;
+    }
+    this.defer(cut);
+    return true;
+  }
+
+  /**
+   * The next non-whitespace words after a held-back piece have arrived. When the
+   * buffer from the cut on opens the marker of the file the sentence introduces,
+   * the sentence stays with it and leaves in the same piece; otherwise the
+   * sentence goes out now, as it always did.
+   */
+  private settleDeferred(): void {
+    this.cancelDeferredTimer();
+    const cut = this.deferredCut;
+    this.deferredCut = -1;
+    if (cut < 0) return;
+    if (ATTACH_START.test(this.buffer.slice(cut + 1))) {
+      this.cutFloor = cut + 1;
+      return;
+    }
     const segment = this.buffer.slice(0, cut + 1).trimEnd();
     this.buffer = this.buffer.slice(cut + 1).trimStart();
-    if (segment.length > 0) this.emit(segment);
-    return true;
+    this.cutFloor = 0;
+    this.emit(segment);
+  }
+
+  /** Hold the piece ending at `cut` for the next words, up to the ceiling. */
+  private defer(cut: number): void {
+    this.deferredCut = cut;
+    if (this.deferredTimer) clearTimeout(this.deferredTimer);
+    this.deferredTimer = setTimeout(() => {
+      this.deferredTimer = undefined;
+      const held = this.deferredCut;
+      this.deferredCut = -1;
+      if (held < 0 || this.ended) return;
+      // The model paused: the finished piece must not wait any longer.
+      const segment = this.buffer.slice(0, held + 1).trimEnd();
+      this.buffer = this.buffer.slice(held + 1).trimStart();
+      this.cutFloor = 0;
+      this.emit(segment);
+      if (this.buffer.length > 0 && !this.holding && !this.wholeMessages) this.resetIdleTimer();
+    }, MARKER_HOLD_MS);
+  }
+
+  private cancelDeferredTimer(): void {
+    if (this.deferredTimer) {
+      clearTimeout(this.deferredTimer);
+      this.deferredTimer = undefined;
+    }
   }
 
   /**
    * What the idle timer sends: everything, as `flush()` does, except a marker
    * still being written at the end, which waits for the next push or for
-   * `end()`. The text before it goes now.
+   * `end()`. The text before it is held for the next words rather than sent
+   * without them, since they may be the marker of the file it introduces.
    */
   private flushIdle(): void {
     if (this.ended || this.holding || this.buffer.length === 0) return;
+    if (this.deferredCut >= 0) return;
     const open = openMarkerStart(this.buffer);
     if (open < 0) {
       this.flush();
@@ -209,8 +317,7 @@ export class StreamBuffer {
     }
     if (open === 0) return;
     if (this.startsHold(this.buffer.slice(0, open))) return;
-    this.emit(this.buffer.slice(0, open).trimEnd());
-    this.buffer = this.buffer.slice(open);
+    this.defer(open - 1);
   }
 
   /**

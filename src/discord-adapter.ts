@@ -179,6 +179,9 @@ export function createDiscordAdapter(
 
   return {
     agentId: agent.id,
+    // Discord caps a message's content at 2000 characters, so a file's caption
+    // may be that long before the text has to go as a message of its own.
+    captionLimit: 2000,
     // Whether Discord can carry a message now. This is what tells "Attivo ma
     // disconnesso" apart from a healthy Luigi in the admin.
     ready() {

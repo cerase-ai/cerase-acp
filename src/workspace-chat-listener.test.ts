@@ -1028,7 +1028,10 @@ describe("workspace-chat: the line that says the assistant is writing", () => {
     };
     const first = "Ecco la prima parte del riepilogo della settimana. ".repeat(6).trim();
     turns[0]!.say(first);
-    await vi.waitFor(() => expect(google.edits).toHaveLength(1));
+    // A finished sentence is held for the words after it, in case they are the
+    // marker of a file it introduces, and the hold ceiling releases it with no
+    // further words: wait for that, not the old immediate flush.
+    await vi.waitFor(() => expect(google.edits).toHaveLength(1), { timeout: 5000 });
     expect(turns[0]!.ended).toBe(false);
     expect(postedWhenEdited).toEqual([BALLOON, first]);
     expect(google.shown()).toEqual([ELLIPSIS, first]);

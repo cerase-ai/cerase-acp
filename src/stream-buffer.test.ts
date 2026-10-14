@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { StreamBuffer } from "./stream-buffer.js";
+import { MARKER_HOLD_MS, StreamBuffer } from "./stream-buffer.js";
 
 describe("StreamBuffer", () => {
   beforeEach(() => {
@@ -20,8 +20,11 @@ describe("StreamBuffer", () => {
     // First chunk: short — no sentence boundary, no flush yet.
     buf.push("hello there. ");
     expect(out).toEqual([]);
-    // Add more so total >= 20 then hit a sentence end.
+    // Add more so total >= 20 then hit a sentence end. The piece is held back
+    // for the words after it, which may be the marker of a file it introduces.
     buf.push("this is a longer chunk. ");
+    expect(out).toEqual([]);
+    buf.push("and this sends it.");
     expect(out).toEqual(["hello there. this is a longer chunk."]);
   });
 
@@ -123,6 +126,9 @@ describe("StreamBuffer", () => {
         idleMs: 500,
       });
       buf.push(`this is enough${terminator} `);
+      // Held for the next words, then sent when they are prose.
+      expect(out).toEqual([]);
+      buf.push("and this sends it.");
       expect(out.length).toBe(1);
     }
   });
@@ -240,6 +246,9 @@ describe("StreamBuffer", () => {
       buf.release();
       expect(kept).toEqual(["HOLD\nkept until released."]);
       buf.push("after the release this flushes normally. ");
+      // Held for the next words, as every sentence is now.
+      expect(out).toEqual([]);
+      buf.push("E questa la fa uscire.");
       expect(out).toEqual(["after the release this flushes normally."]);
       buf.end();
       expect(kept).toHaveLength(1);
@@ -265,10 +274,9 @@ describe("StreamBuffer", () => {
 });
 
 // A reply that names a file ends on its attach marker, and the marker holds a
-// dot, the one before the file's extension. The boundary flush cuts at the last
-// sentence end in the buffer, so a reply that reached 200 characters while the
-// marker was arriving went out as two messages, one ending inside the marker and
-// one starting with its tail, and neither half was recognised as a marker.
+// dot, the one before the file's extension. No flush may cut there, and no
+// flush may split the sentence before the marker from the marker: the two leave
+// as one piece, so the file always follows the words that introduce it.
 describe("StreamBuffer and the attach marker", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -295,7 +303,9 @@ describe("StreamBuffer and the attach marker", () => {
     buf.push("pdf]]");
     buf.end();
     whole(out);
-    expect(out).toEqual([HEAD, MARKER]);
+    // The sentence and the marker are one piece: no cut, and no split between
+    // the words and the file they introduce.
+    expect(out).toEqual([`${HEAD} ${MARKER}`]);
   });
 
   it("does not cut at a dot inside a marker that is already closed", () => {
@@ -304,7 +314,7 @@ describe("StreamBuffer and the attach marker", () => {
     buf.push(`${HEAD} ${MARKER} e la versione modificabile`);
     buf.end();
     whole(out);
-    expect(out).toEqual([HEAD, `${MARKER} e la versione modificabile`]);
+    expect(out).toEqual([`${HEAD} ${MARKER} e la versione modificabile`]);
   });
 
   it("keeps a marker still being written out of the idle flush, and sends it whole once it closes", () => {
@@ -312,11 +322,13 @@ describe("StreamBuffer and the attach marker", () => {
     const buf = new StreamBuffer({ onFlush: (s) => out.push(s), idleMs: 500 });
     buf.push("Eccolo: [[attach: outputs/riepilogo-otto");
     vi.advanceTimersByTime(600);
-    expect(out).toEqual(["Eccolo:"]);
+    // The words before the open marker wait for the marker's tail, so the two
+    // can leave as one piece.
+    expect(out).toEqual([]);
     buf.push("bre.pdf]]");
-    vi.advanceTimersByTime(600);
+    buf.end();
     whole(out);
-    expect(out).toEqual(["Eccolo:", MARKER]);
+    expect(out).toEqual([`Eccolo: ${MARKER}`]);
   });
 
   it("keeps a marker still being written out of the size cap", () => {
@@ -345,6 +357,60 @@ describe("StreamBuffer and the attach marker", () => {
     const out: string[] = [];
     const buf = new StreamBuffer({ onFlush: (s) => out.push(s), sentenceMinChars: 20 });
     buf.push("Scrivo [[ come simbolo.\nE la frase dopo arriva da sola.\n");
+    buf.end();
     expect(out).toEqual(["Scrivo [[ come simbolo.\nE la frase dopo arriva da sola."]);
+  });
+});
+
+// The sentence that introduces a file ends on its full stop, and the marker for
+// the file arrives in the pushes after it. A boundary flush that went out at the
+// full stop would leave the marker alone in the next piece, and the file would
+// follow the words with no sentence to introduce it. The piece a flush would
+// send is held for the next words instead, so that a marker can join the
+// sentence it belongs to.
+describe("StreamBuffer and the sentence before a marker", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const MARKER = "[[attach: outputs/prova.pdf]]";
+  const PARAGRAPH =
+    "Ho preparato il riepilogo di ottobre con le ore per progetto, le note del cliente e le scadenze del mese, " +
+    "e l'ho ricontrollato voce per voce prima della riunione di lunedì, così da poter rispondere a ogni domanda " +
+    "del team con i numeri aggiornati e le differenze rispetto al mese scorso, e adesso te lo mando come allegato.";
+
+  it("sends the last sentence and its marker as one piece when the model streams them in separate pushes", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    // A few words a push, the way a model streams: the full stop and the marker
+    // fall in different pushes, which is where the file used to lose its words.
+    for (const part of `${PARAGRAPH} ${MARKER}`.match(/\S+\s*/g) ?? []) buf.push(part);
+    buf.end();
+    expect(out).toEqual([`${PARAGRAPH} ${MARKER}`]);
+  });
+
+  it("flushes a held sentence as soon as the next words are prose, not a marker", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), sentenceMinChars: 20, idleMs: 500 });
+    buf.push("Questa è una frase abbastanza lunga. ");
+    // Held for the next words, which may be the marker of the file it names.
+    expect(out).toEqual([]);
+    buf.push("E poi arriva dell'altro testo, senza alcun allegato.");
+    expect(out).toEqual(["Questa è una frase abbastanza lunga."]);
+  });
+
+  it("flushes a held sentence when the ceiling passes with nothing new", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), sentenceMinChars: 20, idleMs: 500 });
+    buf.push("Questa è una frase abbastanza lunga. ");
+    expect(out).toEqual([]);
+    // The idle timer no longer sends it: the hold ceiling does, and no later.
+    vi.advanceTimersByTime(MARKER_HOLD_MS - 1);
+    expect(out).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(out).toEqual(["Questa è una frase abbastanza lunga."]);
   });
 });

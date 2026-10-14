@@ -133,6 +133,17 @@ export interface ChatAdapter {
   wholeAnswers?: WholeAnswers;
 
   /**
+   * The most characters a file message's text may hold on this channel. Absent
+   * means the channel takes no caption: the bridge then always sends the reply's
+   * text as a message of its own and the file bare after it. Present, the bridge
+   * may put the text that introduces a file on the first file it uploads, so the
+   * sentence and the file arrive as one message instead of two. Discord's
+   * message content limit is 2000 characters, which is what its adapter
+   * declares.
+   */
+  captionLimit?: number;
+
+  /**
    * Upload a workspace file as a chat attachment to `userId`. Discord uses
    * `channel.send({ files })`; the web adapter reports delivery and sends
    * nothing, because the console links the file from the transcript.

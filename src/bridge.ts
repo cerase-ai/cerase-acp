@@ -394,15 +394,20 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // container's workspace and send it as a channel attachment, never
       // showing the raw marker. Container name follows the cerase-<id>
       // convention (agents.yaml id `agent-1` → container `cerase-agent-1`).
-      // The files this reply carries, held until the sentence introducing
-      // them has been sent. Uploading first put the file ABOVE the words
-      // "here it is", so a reader met a bare attachment and then the
-      // explanation for it. The text cannot simply be sent here instead:
-      // every filter below it -- the internal-summary suppression, the
-      // engine-identity redaction, the tool-call stripping -- runs after this
-      // point, and sending ahead of them would put unredacted text in the
-      // chat. So the upload moves down rather than the text moving up.
-      let deliverAttachments = async (): Promise<void> => {};
+      //
+      // The sentence that introduces a file is the file's caption when the
+      // channel declares a caption limit and the sentence fits within it: the
+      // first file then carries the text in the one message the file already
+      // is, so the reader meets the words and the file together. A text too
+      // long to be a caption, or a channel with no caption limit, keeps the
+      // older order -- the text as its own message, the files bare after it.
+      // The text is not sent here either way: every filter below -- the
+      // internal-summary suppression, the engine-identity redaction, the
+      // tool-call stripping -- runs after this point, and a caption built
+      // ahead of them could put unredacted text in the chat. The caption is
+      // therefore chosen once they have all run, on the same text the channel
+      // would otherwise have received.
+      let deliverAttachments = async (_caption?: string): Promise<DeliveryResult | undefined> => undefined;
       // What a chunk withheld whole reports: delivered when it carried files,
       // which are an answer of their own, and withheld when it did not.
       let withheldWhole: DeliveryResult = { ok: true, withheld: true };
@@ -419,7 +424,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         const lang = turnMeta.languageFor(agentId, userId);
         const relPaths = parsed.attachments;
         const refused = parsed.refused;
-        deliverAttachments = async () => {
+        deliverAttachments = async (caption?: string): Promise<DeliveryResult | undefined> => {
           // A marker that names nothing the bridge may read promised the
           // person a file all the same, and is reported as one that could
           // not be read.
@@ -429,14 +434,29 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
             await inner(attachmentUnreadableNotice(fileName, lang));
             attachOutcomes.record(agentId, userId, { fileName, reason: marker.reason });
           }
-          for (const relPath of relPaths) {
+          // What the text send answered when a refused caption fell back to it:
+          // the caller returns it, so a channel that also went down lets the
+          // whole reply be kept, files and all.
+          let captionFallback: DeliveryResult | undefined;
+          for (const [index, relPath] of relPaths.entries()) {
             const fileName = displayFileName(relPath);
             try {
               const file = await readAgentWorkspaceFile(containerName, relPath);
               if (adapter.sendFile) {
-                const fileResult = await adapter.sendFile(userId, { name: file.name, bytes: file.bytes });
+                // Only the first file may carry the text: a caption on a second
+                // would repeat the sentence under a file it already introduced.
+                const fileCaption = index === 0 ? caption : undefined;
+                const fileResult = await adapter.sendFile(userId, {
+                  name: file.name,
+                  bytes: file.bytes,
+                  ...(fileCaption !== undefined ? { caption: fileCaption } : {}),
+                });
                 if (!fileResult.ok) {
                   logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
+                  // The caption was the only copy of the words, so a refused
+                  // captioned upload has to deliver them as their own message,
+                  // before the person is told the file did not arrive.
+                  if (fileCaption !== undefined) captionFallback = await inner(fileCaption);
                   await inner(attachmentFailedNotice(file.name, lang));
                   attachOutcomes.record(agentId, userId, {
                     fileName: file.name,
@@ -459,6 +479,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
               });
             }
           }
+          return captionFallback;
         };
         text = parsed.text;
         if (relPaths.length > 0 || refused.length > 0) withheldWhole = { ok: true };
@@ -494,6 +515,27 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         await deliverAttachments();
 
         return withheldWhole;
+      }
+      // The caption path: when the chunk names at least one file, the channel
+      // declares a caption limit that takes no more than the filtered text, and
+      // that text is non-empty and within the limit, the first file carries the
+      // text and the chunk goes out as that one message. The text is not sent
+      // through `inner` then, so the sentence is not repeated ahead of the file
+      // it introduces.
+      const captionLimit = adapter.captionLimit;
+      const caption =
+        parsed.attachments.length > 0 &&
+        adapter.sendFile !== undefined &&
+        captionLimit !== undefined &&
+        text.length > 0 &&
+        text.length <= captionLimit
+          ? text
+          : undefined;
+      if (caption !== undefined) {
+        // The file send's own failure notice is handled inside; what it returns
+        // is the text send's outcome only when a refused caption had to fall
+        // back to it.
+        return (await deliverAttachments(caption)) ?? { ok: true };
       }
       const textResult = await inner(text);
       // A text the channel refused because it is down is kept whole, files
