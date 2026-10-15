@@ -1280,14 +1280,23 @@ export class Dispatcher {
    * The stream reports whether the turn ended on such a block, which is what
    * decides the retry.
    *
+   * A tool starting flushes the buffer on every channel, so the text before it
+   * reaches the person as a message of its own as the tool starts: a tool can
+   * run for minutes, and the person reads what the assistant is doing while it
+   * does, instead of finding it at the top of the answer once the work it
+   * announces is over. Without the flush the text would wait for the buffer's
+   * idle or sentence timer, and a short tool would let the text after it run
+   * into the same buffer, so the two would arrive glued as one message.
+   *
+   * Flushing is not sending: the text is still judged by the same holds, and a
+   * hold that is on when the tool starts is left in place — `flush()` does
+   * nothing while one is.
+   *
    * On a channel that takes each answer as one message (`whole`), nothing is
    * flushed as it streams. The text is judged by the same holds when the agent
    * starts a new message, starts a tool, or ends the turn, and what is
    * delivered goes to the queue in one piece only when a tool starts or the
-   * turn ends. The text before a tool is therefore a message of its own, sent
-   * as the tool starts: a tool can run for minutes, and the person reads what
-   * the assistant is doing while it does, instead of finding it at the top of
-   * the answer once the work it announces is over.
+   * turn ends.
    *
    * `push` answers whether the update carried reply text.
    */
@@ -1357,9 +1366,9 @@ export class Dispatcher {
     let messageId: string | undefined;
     return {
       push: (update) => {
-        if (whole && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")) {
+        if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
           buffer.flush();
-          sendAnswer();
+          if (whole) sendAnswer();
           return false;
         }
         if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;

@@ -762,7 +762,8 @@ describe("Discord keeps its own pace", () => {
     expect(await handled).toEqual({ ok: true });
     expect(pieces.length).toBeGreaterThanOrEqual(8);
     expect(sent.map((s) => s.text)).toEqual([NARRATION, ...pieces]);
-    // The text before the tool went out on the buffer's idle timer, not when the tool started.
-    expect(sent[0]!.at - toolAt).toBe(500);
+    // The text before the tool went out when the tool started, no longer waiting
+    // for the buffer's idle timer.
+    expect(sent[0]!.at - toolAt).toBe(0);
   });
 });
