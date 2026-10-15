@@ -11,6 +11,10 @@
 //      queue to chunk before Discord's 2000-char limit)
 //   3. `idleMs` elapsed since the last push and buffer is non-empty
 //
+// A piece cut at a sentence end keeps the marks glued to that end — a closing
+// bracket, a quotation mark, a markdown run — and waits for the words after it
+// while those marks are all that follows, so the two leave as one piece.
+//
 // None of the three cuts inside an attach marker, `[[attach: <path>]]`: the
 // path has a dot before its extension, and a marker cut in two is recognised in
 // neither half. A cut falls before a marker instead, and one still being
@@ -55,6 +59,15 @@ export interface StreamBufferOptions {
 import { markerSpans, openMarkerStart } from "./attachment.js";
 
 const SENTENCE_END = /[.!?\n]/;
+
+// The marks that close a sentence when they stand right after its terminator,
+// with no whitespace between: closing brackets, final and initial quotation
+// marks, straight quotes, and the runs markdown uses for emphasis, code and
+// strikethrough. An opening mark is preceded by a space, so a mark glued to the
+// full stop can only close what the sentence opened. A piece sent without it
+// leaves the mark alone in the next message, or splits a bold run so neither
+// half renders.
+const CLOSES_SENTENCE = /[\p{Pe}\p{Pf}\p{Pi}"'*_`~]/u;
 
 // The start of a marker naming a file, matched loosely because the marker may
 // still be arriving: the buffer only has to know that the words it just held
@@ -244,6 +257,9 @@ export class StreamBuffer {
       break;
     }
     if (cut < 0) return false;
+    // A sentence end is closed by the marks glued to it, and those marks belong
+    // to the sentence: extend the cut over them before anything else reads it.
+    cut = this.closedAt(cut);
     if (this.startsHold(this.buffer.slice(0, cut + 1))) return true;
     // The marker is already here: keep the sentence with it, and let no cut
     // split the two again.
@@ -256,22 +272,49 @@ export class StreamBuffer {
   }
 
   /**
+   * How far the sentence end at `cut` really runs. A full stop, an exclamation
+   * or a question mark is closed by the marks glued to it: a closing bracket, a
+   * quotation mark, a markdown run. The piece must leave with them, or the
+   * person receives the mark alone in the next message, and a bold run split in
+   * two renders in neither half. A cut at a line break is never extended: what
+   * follows a newline opens the next line, a bullet or a quotation. A cut
+   * already past the terminator, on a mark held with the sentence, extends over
+   * any further mark of the same run.
+   */
+  private closedAt(cut: number): number {
+    const c = this.buffer[cut];
+    const sentenceEnd = c === "." || c === "!" || c === "?";
+    if (!sentenceEnd && !CLOSES_SENTENCE.test(c ?? "")) return cut;
+    let end = cut;
+    while (CLOSES_SENTENCE.test(this.buffer[end + 1] ?? "")) end++;
+    return end;
+  }
+
+  /**
    * The next non-whitespace words after a held-back piece have arrived. When the
    * buffer from the cut on opens the marker of the file the sentence introduces,
    * the sentence stays with it and leaves in the same piece; otherwise the
-   * sentence goes out now, as it always did.
+   * sentence goes out now, as it always did. A piece whose only remainder is
+   * whitespace may still be closed by marks in the next push, so it is held
+   * again: a reply ending on its full stop in one push and on its closing bracket
+   * in the next arrived as two messages until the piece waited for the bracket.
    */
   private settleDeferred(): void {
     this.cancelDeferredTimer();
     const cut = this.deferredCut;
     this.deferredCut = -1;
     if (cut < 0) return;
-    if (ATTACH_START.test(this.buffer.slice(cut + 1))) {
-      this.cutFloor = cut + 1;
+    const end = this.closedAt(cut);
+    if (this.buffer.slice(end + 1).trim().length === 0) {
+      this.defer(end);
       return;
     }
-    const segment = this.buffer.slice(0, cut + 1).trimEnd();
-    this.buffer = this.buffer.slice(cut + 1).trimStart();
+    if (ATTACH_START.test(this.buffer.slice(end + 1))) {
+      this.cutFloor = end + 1;
+      return;
+    }
+    const segment = this.buffer.slice(0, end + 1).trimEnd();
+    this.buffer = this.buffer.slice(end + 1).trimStart();
     this.cutFloor = 0;
     this.emit(segment);
   }

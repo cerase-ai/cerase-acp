@@ -414,3 +414,110 @@ describe("StreamBuffer and the sentence before a marker", () => {
     expect(out).toEqual(["Questa è una frase abbastanza lunga."]);
   });
 });
+
+// A sentence can end just before a closing mark that arrives in a later push:
+// the bracket of a parenthetical, a quotation mark, a markdown emphasis run. The
+// sentence and the mark must leave as one piece, or the person receives the
+// closing mark alone as a message of its own. For markdown the damage is worse:
+// the emphasis opens in one message and closes in the next, so neither renders.
+describe("StreamBuffer and the punctuation that closes a sentence", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const FIRST =
+    "Ho ricontrollato con calma tutta la tua richiesta e posso confermarti che la modifica è già presente nel ramo di lavoro principale, così non serve rifare nulla da capo e possiamo procedere insieme senza altri intoppi.";
+  const SECOND =
+    "(Se invece il modo in cui l'ho impostata non ti torna, oppure preferisci un'altra strada per arrivare allo stesso risultato, oppure vuoi che te la mostri prima di andare avanti, dimmelo e la rilancio da lì.";
+
+  /** No piece is made of nothing but punctuation and whitespace. */
+  const nonePunctuationOnly = (pieces: string[]) => {
+    for (const p of pieces) expect(p).not.toMatch(/^[\s\p{P}\p{S}]+$/u);
+  };
+
+  it("sends the sentence and the bracket that closes it as one piece", () => {
+    expect(FIRST.length).toBeGreaterThan(200);
+    expect(SECOND.length).toBeGreaterThan(200);
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    for (const part of `${FIRST} ${SECOND}`.match(/\S+\s*/g) ?? []) buf.push(part);
+    buf.push(")");
+    buf.end();
+    nonePunctuationOnly(out);
+    expect(out).toEqual([FIRST, `${SECOND})`]);
+  });
+
+  it("keeps a closer pushed alone with the sentence it closes, then streams on", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(SECOND);
+    buf.push(")");
+    buf.push(" E poi continuo con il resto.");
+    expect(out).toEqual([`${SECOND})`]);
+  });
+
+  it("keeps a closer arriving in the same push as the full stop", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(`${SECOND})`);
+    buf.push(" E poi continuo con il resto.");
+    expect(out).toEqual([`${SECOND})`]);
+  });
+
+  it("keeps several closers across pushes with the sentence", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(SECOND);
+    buf.push("»");
+    buf.push(")");
+    buf.end();
+    nonePunctuationOnly(out);
+    expect(out).toEqual([`${SECOND}»)`]);
+  });
+
+  it("keeps a markdown emphasis run that closes after the full stop", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(`**${SECOND}`);
+    buf.push("**");
+    buf.end();
+    nonePunctuationOnly(out);
+    expect(out).toEqual([`**${SECOND}**`]);
+  });
+
+  it("still sends a sentence held for a closer when the ceiling passes", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(SECOND);
+    buf.push(")");
+    vi.advanceTimersByTime(MARKER_HOLD_MS);
+    expect(out).toEqual([`${SECOND})`]);
+  });
+
+  it("flushes a sentence followed by prose as before", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(SECOND);
+    buf.push(" E poi continuo con il resto.");
+    expect(out).toEqual([SECOND]);
+  });
+
+  it("keeps an opening quote after a space with the next sentence", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(SECOND);
+    buf.push(' "Ciao", mi ha detto.');
+    expect(out).toEqual([SECOND]);
+  });
+
+  it("treats punctuation after a line break as the next line", () => {
+    const out: string[] = [];
+    const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
+    buf.push(`${FIRST}\n`);
+    buf.push("* una voce di elenco");
+    expect(out).toEqual([FIRST]);
+  });
+});
