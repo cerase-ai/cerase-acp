@@ -745,6 +745,21 @@ export class Dispatcher {
     // Behind any turn of this conversation still waiting out a restart.
     await this.holds.get(`${agentId}:${userId}`);
 
+    // Tell the status line when a message of the answer has actually reached
+    // the channel: the next step it shows must then come below that message,
+    // not above it. A chunk the channel withheld, or kept for later, reached
+    // nobody, so it does not count, and the line is only told once the turn has
+    // one.
+    const channelSend = send;
+    const turn = status;
+    if (turn) {
+      send = async (chunk: string): Promise<DeliveryResult> => {
+        const result = await channelSend(chunk);
+        if (result.ok && !result.withheld && !result.kept) turn.passed();
+        return result;
+      };
+    }
+
     let { queue, reply } = this.openReply(agentId, userId, send, text);
 
     // One call, two facts, and neither is worth failing a turn over. The clock

@@ -144,6 +144,16 @@ export class TurnStatus {
   }
 
   /**
+   * A message of the answer reached the chat after the line was posted. The
+   * next step shown goes below it; see `StatusLine.passed`. A channel whose
+   * status cannot move ignores it.
+   */
+  passed(): void {
+    if (this.closed) return;
+    this.opts.line.passed?.();
+  }
+
+  /**
    * End the turn's status: no step is shown from now on, and the line is taken
    * down when it was put up. Never rejects.
    */

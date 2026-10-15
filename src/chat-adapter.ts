@@ -209,9 +209,16 @@ export interface ChatAdapter {
  * The one message of a turn that says which step the assistant is on. `show`
  * posts it the first time and edits it after; `close` takes it down. Neither
  * rejects: a failure is logged by the adapter and costs the turn nothing.
+ *
+ * `passed` is how the dispatcher tells a line that a message of the answer
+ * reached the chat after it was posted: the next `show` then moves the line
+ * below that message instead of editing it in place. A channel whose status is
+ * not a message of its own (Workspace Chat, where the turn's placeholder holds
+ * the step) leaves it absent, and nothing moves.
  */
 export interface StatusLine {
   show(text: string): Promise<void>;
+  passed?(): void;
   close(): Promise<void>;
 }
 

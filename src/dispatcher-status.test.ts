@@ -35,6 +35,8 @@ interface Channel {
   removed: number[];
   /** Every post asked of the platform, refused ones included. */
   attempts: string[];
+  /** Every post, edit and delete the platform carried, in the order it was asked. */
+  events: string[];
   line: StatusLine;
 }
 
@@ -44,6 +46,7 @@ function channel(fail: { post?: boolean; edit?: boolean; remove?: boolean } = {}
     edits: [],
     removed: [],
     attempts: [],
+    events: [],
     line: undefined as unknown as StatusLine,
   };
   c.line = messageStatusLine<number>(
@@ -53,15 +56,18 @@ function channel(fail: { post?: boolean; edit?: boolean; remove?: boolean } = {}
         if (fail.post) throw new Error("the platform refused the post");
         const id = c.posts.length + 1;
         c.posts.push({ id, text });
+        c.events.push(`post#${id} ${text}`);
         return id;
       },
       edit: async (id, text) => {
         if (fail.edit) throw new Error("the platform refused the edit");
         c.edits.push({ id, text });
+        c.events.push(`edit#${id} ${text}`);
       },
       remove: async (id) => {
         if (fail.remove) throw new Error("the platform refused the delete");
         c.removed.push(id);
+        c.events.push(`remove#${id}`);
       },
     },
     { test: true },
@@ -98,6 +104,48 @@ const SENTENCES: Record<string, string> = {
   webfetch: "Sto aprendo una pagina web…",
   edit: "Sto modificando un file…",
 };
+
+// The one message the channel keeps, on its own: no turn, no dispatcher.
+describe("the status line kept as one message", () => {
+  it("deletes the line a message went out after, and posts the next step below it", async () => {
+    const c = channel();
+    await c.line.show("Sto leggendo un foglio Google…");
+    c.line.passed?.();
+    await c.line.show("Sto modificando un file…");
+    expect(c.events).toEqual(["post#1 Sto leggendo un foglio Google…", "remove#1", "post#2 Sto modificando un file…"]);
+    expect(c.edits).toEqual([]);
+  });
+
+  it("edits the same line when no message went out in between", async () => {
+    const c = channel();
+    await c.line.show("Sto leggendo un foglio Google…");
+    await c.line.show("Sto modificando un file…");
+    expect(c.events).toEqual(["post#1 Sto leggendo un foglio Google…", "edit#1 Sto modificando un file…"]);
+    expect(c.removed).toEqual([]);
+  });
+
+  it("closes the line it is showing, after a message moved it", async () => {
+    const c = channel();
+    await c.line.show("Sto leggendo un foglio Google…");
+    c.line.passed?.();
+    await c.line.show("Sto modificando un file…");
+    await c.line.close();
+    expect(c.removed).toEqual([1, 2]);
+    expect(c.events.at(-1)).toBe("remove#2");
+  });
+
+  it("posts the next step even when the line it replaces cannot be deleted", async () => {
+    const c = channel({ remove: true });
+    await c.line.show("Sto leggendo un foglio Google…");
+    c.line.passed?.();
+    await c.line.show("Sto modificando un file…");
+    expect(c.posts).toEqual([
+      { id: 1, text: "Sto leggendo un foglio Google…" },
+      { id: 2, text: "Sto modificando un file…" },
+    ]);
+    expect(c.removed).toEqual([]);
+  });
+});
 
 describe("the status line of a turn", () => {
   let prompts: HeldPrompt[];
@@ -506,5 +554,33 @@ describe("the status line of a turn", () => {
     expect(await turn).toEqual({ ok: true });
     await settle();
     expect(c.removed).toEqual([1]);
+  });
+
+  it("moves the line below a message of the answer that went out after it", async () => {
+    const c = channel();
+    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+    await elapse(4_000);
+    expect(c.posts).toEqual([{ id: 1, text: "Sto aprendo una pagina web…" }]);
+    prompts[0]!.update(done("c1"));
+
+    // The assistant answers in prose while the line is up. The piece leaves
+    // through the channel's send target, so the line is told a message went out.
+    prompts[0]!.say("Ho il PDF e la firma. Appongo firma e luogo sulla pagina 2.");
+    await elapse(1_500);
+    expect(sent).toEqual(["Ho il PDF e la firma. Appongo firma e luogo sulla pagina 2."]);
+
+    // The next step shows below that message, not above it.
+    prompts[0]!.update(toolCall("c2", "edit", { filePath: "a.md" }));
+    await settle();
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…", "remove#1", "post#2 Sto modificando un file…"]);
+    expect(c.edits).toEqual([]);
+
+    prompts[0]!.update(done("c2"));
+    prompts[0]!.end("Fatto.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.removed).toEqual([1, 2]);
   });
 });
