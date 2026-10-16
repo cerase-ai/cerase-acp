@@ -81,6 +81,10 @@ export class TurnStatus {
   private closed = false;
   // What the line says now, so a step with the same sentence costs no edit.
   private text: string | undefined;
+  // Whether a message of the answer reached the chat since the line was last
+  // shown. A step whose sentence is unchanged must still move the line below
+  // that message; see `StatusLine.passed`.
+  private passedSince = false;
   private lastEditAt = Number.NEGATIVE_INFINITY;
   private editTimer: NodeJS.Timeout | undefined;
   private rendering = false;
@@ -145,12 +149,13 @@ export class TurnStatus {
 
   /**
    * A message of the answer reached the chat after the line was posted. The
-   * next step shown goes below it; see `StatusLine.passed`. A channel whose
-   * status cannot move ignores it.
+   * next step shown goes below it, sentence unchanged or not; see
+   * `StatusLine.passed`. A channel whose status cannot move ignores it.
    */
   passed(): void {
-    if (this.closed) return;
-    this.opts.line.passed?.();
+    if (this.closed || !this.opts.line.passed) return;
+    this.passedSince = true;
+    this.opts.line.passed();
   }
 
   /**
@@ -208,7 +213,8 @@ export class TurnStatus {
           : tool
             ? await this.sentenceFor(tool)
             : this.opts.fallback;
-      if (this.closed || text === this.text) return;
+      if (this.closed || (text === this.text && !this.passedSince)) return;
+      this.passedSince = false;
       this.text = text;
       this.lastEditAt = Date.now();
       await this.opts.line.show(text);

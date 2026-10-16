@@ -116,6 +116,19 @@ describe("the status line kept as one message", () => {
     expect(c.edits).toEqual([]);
   });
 
+  it("deletes and posts the same sentence again when a message went out after it", async () => {
+    const c = channel();
+    await c.line.show("Sto aprendo una pagina web…");
+    c.line.passed?.();
+    await c.line.show("Sto aprendo una pagina web…");
+    expect(c.events).toEqual([
+      "post#1 Sto aprendo una pagina web…",
+      "remove#1",
+      "post#2 Sto aprendo una pagina web…",
+    ]);
+    expect(c.edits).toEqual([]);
+  });
+
   it("edits the same line when no message went out in between", async () => {
     const c = channel();
     await c.line.show("Sto leggendo un foglio Google…");
@@ -582,5 +595,62 @@ describe("the status line of a turn", () => {
     expect(await turn).toEqual({ ok: true });
     await settle();
     expect(c.removed).toEqual([1, 2]);
+  });
+
+  it("moves the line below a message even when the next step's sentence is unchanged", async () => {
+    const c = channel();
+    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+    await elapse(4_000);
+    expect(c.posts).toEqual([{ id: 1, text: "Sto aprendo una pagina web…" }]);
+    prompts[0]!.update(done("c1"));
+
+    // The assistant answers in prose while the line is up: the line is told a
+    // message went out, as in the test above.
+    prompts[0]!.say("Ho il PDF e la firma.");
+    await elapse(1_500);
+    expect(sent).toEqual(["Ho il PDF e la firma."]);
+
+    // The next step is another web page, so its sentence is the one already on
+    // screen. The line still comes down and is posted again below the message.
+    prompts[0]!.update(toolCall("c2", "webfetch", { url: "https://example.com/2" }));
+    await settle();
+    expect(c.events).toEqual([
+      "post#1 Sto aprendo una pagina web…",
+      "remove#1",
+      "post#2 Sto aprendo una pagina web…",
+    ]);
+    expect(c.edits).toEqual([]);
+
+    prompts[0]!.update(done("c2"));
+    prompts[0]!.end("Fatto.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.removed).toEqual([1, 2]);
+  });
+
+  it("leaves the line alone when two steps share a sentence and no message went out", async () => {
+    const c = channel();
+    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+    await elapse(4_000);
+    expect(c.posts).toEqual([{ id: 1, text: "Sto aprendo una pagina web…" }]);
+    prompts[0]!.update(done("c1"));
+
+    // The next step's sentence is the one the line already says, and nothing
+    // reached the chat in between: the line is neither posted nor edited again.
+    prompts[0]!.update(toolCall("c2", "webfetch", { url: "https://example.com/2" }));
+    await elapse(2_000);
+    expect(c.posts).toHaveLength(1);
+    expect(c.edits).toEqual([]);
+    expect(c.removed).toEqual([]);
+
+    prompts[0]!.update(done("c2"));
+    prompts[0]!.end("Fatto.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.removed).toEqual([1]);
   });
 });
