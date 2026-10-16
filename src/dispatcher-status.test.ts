@@ -121,11 +121,7 @@ describe("the status line kept as one message", () => {
     await c.line.show("Sto aprendo una pagina web…");
     c.line.passed?.();
     await c.line.show("Sto aprendo una pagina web…");
-    expect(c.events).toEqual([
-      "post#1 Sto aprendo una pagina web…",
-      "remove#1",
-      "post#2 Sto aprendo una pagina web…",
-    ]);
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…", "remove#1", "post#2 Sto aprendo una pagina web…"]);
     expect(c.edits).toEqual([]);
   });
 
@@ -616,11 +612,7 @@ describe("the status line of a turn", () => {
     // screen. The line still comes down and is posted again below the message.
     prompts[0]!.update(toolCall("c2", "webfetch", { url: "https://example.com/2" }));
     await settle();
-    expect(c.events).toEqual([
-      "post#1 Sto aprendo una pagina web…",
-      "remove#1",
-      "post#2 Sto aprendo una pagina web…",
-    ]);
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…", "remove#1", "post#2 Sto aprendo una pagina web…"]);
     expect(c.edits).toEqual([]);
 
     prompts[0]!.update(done("c2"));
