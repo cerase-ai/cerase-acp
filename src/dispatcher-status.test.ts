@@ -227,6 +227,27 @@ describe("the status line of a turn", () => {
   const elapse = (ms: number) => vi.advanceTimersByTimeAsync(ms);
   const promptCount = (n: number) => vi.waitFor(() => expect(prompts).toHaveLength(n));
 
+  /**
+   * A send target whose every send is held open until `release()`: a test can
+   * let the next step's render run while a message's send is still in flight,
+   * which is the race the tests below are about. Sends asked after the release
+   * go through at once.
+   */
+  function heldSend(): { target: (chunk: string) => Promise<DeliveryResult>; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return {
+      target: async (chunk) => {
+        sent.push(chunk);
+        await gate;
+        return { ok: true };
+      },
+      release,
+    };
+  }
+
   beforeEach(() => {
     freezeBridgeClock();
     prompts = [];
@@ -620,6 +641,103 @@ describe("the status line of a turn", () => {
     expect(await turn).toEqual({ ok: true });
     await settle();
     expect(c.removed).toEqual([1, 2]);
+  });
+
+  // The tests below reproduce the race seen on 16 October: a message of the
+  // answer reaches the chat AFTER the next step's line was already drawn, and
+  // the line then stays above that message. The send that reports the message
+  // is held open, so the step's render is sure to run first and the send to
+  // resolve only after it.
+  it("moves the line below a message whose send resolves after the next step's render", async () => {
+    const c = channel();
+    const held = heldSend();
+    const turn = dispatcher(c.line, { resolveSendTarget: () => held.target }).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+    await elapse(4_000);
+    expect(c.posts).toEqual([{ id: 1, text: "Sto aprendo una pagina web…" }]);
+    prompts[0]!.update(done("c1"));
+
+    // The assistant answers in prose and the next step starts before that
+    // message's send has resolved: the step's render runs first, finds its
+    // sentence already on screen and no message reported yet, and shows
+    // nothing.
+    prompts[0]!.say("Primo passo fatto.");
+    prompts[0]!.update(toolCall("c2", "webfetch", { url: "https://example.com/2" }));
+    await elapse(1_500);
+    expect(sent).toEqual(["Primo passo fatto."]);
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…"]);
+
+    // Only now does the send resolve. The line must still move below the
+    // message, though the next step's sentence is the one already on screen.
+    held.release();
+    await elapse(1_500);
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…", "remove#1", "post#2 Sto aprendo una pagina web…"]);
+    expect(c.edits).toEqual([]);
+
+    prompts[0]!.update(done("c2"));
+    prompts[0]!.end("Fatto.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.removed).toEqual([1, 2]);
+  });
+
+  it("shows a different next step below a message whose send resolves after its render", async () => {
+    const c = channel();
+    const held = heldSend();
+    const turn = dispatcher(c.line, { resolveSendTarget: () => held.target }).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+    await elapse(4_000);
+    expect(c.posts).toEqual([{ id: 1, text: "Sto aprendo una pagina web…" }]);
+    prompts[0]!.update(done("c1"));
+
+    // As above, but the next step's sentence differs from the one on screen:
+    // its render edits the line, still above the message, before the send
+    // resolves.
+    prompts[0]!.say("Primo passo fatto.");
+    prompts[0]!.update(toolCall("c2", "edit", { filePath: "a.md" }));
+    await elapse(1_500);
+    expect(sent).toEqual(["Primo passo fatto."]);
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…", "edit#1 Sto modificando un file…"]);
+
+    // Once the send resolves the line comes down and is posted again below the
+    // message, with the step's sentence.
+    held.release();
+    await elapse(1_500);
+    expect(c.events).toEqual([
+      "post#1 Sto aprendo una pagina web…",
+      "edit#1 Sto modificando un file…",
+      "remove#1",
+      "post#2 Sto modificando un file…",
+    ]);
+    expect(c.edits).toEqual([{ id: 1, text: "Sto modificando un file…" }]);
+
+    prompts[0]!.update(done("c2"));
+    prompts[0]!.end("Fatto.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.removed).toEqual([1, 2]);
+  });
+
+  it("does not post the line again below the answer that ends the turn", async () => {
+    const c = channel();
+    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+    await promptCount(1);
+    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+    await elapse(4_000);
+    expect(c.posts).toEqual([{ id: 1, text: "Sto aprendo una pagina web…" }]);
+    prompts[0]!.update(done("c1"));
+    // Past the edit interval, so a line that would be posted again is not
+    // held back by it and cancelled by the close.
+    await elapse(2_000);
+
+    // The turn ends with its final answer: no step follows it, so the line is
+    // taken down, not posted again below the answer.
+    prompts[0]!.end("Ecco quello che ho trovato.");
+    expect(await turn).toEqual({ ok: true });
+    await settle();
+    expect(c.events).toEqual(["post#1 Sto aprendo una pagina web…", "remove#1"]);
   });
 
   it("leaves the line alone when two steps share a sentence and no message went out", async () => {

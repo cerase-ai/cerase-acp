@@ -83,7 +83,8 @@ export class TurnStatus {
   private text: string | undefined;
   // Whether a message of the answer reached the chat since the line was last
   // shown. A step whose sentence is unchanged must still move the line below
-  // that message; see `StatusLine.passed`.
+  // that message, and while the step runs there may be no later render to do
+  // it, so `passed` refreshes the line at once; see `StatusLine.passed`.
   private passedSince = false;
   private lastEditAt = Number.NEGATIVE_INFINITY;
   private editTimer: NodeJS.Timeout | undefined;
@@ -150,12 +151,19 @@ export class TurnStatus {
   /**
    * A message of the answer reached the chat after the line was posted. The
    * next step shown goes below it, sentence unchanged or not; see
-   * `StatusLine.passed`. A channel whose status cannot move ignores it.
+   * `StatusLine.passed`. While a step runs, or while the session compacts, the
+   * line is refreshed at once, because the step's sentence may not change again
+   * and its render would otherwise never move the line below the message. With
+   * no step running the turn's final answer is followed by `close()`, and
+   * posting the line again only to take it down would flicker, so nothing is
+   * done. A channel whose status cannot move ignores it.
    */
   passed(): void {
     if (this.closed || !this.opts.line.passed) return;
     this.passedSince = true;
     this.opts.line.passed();
+    const tool = this.step === undefined ? undefined : this.tools.get(this.step);
+    if (this.shown && (tool?.running === true || this.compactingNow)) this.refresh();
   }
 
   /**
