@@ -60,6 +60,16 @@ describe("an assistant told that its instructions changed", () => {
     expect(note).toContain("load a skill again before you use it");
   });
 
+  // On lt-name-1 on 11 October, two assistants given this note read the
+  // opencode log, its database and the gateway token file before doing what
+  // was asked, looking for what had changed.
+  it("says the instructions it has are the new ones, so it does the request without looking in files for the change", () => {
+    const note = instructionsChangedNote();
+
+    expect(note).toContain("The instructions and skills you have now are the new ones");
+    expect(note).toContain("without looking in files for what changed");
+  });
+
   it("goes in front of the turn's other context, and nowhere when nothing changed", () => {
     expect(withInstructionsChanged(false, undefined)).toBeUndefined();
     expect(withInstructionsChanged(false, "links")).toBe("links");

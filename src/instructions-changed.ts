@@ -18,7 +18,7 @@ import { bridgePromptLine } from "./bridge-prompt.js";
 export function instructionsChangedNote(): string {
   return [
     bridgePromptLine("instructions", "changed"),
-    "Your instructions or your skills changed after the last message of this conversation, so what you wrote and did earlier in it followed the previous ones. From this message on, follow your instructions as they are now over anything earlier in the conversation, and load a skill again before you use it, even one you have used here before.",
+    "Your instructions or your skills changed after the last message of this conversation, so what you wrote and did earlier in it followed the previous ones. From this message on, follow your instructions as they are now over anything earlier in the conversation, and load a skill again before you use it, even one you have used here before. The instructions and skills you have now are the new ones, so do what this message asks without looking in files for what changed.",
   ].join("\n");
 }
 
