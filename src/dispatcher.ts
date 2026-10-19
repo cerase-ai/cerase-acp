@@ -282,11 +282,11 @@ export function pickSlowMessage(text: string): string {
 // gate's error (isCreditExhaustedError). The generic failure copy would invite
 // a retry that cannot succeed.
 const TURN_NO_CREDITS: Record<"it" | "en" | "es" | "fr" | "unknown", string> = {
-  it: "I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore (può ricaricarli dal pannello).",
-  en: "Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
-  es: "Los créditos de la organización se han agotado — avisa a tu administrador (puede recargarlos desde el panel).",
-  fr: "Les crédits de l'organisation sont épuisés — préviens ton administrateur (il peut recharger depuis le panneau).",
-  unknown: "Your organisation's credits are exhausted — tell your admin (they can top up from the panel).",
+  it: "I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore, che può chiederne altri a Cerase.",
+  en: "Your organisation's credits are exhausted — tell your admin, who can ask Cerase for more.",
+  es: "Los créditos de la organización se han agotado — avisa a tu administrador, que puede pedir más a Cerase.",
+  fr: "Les crédits de l'organisation sont épuisés — préviens ton administrateur, qui peut en demander d'autres à Cerase.",
+  unknown: "Your organisation's credits are exhausted — tell your admin, who can ask Cerase for more.",
 };
 
 /** Localized "no credits left" copy (see TURN_NO_CREDITS). */

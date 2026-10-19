@@ -150,6 +150,25 @@ describe("the direct-messages-only note", () => {
   });
 });
 
+describe("the no-credits note", () => {
+  it("sends the administrator to Cerase, never to a panel and never to a top-up of their own", () => {
+    const samples = {
+      it: "ciao, mi puoi aiutare a riassumere il documento?",
+      en: "hello, can you help me summarise the document?",
+      es: "hola, ¿puedes ayudarme con este documento?",
+      fr: "bonjour, peux-tu m'aider avec ce document?",
+      unknown: "",
+    };
+    for (const sample of Object.values(samples)) {
+      const text = pickNoCreditsMessage(sample);
+      expect(text).toContain("Cerase");
+      // No panel lets a customer load credits: Cerase loads them on request.
+      expect(text).not.toMatch(/pannello|panel|panneau/i);
+      expect(text).not.toMatch(/ricaric|top up|recarg|recharg/i);
+    }
+  });
+});
+
 describe("one register across every platform notice", () => {
   it("carries no emoji in any language", () => {
     const everything = [
