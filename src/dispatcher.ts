@@ -20,6 +20,7 @@ import { googleLinksNote } from "./google-links.js";
 import { withInstructionsChanged } from "./instructions-changed.js";
 import { makeLogger } from "./logger.js";
 import type { PendingMessages } from "./pending-messages.js";
+import { withPlatformNotes } from "./platform-notes.js";
 import { type NoticeRef, noticeText, type PlatformNotice } from "./platform-notice.js";
 import {
   compactionNotice,
@@ -103,7 +104,7 @@ export interface DispatcherDeps {
   turnContext?: (
     agentId: string,
     userId: string,
-  ) => Promise<{ clock?: string; lastTurnAt?: number; instructionsChanged?: boolean }>;
+  ) => Promise<{ clock?: string; lastTurnAt?: number; instructionsChanged?: boolean; notes?: string[] }>;
   /**
    * How the assistant's previous conversation ended, for the first message of a
    * new one. Optional: the test-injection dispatcher has no control-plane, and a
@@ -770,12 +771,16 @@ export class Dispatcher {
     // Whether the assistant's instructions or skills changed after this
     // conversation's last message: it is told once, in front of this turn.
     let instructionsChanged = false;
+    // What the platform posted in this person's chat since the last turn. Each
+    // note is handed over once, and goes in front of this turn.
+    let notes: string[] = [];
     if (this.deps.turnContext) {
       try {
         const ctx = await this.deps.turnContext(agentId, userId);
         clock = ctx.clock;
         contextLastTurnAt = ctx.lastTurnAt;
         instructionsChanged = ctx.instructionsChanged === true;
+        notes = ctx.notes ?? [];
       } catch (err) {
         logger.warn({ err, agentId, userId }, "turn context unavailable — proceeding without a clock");
       }
@@ -810,12 +815,22 @@ export class Dispatcher {
         );
       }
     }
-    const context = fresh
-      ? [carried, links].filter((part): part is string => part !== undefined).join("\n\n") || undefined
-      : withInstructionsChanged(instructionsChanged, links);
+    const context = withPlatformNotes(
+      notes,
+      fresh
+        ? [carried, links].filter((part): part is string => part !== undefined).join("\n\n") || undefined
+        : withInstructionsChanged(instructionsChanged, links),
+    );
 
     logger.info(
-      { agentId, userId, textLen: text.length, googleLinks: links !== undefined, instructionsChanged },
+      {
+        agentId,
+        userId,
+        textLen: text.length,
+        googleLinks: links !== undefined,
+        instructionsChanged,
+        platformNotes: notes.length,
+      },
       "dispatching to session manager",
     );
 

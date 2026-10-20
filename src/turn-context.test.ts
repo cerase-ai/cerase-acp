@@ -28,6 +28,30 @@ describe("fetchTurnContext", () => {
     expect(seen).toContain("/api/internal/turn-context/agent-1");
     expect(seen).toContain("platform=discord");
     expect(seen).toContain("platform_user_id=12345");
+    expect(seen).toContain("notes=1");
+  });
+
+  it("reads the platform's notes, keeping only the strings that say something", async () => {
+    const fetchImpl = (async () =>
+      jsonResponse({
+        timezone: "Europe/Rome",
+        notes: ["reconnect Google Workspace", "", 42, null, { text: "not a string" }, "a second note"],
+      })) as unknown as typeof fetch;
+
+    const ctx = await fetchTurnContext("a", { platformUserId: "u" }, { ...OPTS, fetchImpl });
+
+    expect(ctx.notes).toEqual(["reconnect Google Workspace", "a second note"]);
+  });
+
+  it("takes an answer with no notes, or notes that are not a list, as none", async () => {
+    const noNotes = (async () => jsonResponse({ timezone: "Europe/Rome" })) as unknown as typeof fetch;
+    const notAList = (async () => jsonResponse({ timezone: "Europe/Rome", notes: "one" })) as unknown as typeof fetch;
+
+    const absent = await fetchTurnContext("a", { platformUserId: "u" }, { ...OPTS, fetchImpl: noNotes });
+    const wrong = await fetchTurnContext("a", { platformUserId: "u" }, { ...OPTS, fetchImpl: notAList });
+
+    expect(absent.notes).toEqual([]);
+    expect(wrong.notes).toEqual([]);
   });
 
   it("reads the last turn as epoch ms", async () => {

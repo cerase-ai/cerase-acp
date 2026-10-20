@@ -35,6 +35,11 @@ export interface TurnContext {
    * control-plane does not say: an older one never does.
    */
   instructionsChanged: boolean;
+  /**
+   * What the platform posted in the person's chat since the last turn, each
+   * told once. Empty when the control-plane does not say.
+   */
+  notes: string[];
 }
 
 // Long enough that a chatty hour costs one request, short enough that an
@@ -66,6 +71,7 @@ export async function fetchTurnContext(
   const params = new URLSearchParams();
   if (identity.platform) params.set("platform", identity.platform);
   if (identity.platformUserId) params.set("platform_user_id", identity.platformUserId);
+  params.set("notes", "1");
 
   const qs = params.toString();
   const url =
@@ -82,17 +88,22 @@ export async function fetchTurnContext(
     now?: string;
     last_turn_at?: string | null;
     instructions_changed?: boolean;
+    notes?: unknown;
   };
   const timezone = body.timezone ?? "UTC";
   cachedTimezone = { value: timezone, at: Date.now() };
 
   const last = body.last_turn_at ? Date.parse(body.last_turn_at) : NaN;
+  const notes = Array.isArray(body.notes)
+    ? body.notes.filter((note): note is string => typeof note === "string" && note.length > 0)
+    : [];
 
   return {
     timezone,
     now: body.now ?? new Date().toISOString(),
     lastTurnAt: Number.isFinite(last) ? last : undefined,
     instructionsChanged: body.instructions_changed === true,
+    notes,
   };
 }
 

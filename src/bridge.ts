@@ -632,6 +632,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         clock: formatWallClock(Date.now(), ctx.timezone),
         lastTurnAt: ctx.lastTurnAt,
         instructionsChanged: ctx.instructionsChanged,
+        notes: ctx.notes,
       };
     },
     // How the assistant's previous conversation ended, for a new one. Wired on
