@@ -126,6 +126,26 @@ export function createDiscordAdapter(
     logger.error({ err, agentId: agent.id }, "discord.js client error");
   };
 
+  // GUILD_CREATE is the one event that says the bot can now DM people it could
+  // not before: Discord refuses a DM with 50278 when the bot shares no server
+  // with the person, and adding it to a server lifts that. The bridge
+  // registers a listener to clear the refusal and send what was kept; the set
+  // belongs to the adapter rather than to one client, so a client built again
+  // after a re-login still carries them (the listener is re-attached in
+  // connect()).
+  const reachableListeners = new Set<() => void>();
+  const onGuildCreate = (): void => {
+    for (const listener of reachableListeners) {
+      try {
+        listener();
+      } catch (err) {
+        // One listener's failure must not stop the others, and an event
+        // handler must never throw into the gateway.
+        logger.error({ err, agentId: agent.id }, "an onReachable listener threw");
+      }
+    }
+  };
+
   // What one login is made with: the client, the handlers on it, and the
   // monitor that probes through it.
   //
@@ -144,6 +164,9 @@ export function createDiscordAdapter(
     });
     fresh.on(Events.MessageCreate, onMessage);
     fresh.on(Events.Error, onClientError);
+    // Re-attached on every fresh client, so a re-login does not leave the
+    // listeners only on the client that was destroyed.
+    fresh.on(Events.GuildCreate, onGuildCreate);
     // Is Discord answering this adapter? `client.isReady()` cannot say: it is
     // the library's cached view of its own socket, and it reported a live
     // connection for the whole of a five-minute outage. The probe is the
@@ -192,6 +215,9 @@ export function createDiscordAdapter(
     },
     reachability(): ReachabilitySnapshot {
       return reachability.snapshot();
+    },
+    onReachable(listener: () => void): void {
+      reachableListeners.add(listener);
     },
     async start() {
       // bot_token is validated as required for channel='discord' in

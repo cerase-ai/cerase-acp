@@ -38,6 +38,7 @@ import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts
 import { type AgentFailure, type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
 import { KeptReplies } from "./kept-replies.js";
 import { makeLogger } from "./logger.js";
+import { isNoSharedServer } from "./no-shared-server.js";
 import { PendingMessages, replayPending } from "./pending-messages.js";
 import {
   attachmentFailedNotice,
@@ -63,6 +64,17 @@ const logger = makeLogger("cerase-acp.bridge");
  * once; this is for one whose client reconnects by itself.
  */
 export const KEPT_REPLY_POLL_MS = 5_000;
+
+/**
+ * How often, while Discord refuses DMs to a person with 50278, the bridge
+ * tries again a reply kept for them anyway. A new message from the person is
+ * attempted at once; this is for a kept reply with no new message to learn
+ * from, and it is sparse because the only way to learn that person is
+ * reachable is to send, and each attempt meets the same refusal until
+ * somebody adds the bot to their server. The variable
+ * `CERASE_ACP_NO_SERVER_RETRY_MS` overrides it for tests.
+ */
+export const NO_SHARED_SERVER_RETRY_MS = 60_000;
 
 export interface RunBridgeOptions {
   config: BridgeConfig;
@@ -127,6 +139,14 @@ export interface ApplyConfigDiffDeps {
    * longer holds, and nothing would ever stop it.
    */
   forgetAgent?: (agentId: string) => void;
+  /**
+   * Called for every adapter this reload creates, before it is started. The
+   * boot path calls the same wiring: runBridge registers the adapter's
+   * onReachable listener and drops the no-shared-server marks left by the
+   * adapter it replaces, which described a bot that is gone. Optional so the
+   * unit tests can drive applyConfigDiff without the bridge.
+   */
+  onAdapterCreated?: (adapter: ChatAdapter) => void;
 }
 
 /**
@@ -230,6 +250,7 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
         const adapter = await createAdapterWithRetry(deps, fresh);
         if (!adapter) continue; // skip this agent, keep reloading the rest
         deps.adapters.set(mod.agentId, adapter);
+        deps.onAdapterCreated?.(adapter);
         // The failure is reported by whoever owns the start: the bridge's
         // version logs it and decides between a retry and a terminal record.
         if (await startAdapter(adapter)) {
@@ -246,6 +267,7 @@ export async function applyConfigDiff(diff: ConfigDiff, deps: ApplyConfigDiffDep
     const adapter = await createAdapterWithRetry(deps, agent);
     if (!adapter) continue; // skip this agent, keep reloading the rest
     deps.adapters.set(agent.id, adapter);
+    deps.onAdapterCreated?.(adapter);
     if (await startAdapter(adapter)) {
       logger.info({ agentId: agent.id }, "auto-reload: new agent attached");
     }
@@ -551,6 +573,52 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     };
   };
 
+  // The people each agent's bot cannot DM because Discord answers 50278: the
+  // bot shares no server with them. Kept per agent because the bot is what
+  // lacks the server, and reported on /internal/status until a send to that
+  // person succeeds or the adapter says it can reach people again. The value
+  // is when the person was last marked, which paces the kept-reply retries.
+  const noSharedServerMarks = new Map<string, Map<string, number>>();
+  const noServerRetryEnv = Number(process.env.CERASE_ACP_NO_SERVER_RETRY_MS?.trim() || "");
+  const noServerRetryMs =
+    Number.isFinite(noServerRetryEnv) && noServerRetryEnv > 0 ? noServerRetryEnv : NO_SHARED_SERVER_RETRY_MS;
+
+  /** When Discord last refused a DM to this person, or undefined when not marked. */
+  const noSharedServerMarkAt = (agentId: string, userId: string): number | undefined =>
+    noSharedServerMarks.get(agentId)?.get(userId);
+
+  /** Remember that Discord refused a DM to this person, and say so once. */
+  const markNoSharedServer = (agentId: string, userId: string): void => {
+    let people = noSharedServerMarks.get(agentId);
+    if (!people) {
+      people = new Map();
+      noSharedServerMarks.set(agentId, people);
+    }
+    const already = people.has(userId);
+    people.set(userId, Date.now());
+    // Once per marking, not once per refused attempt: a retried kept reply
+    // meets the same verdict and would otherwise fill the log with it.
+    if (!already) {
+      logger.warn(
+        { agentId, userId },
+        "Discord refuses DMs to this person: the bot shares no server with them — replies are kept until it does",
+      );
+    }
+  };
+
+  /** The person is reachable again: drop the mark. Answers whether one was held. */
+  const clearNoSharedServer = (agentId: string, userId: string): boolean => {
+    const people = noSharedServerMarks.get(agentId);
+    if (!people?.delete(userId)) return false;
+    if (people.size === 0) noSharedServerMarks.delete(agentId);
+    return true;
+  };
+
+  /** Drop every mark of an agent whose adapter is replaced or removed. */
+  const clearNoSharedServerFor = (agentId: string): void => {
+    noSharedServerMarks.delete(agentId);
+  };
+
   /**
    * Send what is kept for one person through the agent's adapter, for as long
    * as its channel can carry it. The send target is made only when there is
@@ -560,21 +628,41 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     const adapter = adapters.get(agentId);
     if (!adapter) return Promise.resolve(0);
     let send: ((text: string) => Promise<DeliveryResult>) | undefined;
+    // Set when Discord answered 50278 during this delivery. The reply has
+    // already been taken out of the kept list by kept-replies.ts, so the
+    // delivery must look like a channel that cannot carry it: that puts the
+    // reply back for the next retry instead of dropping it as a message the
+    // channel refused while up.
+    let noSharedServer = false;
     return keptReplies.deliver(
       agentId,
       userId,
-      (text) => {
+      async (text) => {
         send ??= sendThrough(adapter, agentId, userId);
-        return send(text);
+        const result = await send(text);
+        if (result.ok) {
+          clearNoSharedServer(agentId, userId);
+        } else if (isNoSharedServer(result.error)) {
+          markNoSharedServer(agentId, userId);
+          noSharedServer = true;
+        }
+        return result;
       },
-      () => channelCanCarry(agentId, adapter),
+      () => !noSharedServer && channelCanCarry(agentId, adapter),
     );
   };
 
   /** Send what is kept for every person of an agent, when its channel can carry it. */
   const deliverKeptFor = (agentId: string): void => {
     if (!channelCanCarry(agentId)) return;
+    const now = Date.now();
     for (const userId of keptReplies.people(agentId)) {
+      // A person Discord refuses is retried at most once a minute: sending is
+      // the only way to learn they joined a server the bot is in, and until
+      // then every attempt is the same refusal. A new message from them, and
+      // the adapter's reachability event, do not wait for this.
+      const at = noSharedServerMarkAt(agentId, userId);
+      if (at !== undefined && now - at < noServerRetryMs) continue;
       deliverKept(agentId, userId).catch((err) => {
         logger.error({ err, agentId, userId }, "sending the kept replies failed");
       });
@@ -666,7 +754,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         throw new Error(`no chat adapter registered for agent "${agentId}"`);
       }
       const send = adapter.sendNotice?.bind(adapter);
-      return send ? (notice) => send(userId, notice) : undefined;
+      if (!send) return undefined;
+      return async (notice) => {
+        const result = await send(userId, notice);
+        // A notice also meets the 50278 refusal, and marking it here is what
+        // keeps the status honest when the notice was the first send to that
+        // person after the bot lost the server they were in.
+        if (!result.ok && isNoSharedServer(result.error)) markNoSharedServer(agentId, userId);
+        return result;
+      };
     },
     // A notice is closed by the adapter of the agent that posted it, from the
     // reference the control-plane kept.
@@ -690,20 +786,44 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       // channel's answer to that message, and goes back to the send queue.
       return async (chunk: string): Promise<DeliveryResult> => {
         const text = await withApprovalLink(agentId, chunk);
+        // A marked person is still attempted once for a new chunk: the bot
+        // cannot see members without a privileged intent, so a send is the
+        // only way to learn they joined a server the bot is in. On success the
+        // refusal is over and what was kept goes after this message; on 50278
+        // the chunk is kept too, with no retry and no failure marker into the
+        // same refused DM.
+        if (noSharedServerMarkAt(agentId, userId) !== undefined) {
+          const result = await sendNow(text);
+          if (result.ok) {
+            clearNoSharedServer(agentId, userId);
+            await deliverKept(agentId, userId);
+            return result;
+          }
+          if (isNoSharedServer(result.error)) {
+            markNoSharedServer(agentId, userId);
+            return keepReply(agentId, userId, text);
+          }
+          if (!channelCanCarry(agentId, adapter)) return keepReply(agentId, userId, text);
+          return result;
+        }
         if (keptReplies.pending(agentId, userId)) await deliverKept(agentId, userId);
         if (keptReplies.has(agentId, userId) || !channelCanCarry(agentId, adapter)) {
           return keepReply(agentId, userId, text);
         }
         const result = await sendNow(text);
+        // 50278 is final for this message: retrying it and posting the failure
+        // marker would meet the same refusal, so the reply is kept and the
+        // person is reported once instead.
+        if (!result.ok && isNoSharedServer(result.error)) {
+          markNoSharedServer(agentId, userId);
+          return keepReply(agentId, userId, text);
+        }
         if (!result.ok && !channelCanCarry(agentId, adapter)) return keepReply(agentId, userId, text);
+        if (result.ok) clearNoSharedServer(agentId, userId);
         return result;
       };
     },
   });
-
-  for (const agent of config.agents) {
-    adapters.set(agent.id, await createAdapter(agent, productionDispatcher));
-  }
 
   // The messages the previous bridge kept while it stopped are answered by
   // this one, an agent's as soon as its adapter is up, because the answer goes
@@ -736,6 +856,30 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     deliverKeptFor(agentId);
     answerKept(agentId);
   };
+
+  /**
+   * Wire one adapter the bridge is about to hold, at boot and on every reload.
+   * A fresh adapter is a fresh view of the platform, so the marks of the
+   * adapter it replaces described a bot that is gone and are dropped. Its
+   * reachability event — Discord's GUILD_CREATE, the bot arriving in a server —
+   * means the person who shared no server with the bot can be DMed again:
+   * every mark of this agent is cleared and the replies kept for those people
+   * are sent.
+   */
+  const registerAdapter = (adapter: ChatAdapter): void => {
+    clearNoSharedServerFor(adapter.agentId);
+    adapter.onReachable?.(() => {
+      clearNoSharedServerFor(adapter.agentId);
+      channelBack(adapter.agentId);
+    });
+  };
+
+  // Build the adapter table before the start loop below.
+  for (const agent of config.agents) {
+    const adapter = await createAdapter(agent, productionDispatcher);
+    adapters.set(agent.id, adapter);
+    registerAdapter(adapter);
+  }
 
   // A channel can come back with no start to say so, a client reconnecting by
   // itself: while anything is kept, each agent is asked at this interval
@@ -857,6 +1001,23 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           mode: modeMissing.requested,
           available: modeMissing.available,
           detail: modeMissing.detail,
+        },
+      };
+    }
+    // A refused DM is reported last: a refused credential and a missing
+    // session mode are still the things a person must fix first, because no
+    // message reaches the assistant while either holds. The first person
+    // marked is named; the channel and every other person of the agent are
+    // working, which is why this alone is not "the channel is down".
+    const refusedPeople = noSharedServerMarks.get(id);
+    const userId = refusedPeople?.keys().next().value;
+    if (refusedPeople && userId !== undefined) {
+      return {
+        failure: {
+          kind: "no_shared_server",
+          user_id: userId,
+          detail:
+            "The bot shares no server with this person, so Discord refuses every DM to them. Add the bot to a server the person is in, using the link the console shows; the replies kept for them are sent once it is there.",
         },
       };
     }
@@ -1074,8 +1235,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         createAdapter,
         dispatcher: productionDispatcher,
         startAdapter,
+        onAdapterCreated: registerAdapter,
         forgetAgent: (agentId) => {
           supervisor?.cancel(agentId);
+          clearNoSharedServerFor(agentId);
           const dropped = keptReplies.forget(agentId);
           if (dropped > 0)
             logger.warn({ agentId, dropped }, "auto-reload: an agent removed with replies still kept — dropped");

@@ -143,6 +143,19 @@ describe("cross-adapter typing invariants (OPT-67)", () => {
 // cap logic itself is covered behaviourally in inbound-attachments.test.ts
 // (buildOversizeNotice + ingest `rejected` shape). This guards that each
 // adapter actually calls it.
+// A person who shares no server with the bot cannot be DMed (Discord answers
+// 50278), and adding the bot to any server lifts that. The bridge learns it can
+// reach people again through the adapter's onReachable listeners, which this
+// adapter has to call on GUILD_CREATE. Driving a real guild event needs a
+// gateway the stand-in does not speak, so — like the rest of this file — this
+// pins the wiring: the event is listened for and the listeners exist.
+describe("discord-adapter reports that it can reach people again", () => {
+  it("calls the onReachable listeners when the bot is added to a server", () => {
+    expect(adapter).toMatch(/Events\.GuildCreate/);
+    expect(adapter).toMatch(/onReachable/);
+  });
+});
+
 describe("cross-adapter fail-loud on oversize attachment (M-FILE-LIMITS-1)", () => {
   // Each adapter must pass its own channel literal so the effective per-channel
   // cap (min(setting, channel ceiling)) and the oversize notice's MB figure are

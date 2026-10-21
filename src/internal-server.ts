@@ -50,7 +50,7 @@ export interface InternalServer {
  * change, because an operator who knows an assistant is down still has to be
  * told which value to edit and where.
  */
-export type AgentFailure = CredentialRejectedFailure | SessionModeMissingFailure;
+export type AgentFailure = CredentialRejectedFailure | SessionModeMissingFailure | NoSharedServerFailure;
 
 /** The channel provider refused this agent's credential. */
 export interface CredentialRejectedFailure {
@@ -79,6 +79,26 @@ export interface SessionModeMissingFailure {
   mode: string;
   /** The modes the slot does offer. Empty is a legal and informative answer. */
   available: string[];
+  /** One line naming what a person has to do to bring the assistant back. */
+  detail: string;
+}
+
+/**
+ * The bot is in no server this person is in, so Discord refuses every DM to
+ * them with 50278 and the assistant's replies to that person are kept rather
+ * than delivered.
+ *
+ * It is different from the two kinds above: the channel is up and every other
+ * person of the agent is reachable, so no other field of this snapshot shows
+ * anything wrong. What fixes it is an administrator adding the bot to a server
+ * the person is in, with the link the console shows; Discord lifts the refusal
+ * at once, and the bot's arrival in a server is what tells the bridge to send
+ * what was kept.
+ */
+export interface NoSharedServerFailure {
+  kind: "no_shared_server";
+  /** The person Discord refuses to carry a DM to. */
+  user_id: string;
   /** One line naming what a person has to do to bring the assistant back. */
   detail: string;
 }

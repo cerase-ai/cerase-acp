@@ -74,6 +74,19 @@ export interface ChatAdapter {
    */
   reachability?(): ReachabilitySnapshot;
   /**
+   * Listen for the adapter learning that its channel can reach people it could
+   * not before. Discord raises GUILD_CREATE when the bot is added to a server,
+   * and that is the moment a person who shared no server with it becomes
+   * reachable; the bridge uses it to clear the refusal it reported and send
+   * what was kept.
+   *
+   * Optional: a channel with no such event needs no listener, and one that
+   * never calls it keeps the refusal until a later send to the person succeeds.
+   * The listener takes no arguments; the bridge already knows the agent.
+   */
+  onReachable?(listener: () => void): void;
+
+  /**
    * The function the dispatcher uses to send a chunk to this user's DM.
    *
    * **Typing-indicator contract, for every adapter that shows an "is
