@@ -1,6 +1,8 @@
 // Tracks the per-`(agent, user)` last-turn timestamp and produces the
 // `[turn_meta: gap=…, lang=…, now=…]` block the bridge prepends to each
-// `session/prompt`. The agent reads it by the rules in the baseline prompt,
+// `session/prompt`, with `written_during_previous_work=… ago` when the person
+// wrote the message while the previous work was still running. The agent reads
+// it by the rules in the baseline prompt,
 // cerase-core's control-plane/config/defaults/agents-baseline.md.
 
 export type SupportedLang = "it" | "en" | "es" | "fr" | "unknown";
@@ -300,13 +302,21 @@ export function detectLanguage(raw: string): SupportedLang {
   return languageEvidence(raw).lang;
 }
 
-export function makeTurnMetaBlock(parts: { gap: string; lang: SupportedLang; now?: string }): string {
+export function makeTurnMetaBlock(parts: {
+  gap: string;
+  lang: SupportedLang;
+  now?: string;
+  writtenAgo?: string;
+}): string {
   // The clock is OPTIONAL and appended last, both on purpose. Optional because
   // a control-plane that cannot be reached must not cost the turn a clock it
   // never had; last because the block is a suffix and everything before it is
-  // what the assistant has been reading since the first version.
+  // what the assistant has been reading since the first version. The age of a
+  // message written during the previous work is appended after the clock, or
+  // after `lang` when there is none, and is absent on every other turn.
   const clock = parts.now ? `, now=${parts.now}` : "";
-  return `[turn_meta: gap=${parts.gap}, lang=${parts.lang}${clock}]\n\n`;
+  const written = parts.writtenAgo ? `, written_during_previous_work=${parts.writtenAgo} ago` : "";
+  return `[turn_meta: gap=${parts.gap}, lang=${parts.lang}${clock}${written}]\n\n`;
 }
 
 interface TurnState {
@@ -385,7 +395,14 @@ export class TurnMetaTracker {
     agentId: string,
     userId: string,
     text: string,
-    opts: { resolveLastTurn?: LastTurnResolver; clock?: string; now?: number; fallbackLang?: SupportedLang } = {},
+    opts: {
+      resolveLastTurn?: LastTurnResolver;
+      clock?: string;
+      now?: number;
+      fallbackLang?: SupportedLang;
+      /** Epoch ms the person wrote the message: marks it written during the previous work. */
+      writtenAt?: number;
+    } = {},
   ): Promise<string> {
     const now = opts.now ?? Date.now();
     const k = key(agentId, userId);
@@ -407,7 +424,8 @@ export class TurnMetaTracker {
     const lang = this.turnLanguage(k, text, opts.fallbackLang);
     this.record(k, now, lang);
 
-    return makeTurnMetaBlock({ gap, lang, now: opts.clock });
+    const writtenAgo = opts.writtenAt === undefined ? undefined : formatGap(opts.writtenAt, now);
+    return makeTurnMetaBlock({ gap, lang, now: opts.clock, writtenAgo });
   }
 
   /**

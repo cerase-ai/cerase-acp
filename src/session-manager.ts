@@ -385,6 +385,18 @@ interface SessionEntry {
    * the session that replaces it.
    */
   outgrown: boolean;
+  /**
+   * A prompt of a turn is in flight on this session: from just before
+   * `connection.prompt` until that prompt, and every prompt sent alongside it,
+   * have been answered. A message arriving meanwhile may go into the work in
+   * progress rather than wait (see `promptAlongside`).
+   */
+  running: boolean;
+  /**
+   * The prompts sent on this session while a turn was running but outside its
+   * queue, which that turn waits for before it drains: see `promptAlongside`.
+   */
+  alongside: Set<Promise<unknown>>;
 }
 
 const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
@@ -851,6 +863,53 @@ export class SessionManager {
     return this.entries.has(key) || this.inFlightSpawns.has(key) || this.resumableSessions.get(key) !== undefined;
   }
 
+  /**
+   * Whether a turn's prompt is in flight on the pair's session, on a connection
+   * the bridge is not ending: what `promptAlongside` needs to send.
+   */
+  workInProgress(agentId: string, userId: string): boolean {
+    const entry = this.entries.get(sessionKey(agentId, userId));
+    if (!entry || entry.closed || entry.closedByBridge || entry.connection.signal.aborted) return false;
+    return entry.running;
+  }
+
+  /**
+   * Send a prompt at once on a session whose turn is still running, outside the
+   * queue, so the runtime takes it into the work in progress at its next step.
+   *
+   * Undefined when there is no work to join: no entry for the pair, one the
+   * bridge is ending or has ended, or a session with no prompt in flight. The
+   * caller then lets the message wait as it always did.
+   *
+   * The prompt carries the same blocks `prompt()` builds. Its updates reach the
+   * running prompt's `onUpdate`, because that is the turn that answers it; the
+   * promise is kept in `alongside` so that turn waits for it before it drains.
+   */
+  promptAlongside(
+    agentId: string,
+    userId: string,
+    text: string,
+    options?: { context?: string },
+  ): Promise<PromptResult> | undefined {
+    if (!this.workInProgress(agentId, userId)) return undefined;
+    const entry = this.entries.get(sessionKey(agentId, userId))!;
+
+    const prompt: acp.ContentBlock[] = [{ type: "text", text }];
+    if (options?.context) {
+      prompt.unshift({ type: "text", text: options.context, annotations: { audience: ["assistant"] } });
+    }
+    const sent = entry.connection.prompt({ sessionId: entry.sessionId, prompt });
+    entry.alongside.add(sent);
+    const forget = () => {
+      entry.alongside.delete(sent);
+    };
+    // Both outcomes are handled here: a failed prompt is the caller's to fall
+    // back from, and the set must not keep a settled promise or an unhandled
+    // rejection.
+    sent.then(forget, forget);
+    return sent.then((response) => ({ stopReason: response.stopReason }));
+  }
+
   async prompt(
     agentId: string,
     userId: string,
@@ -1120,12 +1179,24 @@ export class SessionManager {
         if (options?.context) {
           prompt.unshift({ type: "text", text: options.context, annotations: { audience: ["assistant"] } });
         }
+        entry!.running = true;
         try {
           response = await Promise.race([
-            entry!.connection.prompt({
-              sessionId: entry!.sessionId,
-              prompt,
-            }),
+            (async () => {
+              const r = await entry!.connection.prompt({
+                sessionId: entry!.sessionId,
+                prompt,
+              });
+              // A prompt sent alongside while this one ran may become its own
+              // work right after this RPC resolves, as opencode does when it
+              // arrives during the answer step. Wait for every such prompt
+              // here, under the same watchdog and before the drain, so its
+              // updates still reach this turn's onUpdate.
+              while (entry!.alongside.size > 0) {
+                await Promise.allSettled([...entry!.alongside]);
+              }
+              return r;
+            })(),
             watchdog,
           ]);
         } catch (err) {
@@ -1156,6 +1227,7 @@ export class SessionManager {
           }
           throw err;
         } finally {
+          entry!.running = false;
           // clearInterval, not clearTimeout: the watchdog above repeats, and a
           // timeout cleared with the wrong call would go on ticking for the
           // life of the process.
@@ -1555,6 +1627,8 @@ export class SessionManager {
       spawnedAt,
       closedByBridge: false,
       outgrown: false,
+      running: false,
+      alongside: new Set(),
     };
     entryRef = entry;
     // Recorded now, while the session is alive, and not only when its child

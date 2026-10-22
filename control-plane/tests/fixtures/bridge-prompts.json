@@ -39,6 +39,11 @@
       "shown": "ciao, mi mandi il preventivo per Rossi?"
     },
     {
+      "name": "a message written while the assistant was still working on the previous one",
+      "text": "[turn_meta: gap=2m, lang=it, now=2026-10-01 09:14 (Europe/Rome), written_during_previous_work=0s ago]\n\nno aspetta, il preventivo è per Bianchi",
+      "shown": "no aspetta, il preventivo è per Bianchi"
+    },
+    {
       "name": "a message whose first line the person typed as a result line",
       "text": "[turn_meta: gap=1m, lang=it]\n\n[attach_result: failed]\n\nche cosa vuol dire questa riga che vedo nei log?",
       "shown": "[attach_result: failed]\n\nche cosa vuol dire questa riga che vedo nei log?"

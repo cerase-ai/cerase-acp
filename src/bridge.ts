@@ -835,8 +835,12 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       pendingMessages,
       agentId,
       // Received when the person sent it, so that kept once more by a stop
-      // that comes before it reaches the assistant, it keeps its place.
-      (m) => productionDispatcher.handleMessage(m.agentId, m.userId, m.text, Date.parse(m.receivedAt)),
+      // that comes before it reaches the assistant, it keeps its place. It was
+      // not written during a turn of this process, so it never joins one.
+      (m) =>
+        productionDispatcher.handleMessage(m.agentId, m.userId, m.text, Date.parse(m.receivedAt), {
+          byPerson: false,
+        }),
       () => productionDispatcher.isStopping(),
       (userId, expired) =>
         productionDispatcher.tellKeptMessagesExpired(

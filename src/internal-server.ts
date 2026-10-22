@@ -3,13 +3,14 @@
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice? }  → 202
+//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person? }  → 202
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
-// user had sent it, optionally posting a deterministic heads-up first. A
-// platform note that arrives while a turn of its conversation runs waits for
-// that turn with the other notes, and they share the next one
-// (note-coalescer.ts).
+// user had sent it, optionally posting a deterministic heads-up first. The
+// console's chat sets `from_person` for what a person typed; a scheduled
+// message does not. A platform note that arrives while a turn of its
+// conversation runs waits for that turn with the other notes, and they share
+// the next one (note-coalescer.ts).
 // The 202 means accepted (validation and allowlist passed), not that the turn
 // completed: the caller (AcpInjector) gives up after 15 s, a turn routinely
 // takes longer, and a caller that saw a timeout would send the message again.
@@ -510,7 +511,14 @@ async function handleRequest(
   // `runInjectTurn` never rejects by construction (it catches everything and
   // records the outcome); the trailing catch is unhandled-rejection insurance
   // so a detached-task bug can't crash the process.
-  runInjectTurn(opts, injects, notes, { agentId, userId, text, surfaceInChat, headsUp }).catch((err) => {
+  runInjectTurn(opts, injects, notes, {
+    agentId,
+    userId,
+    text,
+    surfaceInChat,
+    headsUp,
+    byPerson: rec.from_person === true,
+  }).catch((err) => {
     logger.error({ err, agentId, userId }, "detached inject task rejected unexpectedly");
     injects.fail(agentId, userId, err);
   });
@@ -526,9 +534,9 @@ async function runInjectTurn(
   opts: InternalServerOptions,
   injects: InjectTracker,
   notes: NoteCoalescer,
-  p: { agentId: string; userId: string; text: string; surfaceInChat: boolean; headsUp: string },
+  p: { agentId: string; userId: string; text: string; surfaceInChat: boolean; headsUp: string; byPerson: boolean },
 ): Promise<void> {
-  const { agentId, userId, text, surfaceInChat, headsUp } = p;
+  const { agentId, userId, text, surfaceInChat, headsUp, byPerson } = p;
   try {
     if (surfaceInChat) {
       // Deterministic heads-up before the model turn (best-effort — a
@@ -549,8 +557,8 @@ async function runInjectTurn(
     // (and the dispatcher has already sent the user-facing error copy).
     // A platform note that arrives during a turn of its conversation waits
     // for it with the other notes, and they run as one turn; anything else
-    // goes straight to the dispatcher.
-    const result = await notes.submit(agentId, userId, text);
+    // goes straight to the dispatcher, marked with who wrote it.
+    const result = await notes.submit(agentId, userId, text, undefined, { byPerson });
     if (!result.ok) {
       logger.error({ err: result.error, agentId, userId }, "detached inject turn/delivery failed");
       injects.fail(agentId, userId, result.error);

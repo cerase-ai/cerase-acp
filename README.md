@@ -175,6 +175,15 @@ allowlist gates `/internal/inject`.
    `GET /api/internal/turn-context/{agent}`, which also supplies the previous
    message's time after a bridge restart. The rules the assistant reads it by
    are in the baseline prompt, `cerase-core/control-plane/config/defaults/agents-baseline.md`.
+   A message the person writes while a turn of the same conversation still has
+   a prompt in flight is sent at once on the same session
+   (`SessionManager.promptAlongside`): opencode takes it into the work in
+   progress at the model's next step, and the running turn delivers the answer,
+   waiting for that prompt too before it ends. One that finds no prompt in
+   flight waits for the turn to end and goes as its own. Both carry
+   `written_during_previous_work=<age> ago` in the block. A scheduled message
+   (`/internal/inject` without `from_person`), a platform note and a message
+   replayed after a restart wait as before, unmarked.
 3. **Google links.** A link in the message to a Google Docs document, Sheets
    spreadsheet, Slides presentation, Drive file or Drive folder
    (`docs.google.com/document|spreadsheets|presentation/d/<id>`,

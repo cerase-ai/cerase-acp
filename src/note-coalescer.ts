@@ -39,7 +39,13 @@ export function isPlatformNote(text: string): boolean {
 
 /** The part of the dispatcher the coalescer drives. */
 export interface NoteTurns {
-  handleMessage(agentId: string, userId: string, text: string): Promise<DeliveryResult>;
+  handleMessage(
+    agentId: string,
+    userId: string,
+    text: string,
+    receivedAt?: number,
+    options?: { byPerson?: boolean },
+  ): Promise<DeliveryResult>;
   /**
    * Settles when every turn of the conversation that is running now has
    * ended; null when none is. A dispatcher that cannot answer has every note
@@ -64,8 +70,14 @@ export class NoteCoalescer {
    * the conversation is idle, else with the other notes waiting for the turn
    * now running. Every note of a batch resolves to the batch's outcome.
    */
-  submit(agentId: string, userId: string, text: string): Promise<DeliveryResult> {
-    if (!isPlatformNote(text)) return this.turns.handleMessage(agentId, userId, text);
+  submit(
+    agentId: string,
+    userId: string,
+    text: string,
+    receivedAt?: number,
+    options?: { byPerson?: boolean },
+  ): Promise<DeliveryResult> {
+    if (!isPlatformNote(text)) return this.turns.handleMessage(agentId, userId, text, receivedAt, options);
 
     const key = `${agentId}:${userId}`;
     const batch = this.waiting.get(key);

@@ -19,6 +19,7 @@ import { EMPTY_TURN_RETRIES, emptyTurnRetryPrompt } from "./empty-turn.js";
 import { googleLinksNote } from "./google-links.js";
 import { withInstructionsChanged } from "./instructions-changed.js";
 import { makeLogger } from "./logger.js";
+import { isPlatformNote } from "./note-coalescer.js";
 import type { PendingMessages } from "./pending-messages.js";
 import { withPlatformNotes } from "./platform-notes.js";
 import { type NoticeRef, noticeText, type PlatformNotice } from "./platform-notice.js";
@@ -359,6 +360,25 @@ interface ReplyStream {
   endedInMarkup: () => boolean;
 }
 
+/** What `Dispatcher.handleMessage` accepts besides the message itself. */
+export interface HandleMessageOptions {
+  /**
+   * Whether the person wrote this text, as opposed to a scheduled message or a
+   * replay of one. Defaults to true. A platform note is never the person's,
+   * whatever this says.
+   */
+  byPerson?: boolean;
+}
+
+/** What a turn's prompt carries besides the person's words: see `preparePrompt`. */
+interface PreparedPrompt {
+  promptText: string;
+  context?: string;
+  googleLinks: boolean;
+  instructionsChanged: boolean;
+  platformNotes: number;
+}
+
 export class Dispatcher {
   // Per conversation, the end of the turns being held through a restart. A
   // turn held after another waits for it, and a message that arrives meanwhile
@@ -599,13 +619,25 @@ export class Dispatcher {
    * after its retries, or a direct send (refusal, notice, error copy) that
    * failed.
    */
-  handleMessage(agentId: string, userId: string, text: string, receivedAt = Date.now()): Promise<DeliveryResult> {
-    const turn = this.runTurn(agentId, userId, text, receivedAt);
+  handleMessage(
+    agentId: string,
+    userId: string,
+    text: string,
+    receivedAt = Date.now(),
+    options?: HandleMessageOptions,
+  ): Promise<DeliveryResult> {
+    const turn = this.runTurn(agentId, userId, text, receivedAt, options?.byPerson !== false);
     this.trackTurn(agentId, userId, turn);
     return turn;
   }
 
-  private async runTurn(agentId: string, userId: string, text: string, receivedAt: number): Promise<DeliveryResult> {
+  private async runTurn(
+    agentId: string,
+    userId: string,
+    text: string,
+    receivedAt: number,
+    byPerson: boolean,
+  ): Promise<DeliveryResult> {
     // Allowlist gate. isAllowed throws on unknown agent id — let that
     // propagate so the adapter logs it as a wiring bug.
     if (!isAllowed(this.deps.config, agentId, userId)) {
@@ -654,20 +686,67 @@ export class Dispatcher {
       }
     }
 
+    // A message the person writes while a turn of this conversation runs can
+    // go into the work in progress: opencode takes such a prompt at the
+    // model's next step and answers it with that work, so the person is heard
+    // without waiting for the answer to their earlier message. Scheduled
+    // messages and platform notes are left out: the person did not write them
+    // during that work. A message that cannot be sent that way waits below.
+    const person = byPerson && !isPlatformNote(text);
+    const conversationKey = `${agentId}:${userId}`;
+    let prepared: PreparedPrompt | undefined;
+    const sm = this.deps.sessionManager;
+    // Asked before the prompt is built, because building it hands over the
+    // platform notes waiting for this conversation and records this turn's
+    // time: a message with no work to join is built when its own turn comes.
+    const working = typeof sm.workInProgress === "function" && sm.workInProgress(agentId, userId);
+    if (person && this.inOrder.has(conversationKey) && working) {
+      try {
+        // Built once: a message that falls back after a failed send keeps the
+        // mark of having been written during the previous work, and the notes
+        // already handed over with it.
+        prepared = await this.preparePrompt(agentId, userId, text, { writtenAt: receivedAt });
+        const alongside = this.deps.sessionManager.promptAlongside(
+          agentId,
+          userId,
+          prepared.promptText,
+          prepared.context ? { context: prepared.context } : undefined,
+        );
+        if (alongside) {
+          const holding = this.deps.sessionManager.holdTurn(agentId);
+          try {
+            await alongside;
+            logger.info({ agentId, userId, textLen: text.length }, "the message was sent into the work in progress");
+            return { ok: true };
+          } finally {
+            holding();
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          { err, agentId, userId },
+          "sending the message into the work in progress failed — it waits for its turn",
+        );
+      }
+    }
+
     // One turn of a conversation at a time, from its first prompt to its last
-    // follow-up. A message the person sends while the assistant is answering
-    // waits here, not in the session's queue: a follow-up the bridge sends
-    // after the turn's prompt ended (another try after an empty answer or a
-    // held-back one, the correction of a file that did not arrive) is part of
-    // the same turn, and on 6 October one queued behind the person's «??» left
-    // them reading nothing while the answer to their earlier message waited.
-    const release = await this.turnInOrder(agentId, userId);
+    // follow-up. A message that could not join the work in progress waits
+    // here, not in the session's queue: a follow-up the bridge sends after the
+    // turn's prompt ended (another try after an empty answer or a held-back
+    // one, the correction of a file that did not arrive) is part of the same
+    // turn, and on 6 October one queued behind the person's «??» left them
+    // reading nothing while the answer to their earlier message waited.
+    const { release, waited } = await this.turnInOrder(agentId, userId);
     const status = line && this.turnStatus(agentId, userId, text, line);
     try {
       // A bridge that began to stop while this message waited keeps it for
       // the next one: the assistant has not seen it.
       if (this.stopping) return await this.keepForNextBridge(agentId, userId, text, receivedAt);
-      return await this.answer(agentId, userId, text, receivedAt, send, status);
+      return await this.answer(agentId, userId, text, receivedAt, send, status, {
+        writtenAt: person && waited ? receivedAt : undefined,
+        prepared,
+      });
     } finally {
       // After the turn's last follow-up, and not awaited: a status line the
       // channel is slow to take down holds up neither this turn's result nor
@@ -705,13 +784,15 @@ export class Dispatcher {
 
   /**
    * Wait for every turn of this conversation that came before this one, and
-   * hold the place of this one until the returned function is called. While it
-   * waits the turn is in no queue of the session manager, so it is counted for
-   * the agent as a held turn is.
+   * hold the place of this one until `release` is called. `waited` says an
+   * earlier turn was in progress, so a message that could not join it was
+   * written during that work. While it waits the turn is in no queue of the
+   * session manager, so it is counted for the agent as a held turn is.
    */
-  private async turnInOrder(agentId: string, userId: string): Promise<() => void> {
+  private async turnInOrder(agentId: string, userId: string): Promise<{ release: () => void; waited: boolean }> {
     const key = `${agentId}:${userId}`;
     const before = this.inOrder.get(key);
+    const waited = before !== undefined;
     let done: () => void = () => {};
     const mine = new Promise<void>((resolve) => {
       done = resolve;
@@ -731,7 +812,7 @@ export class Dispatcher {
         waiting();
       }
     }
-    return release;
+    return { release, waited };
   }
 
   /** The turn itself, once every earlier turn of its conversation has ended: see `runTurn`. */
@@ -742,6 +823,7 @@ export class Dispatcher {
     receivedAt: number,
     send: SendTarget,
     status: TurnStatus | undefined,
+    opts: { writtenAt?: number; prepared?: PreparedPrompt } = {},
   ): Promise<DeliveryResult> {
     // Behind any turn of this conversation still waiting out a restart.
     await this.holds.get(`${agentId}:${userId}`);
@@ -763,73 +845,20 @@ export class Dispatcher {
 
     let { queue, reply } = this.openReply(agentId, userId, send, text);
 
-    // One call, two facts, and neither is worth failing a turn over. The clock
-    // goes into every turn_meta block; the last turn's time is used only when
-    // this process has no memory of the pair, as after a restart.
-    let clock: string | undefined;
-    let contextLastTurnAt: number | undefined;
-    // Whether the assistant's instructions or skills changed after this
-    // conversation's last message: it is told once, in front of this turn.
-    let instructionsChanged = false;
-    // What the platform posted in this person's chat since the last turn. Each
-    // note is handed over once, and goes in front of this turn.
-    let notes: string[] = [];
-    if (this.deps.turnContext) {
-      try {
-        const ctx = await this.deps.turnContext(agentId, userId);
-        clock = ctx.clock;
-        contextLastTurnAt = ctx.lastTurnAt;
-        instructionsChanged = ctx.instructionsChanged === true;
-        notes = ctx.notes ?? [];
-      } catch (err) {
-        logger.warn({ err, agentId, userId }, "turn context unavailable — proceeding without a clock");
-      }
-    }
-    const prefix = await this.deps.turnMeta.prefixWithContext(agentId, userId, text, {
-      clock,
-      resolveLastTurn: contextLastTurnAt === undefined ? undefined : async () => contextLastTurnAt,
-      // A turn whose words do not say its language, with no earlier turn in
-      // this process to take it from, as after a restart, takes the
-      // organisation's, as the bridge's own notices do.
-      fallbackLang: this.deps.config.locale,
-    });
-    const promptText = prefix + text;
-    // The Google files the message links to, told to the assistant alone with
-    // their ids, which the masking of URLs at the model boundary would hide.
-    const links = googleLinksNote(text);
-    // A message that starts a new conversation is told how the person's
-    // previous one ended, when it ended recently; the note that the
-    // instructions changed is about a conversation that goes on, so it goes
-    // only to one that does.
-    const fresh =
-      this.deps.recentConversation !== undefined && !this.deps.sessionManager.holdsConversation(agentId, userId);
-    let carried: string | undefined;
-    if (fresh && this.deps.recentConversation) {
-      try {
-        const recent = await this.deps.recentConversation(agentId);
-        if (recent) carried = recentConversationNote(recent);
-      } catch (err) {
-        logger.warn(
-          { err, agentId, userId },
-          "the previous conversation could not be read — the new one starts without it",
-        );
-      }
-    }
-    const context = withPlatformNotes(
-      notes,
-      fresh
-        ? [carried, links].filter((part): part is string => part !== undefined).join("\n\n") || undefined
-        : withInstructionsChanged(instructionsChanged, links),
-    );
+    // Built once: a message that tried to join the work in progress and fell
+    // back keeps the prefix and context built for that try, so the mark of
+    // having been written during the previous work survives.
+    const prepared = opts.prepared ?? (await this.preparePrompt(agentId, userId, text, { writtenAt: opts.writtenAt }));
+    const { promptText, context } = prepared;
 
     logger.info(
       {
         agentId,
         userId,
         textLen: text.length,
-        googleLinks: links !== undefined,
-        instructionsChanged,
-        platformNotes: notes.length,
+        googleLinks: prepared.googleLinks,
+        instructionsChanged: prepared.instructionsChanged,
+        platformNotes: prepared.platformNotes,
       },
       "dispatching to session manager",
     );
@@ -1042,6 +1071,80 @@ export class Dispatcher {
       return { ok: false, error: this.deliveryError(drainResult.ok ? retryDrain : drainResult) };
     }
     return { ok: true };
+  }
+
+  /**
+   * The prompt text and the context block one turn sends: its `[turn_meta:]`
+   * prefix, the platform notes, the link ids and the word that the
+   * instructions changed. `answer` and the try to join a running work both
+   * build them here, so the two cannot drift apart.
+   */
+  private async preparePrompt(
+    agentId: string,
+    userId: string,
+    text: string,
+    opts: { writtenAt?: number } = {},
+  ): Promise<PreparedPrompt> {
+    // One call, two facts, and neither is worth failing a turn over. The clock
+    // goes into every turn_meta block; the last turn's time is used only when
+    // this process has no memory of the pair, as after a restart.
+    let clock: string | undefined;
+    let contextLastTurnAt: number | undefined;
+    // Whether the assistant's instructions or skills changed after this
+    // conversation's last message: it is told once, in front of this turn.
+    let instructionsChanged = false;
+    // What the platform posted in this person's chat since the last turn. Each
+    // note is handed over once, and goes in front of this turn.
+    let notes: string[] = [];
+    if (this.deps.turnContext) {
+      try {
+        const ctx = await this.deps.turnContext(agentId, userId);
+        clock = ctx.clock;
+        contextLastTurnAt = ctx.lastTurnAt;
+        instructionsChanged = ctx.instructionsChanged === true;
+        notes = ctx.notes ?? [];
+      } catch (err) {
+        logger.warn({ err, agentId, userId }, "turn context unavailable — proceeding without a clock");
+      }
+    }
+    const prefix = await this.deps.turnMeta.prefixWithContext(agentId, userId, text, {
+      clock,
+      resolveLastTurn: contextLastTurnAt === undefined ? undefined : async () => contextLastTurnAt,
+      // A turn whose words do not say its language, with no earlier turn in
+      // this process to take it from, as after a restart, takes the
+      // organisation's, as the bridge's own notices do.
+      fallbackLang: this.deps.config.locale,
+      writtenAt: opts.writtenAt,
+    });
+    const promptText = prefix + text;
+    // The Google files the message links to, told to the assistant alone with
+    // their ids, which the masking of URLs at the model boundary would hide.
+    const links = googleLinksNote(text);
+    // A message that starts a new conversation is told how the person's
+    // previous one ended, when it ended recently; the note that the
+    // instructions changed is about a conversation that goes on, so it goes
+    // only to one that does.
+    const fresh =
+      this.deps.recentConversation !== undefined && !this.deps.sessionManager.holdsConversation(agentId, userId);
+    let carried: string | undefined;
+    if (fresh && this.deps.recentConversation) {
+      try {
+        const recent = await this.deps.recentConversation(agentId);
+        if (recent) carried = recentConversationNote(recent);
+      } catch (err) {
+        logger.warn(
+          { err, agentId, userId },
+          "the previous conversation could not be read — the new one starts without it",
+        );
+      }
+    }
+    const context = withPlatformNotes(
+      notes,
+      fresh
+        ? [carried, links].filter((part): part is string => part !== undefined).join("\n\n") || undefined
+        : withInstructionsChanged(instructionsChanged, links),
+    );
+    return { promptText, context, googleLinks: links !== undefined, instructionsChanged, platformNotes: notes.length };
   }
 
   /**
