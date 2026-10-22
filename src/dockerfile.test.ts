@@ -57,6 +57,41 @@ describe("Dockerfile", () => {
   });
 });
 
+describe("the runtime stage builds the same packages twice, and says when it is healthy", () => {
+  const runtimeStage = dockerfile.slice(dockerfile.lastIndexOf("\nFROM "));
+
+  it("pins every apt package it installs to an exact version", () => {
+    // The base is pinned by digest, but an unpinned `apt-get install` takes
+    // whatever the mirror holds that day. A package named without `=version`
+    // is a build that differs from the one before it, and the scan cannot say
+    // which of the two it approved.
+    const install = /apt-get install([\s\S]*?)&&/.exec(runtimeStage)?.[1] ?? "";
+    const packages = install
+      .replace(/\\\n/g, " ")
+      .split(/\s+/)
+      .filter((word) => word !== "" && !word.startsWith("-"));
+    expect(packages.length).toBeGreaterThan(0);
+    for (const pkg of packages) {
+      expect(pkg, `unpinned apt package: ${pkg}`).toMatch(/^[a-z0-9][a-z0-9.+-]*=\S+$/);
+    }
+  });
+
+  it("declares a HEALTHCHECK that reads the internal server's /healthz", () => {
+    // The same probe the appliance's compose file declares, so the image is
+    // judged the same way under `docker run`. Compose overrides this one when
+    // it runs the service; the two must stay the same command.
+    expect(runtimeStage).toMatch(/^HEALTHCHECK\b/m);
+    expect(runtimeStage).toMatch(/HEALTHCHECK[^\n]*(?:\\\n[^\n]*)*\/healthz/);
+    expect(runtimeStage).toMatch(/CERASE_ACP_INTERNAL_PORT\|\|7476/);
+    // Uses node, which the image has; curl and wget are not installed.
+    expect(runtimeStage).toMatch(/HEALTHCHECK[^\n]*(?:\\\n[^\n]*)*"node",\s*"-e"/);
+  });
+
+  it("gives a cold start room before it counts failures", () => {
+    expect(runtimeStage).toMatch(/--start-period=30s/);
+  });
+});
+
 describe("the runtime stage and the scan that holds it", () => {
   type Step = { name?: string; uses?: string; with?: Record<string, unknown> };
   const publish = parse(readFileSync(join(repoRoot, ".github/workflows/docker-publish.yml"), "utf8"));
