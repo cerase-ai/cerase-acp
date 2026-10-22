@@ -57,6 +57,28 @@ describe("makeTurnMetaBlock", () => {
     const block = makeTurnMetaBlock({ gap: "first", lang: "it" });
     expect(block).toBe("[turn_meta: gap=first, lang=it]\n\n");
   });
+
+  it("puts the written-during-previous-work age after the clock", () => {
+    const block = makeTurnMetaBlock({
+      gap: "2m",
+      lang: "it",
+      now: "2026-10-22 09:12 (Europe/Rome)",
+      writtenAgo: "1m",
+    });
+    expect(block).toBe(
+      "[turn_meta: gap=2m, lang=it, now=2026-10-22 09:12 (Europe/Rome), written_during_previous_work=1m ago]\n\n",
+    );
+  });
+
+  it("puts the written-during-previous-work age after lang when there is no clock", () => {
+    const block = makeTurnMetaBlock({ gap: "2m", lang: "it", writtenAgo: "1m" });
+    expect(block).toBe("[turn_meta: gap=2m, lang=it, written_during_previous_work=1m ago]\n\n");
+  });
+
+  it("leaves the block unchanged without the written-during-previous-work age", () => {
+    const block = makeTurnMetaBlock({ gap: "2m", lang: "it", now: "2026-10-22 09:12 (Europe/Rome)" });
+    expect(block).toBe("[turn_meta: gap=2m, lang=it, now=2026-10-22 09:12 (Europe/Rome)]\n\n");
+  });
 });
 
 describe("TurnMetaTracker", () => {
@@ -80,5 +102,15 @@ describe("TurnMetaTracker", () => {
     // since user-A's turn.
     const userB = t.prefix("doc-qa", "user-B", "hello", t0 + 60 * 1000);
     expect(userB).toBe("[turn_meta: gap=first, lang=en]\n\n");
+  });
+
+  it("marks a turn written during the previous work, its age formatted like the gap", async () => {
+    const t = new TurnMetaTracker();
+    const now = 1_700_000_000_000;
+    const block = await t.prefixWithContext("doc-qa", "user-A", "ciao", {
+      now,
+      writtenAt: now - 90 * 1000,
+    });
+    expect(block).toBe("[turn_meta: gap=first, lang=it, written_during_previous_work=1m ago]\n\n");
   });
 });

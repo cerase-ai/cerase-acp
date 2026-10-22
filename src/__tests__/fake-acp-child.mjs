@@ -121,6 +121,27 @@
 //                              the JSON of the prompt's last text block, the
 //                              person's message. What the assistant was sent,
 //                              counted across every child and every bridge.
+//   FAKE_LOOP_STEPS         — N ≥ 1 turns session/prompt into a work loop.
+//                              A prompt on an idle session starts a work and is
+//                              taken at its first step; a prompt on a session
+//                              with a work running is queued for it. Each step
+//                              takes every queued prompt, and a step that took
+//                              something resets a counter to N. While the
+//                              counter is above zero the step is a tool step
+//                              (one call opened and closed around a wait);
+//                              when it reaches zero the next step is the answer
+//                              step, which sends one message and then answers
+//                              every prompt the work took with end_turn.
+//                              A prompt arriving during the answer step is not
+//                              taken by it and starts a new work after it.
+//   FAKE_STEP_MS            — how long one step of that loop takes (default
+//                              100 ms).
+//   FAKE_MODEL_LOG          — a file the loop appends one JSON line to at the
+//                              start of every step: {"loop":<n>,"step":<k>,
+//                              "answer":<bool>,"taken":[…]}, where `taken` is
+//                              the full text of the last text block of each
+//                              prompt taken at that step. `loop` numbers each
+//                              work from 1 in this child.
 
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
@@ -181,6 +202,12 @@ const DEFAULT_MODEL = process.env.FAKE_MODEL;
 const LOADED_MODEL = process.env.FAKE_LOADED_MODEL ?? DEFAULT_MODEL;
 const SET_MODEL_FAILS = process.env.FAKE_SET_MODEL_FAILS === "1";
 const ECHO_MODEL = process.env.FAKE_ECHO_MODEL === "1";
+// Loop mode: a work that keeps taking prompts while it runs, as opencode does
+// with a prompt sent on a session it is already working on. Off unless a test
+// asks for it, so every other knob and test behaves as before.
+const LOOP_STEPS = parseInt(process.env.FAKE_LOOP_STEPS ?? "0", 10);
+const STEP_MS = parseInt(process.env.FAKE_STEP_MS ?? "100", 10);
+const MODEL_LOG = process.env.FAKE_MODEL_LOG;
 
 // The mode this fixture is in. Starts at the first advertised one, the way a
 // real agent starts at its default rather than at nothing.
@@ -232,6 +259,104 @@ const send = (msg) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let promptsHandled = 0;
+
+// One loop state per session. `queue` holds the prompts a running work has not
+// taken yet; `loop` is the number of the last work this child started.
+const loopStates = new Map();
+
+function loopStateOf(sessionId) {
+  let state = loopStates.get(sessionId);
+  if (!state) {
+    state = { running: false, queue: [], loop: 0 };
+    loopStates.set(sessionId, state);
+  }
+  return state;
+}
+
+/** The message the person wrote, without the bridge's [turn_meta:] block. */
+function personWordsOf(text) {
+  if (text.startsWith("[turn_meta:")) {
+    const blank = text.indexOf("\n\n");
+    if (blank >= 0) return text.slice(blank + 2);
+  }
+  return text;
+}
+
+function sendUpdate(sessionId, update) {
+  send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
+}
+
+/**
+ * Run one work at a time for a session, taking every prompt that arrives while
+ * it runs. The first work starts with the prompt that found the session idle;
+ * a prompt arriving during a work waits for its next step, except during the
+ * answer step, which is not taking anything. When the answer step ends, every
+ * prompt the work took is answered end_turn, in order, and a queued prompt
+ * starts the next work.
+ */
+async function runLoop(sessionId, state) {
+  try {
+    for (;;) {
+      state.loop += 1;
+      const loop = state.loop;
+      const taken = [];
+      let counter = 0;
+      let step = 0;
+      for (;;) {
+        step += 1;
+        const arriving = state.queue.splice(0);
+        if (arriving.length > 0) {
+          taken.push(...arriving);
+          counter = LOOP_STEPS;
+        }
+        if (MODEL_LOG) {
+          appendFileSync(
+            MODEL_LOG,
+            `${JSON.stringify({ loop, step, answer: counter === 0, taken: arriving.map((p) => p.text) })}\n`,
+          );
+        }
+        if (counter > 0) {
+          counter -= 1;
+          const toolCallId = `call-${loop}-${step}`;
+          sendUpdate(sessionId, {
+            sessionUpdate: "tool_call",
+            toolCallId,
+            title: "tool",
+            kind: "other",
+            status: "in_progress",
+          });
+          await sleep(STEP_MS);
+          sendUpdate(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+          continue;
+        }
+        await sleep(STEP_MS);
+        const words = taken.map((p) => personWordsOf(p.text));
+        sendUpdate(sessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `answer to: ${words.join(" + ")}` },
+        });
+        for (const prompt of taken) {
+          send({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+        }
+        break;
+      }
+      if (state.queue.length === 0) break;
+    }
+  } finally {
+    state.running = false;
+  }
+}
+
+/** Queue a prompt for the session's loop, starting one when none is running. */
+function takeForLoop(sessionId, msg) {
+  const state = loopStateOf(sessionId);
+  const blocks = msg.params?.prompt ?? [];
+  state.queue.push({ id: msg.id, text: blocks[blocks.length - 1]?.text ?? "" });
+  if (!state.running) {
+    state.running = true;
+    runLoop(sessionId, state).catch(() => {});
+  }
+}
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", async (line) => {
@@ -362,6 +487,10 @@ rl.on("line", async (line) => {
     if (process.env.FAKE_PROMPT_LOG) {
       const blocks = msg.params?.prompt ?? [];
       appendFileSync(process.env.FAKE_PROMPT_LOG, `${JSON.stringify(blocks[blocks.length - 1]?.text ?? "")}\n`);
+    }
+    if (LOOP_STEPS > 0) {
+      takeForLoop(sessionId, msg);
+      return;
     }
     if (process.env.FAKE_HANG_PROMPT === "1") return;
     if (RESTART_MID_PROMPT_FILE && existsSync(RESTART_MID_PROMPT_FILE)) {

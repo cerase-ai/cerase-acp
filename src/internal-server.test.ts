@@ -12,18 +12,27 @@ function makeFakeDispatcher(
 ) {
   const calls: {
     handled: Array<[string, string, string]>;
+    handledOptions: Array<{ byPerson?: boolean } | undefined>;
     system: Array<[string, string, string]>;
     notices: Array<[string, string, unknown]>;
     closed: Array<[string, unknown, unknown, string]>;
   } = {
     handled: [],
+    handledOptions: [],
     system: [],
     notices: [],
     closed: [],
   };
   const dispatcher = {
-    async handleMessage(agentId: string, userId: string, text: string) {
+    async handleMessage(
+      agentId: string,
+      userId: string,
+      text: string,
+      _receivedAt?: number,
+      options?: { byPerson?: boolean },
+    ) {
       calls.handled.push([agentId, userId, text]);
+      calls.handledOptions.push(options);
       return outcome;
     },
     async sendSystemMessage(agentId: string, userId: string, text: string) {
@@ -98,6 +107,20 @@ describe("internal-server /internal/inject", () => {
     expect(t).toContain("Ricevuto messaggio temporizzato");
     expect(t).toContain("```\nmanda la rassegna\n```");
     expect(t).toContain("ora lo prendo in carico");
+  });
+
+  it("hands a from_person inject to the dispatcher as written by the person", async () => {
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "manda la rassegna", from_person: true });
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(1));
+    expect(calls.handledOptions).toEqual([{ byPerson: true }]);
+  });
+
+  it("hands a scheduled inject to the dispatcher as not written by the person", async () => {
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "manda la rassegna" });
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(1));
+    expect(calls.handledOptions).toEqual([{ byPerson: false }]);
   });
 
   it("C1-4: a caller-supplied heads_up overrides the default scheduled wording", async () => {
