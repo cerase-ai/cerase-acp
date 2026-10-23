@@ -171,7 +171,11 @@ allowlist gates `/internal/inject`.
 2. **`turn_meta` block.** The prompt opens with
    `[turn_meta: gap=…, lang=…, now=…]`: the time since the pair's previous
    message, the detected language
-   (Italian, English, Spanish or French), and the organisation's wall clock from
+   (Italian, English, Spanish or French) of the person's own words, without the
+   block of uploaded files or the console's `[console_page: …]` first line; a
+   message whose words point to another language than the conversation's is
+   `unknown`, and a second one in a row moves the conversation, because a text
+   pasted in another language cannot be told from one the person wrote; and the organisation's wall clock from
    `GET /api/internal/turn-context/{agent}`, which also supplies the previous
    message's time after a bridge restart. The rules the assistant reads it by
    are in the baseline prompt, `cerase-core/control-plane/config/defaults/agents-baseline.md`.

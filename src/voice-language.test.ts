@@ -39,6 +39,8 @@ describe("the language of a turn with no words of the person's", () => {
   it("is still read from the words the person wrote beside the files", () => {
     const t = new TurnMetaTracker();
     t.prefix("agent-3", "seat:p", "ciao, come stai?", T0);
+    // The first English sentence could be pasted, so it is `unknown`; the
+    // second one in a row moves the conversation.
     const english = t.prefix(
       "agent-3",
       "seat:p",
@@ -46,7 +48,8 @@ describe("the language of a turn with no words of the person's", () => {
       T0 + 60_000,
     );
 
-    expect(english).toContain("lang=en");
+    expect(english).toContain("lang=unknown");
+    expect(t.prefix("agent-3", "seat:p", "thanks, that is everything for now", T0 + 120_000)).toContain("lang=en");
   });
 
   it("is the organisation's when the conversation has none yet, as after a bridge restart", async () => {

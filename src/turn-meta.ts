@@ -293,9 +293,16 @@ const SWITCH_HITS = 2;
 // October two Italian voice messages were tagged `lang=en`.
 const UPLOADED_FILES = /^\[Uploaded files: [^\]\n]*\]\s*$/gm;
 
-/** The words of a message the person wrote, without what the bridge added to it. */
+// The line the console's side panel puts first, naming the page the person is
+// on: the page's title, not the person's words. The titles are Italian, so an
+// administrator writing English from the panel was tagged `lang=it`. Only at
+// the start of the message, as the control-plane's `ConsolePageLine::strip`
+// removes it; the same text further down is something the person wrote.
+const CONSOLE_PAGE = /^\s*\[console_page:[^\]\n]*\]\s*/;
+
+/** The words of a message the person wrote, without what the bridge or the console added to it. */
 export function personWords(text: string): string {
-  return (text ?? "").replace(UPLOADED_FILES, "").trim();
+  return (text ?? "").replace(CONSOLE_PAGE, "").replace(UPLOADED_FILES, "").trim();
 }
 
 export function detectLanguage(raw: string): SupportedLang {
@@ -324,6 +331,11 @@ interface TurnState {
   // The language hint already computed for the meta block, kept so the
   // notices the bridge writes by itself can be written in it too.
   lastLang: SupportedLang;
+  // A language the previous turn's words pointed to strongly enough to move
+  // the conversation, but that turn was still tagged `unknown` because it was
+  // the first one. A following turn whose words point there too moves the
+  // conversation; any other turn forgets it.
+  pendingLang?: SupportedLang;
 }
 
 const key = (agentId: string, userId: string) => `${agentId}:${userId}`;
@@ -357,26 +369,56 @@ export class TurnMetaTracker {
   }
 
   /**
-   * The language a turn is tagged with: its own words', and for a turn whose
-   * words do not say — a voice message, a file, «ok» — or say too little to move
-   * the conversation — «Hello» in an Italian one — the language this person last
-   * wrote in, then the organisation's. A turn tagged with a language the person
-   * did not write in is answered in it.
+   * The language a turn is tagged with.
+   *
+   * With no language known for the conversation yet — the first message, or a
+   * restarted bridge before the resolver — the turn takes its own words'
+   * language, or `fallback` when they say nothing.
+   *
+   * Once the conversation has a language, a turn with no evidence, evidence for
+   * that language, or only weak evidence for another one stays in it. A turn
+   * whose words strongly point to another language is the case this rule is
+   * about: it is tagged `unknown` the first time, because a pasted text in
+   * another language cannot be told from one the person wrote, and `unknown`
+   * lets the model read the words in front of it. Only when the previous turn
+   * pointed to the same language too is this turn tagged with it, moving the
+   * conversation. A turn tagged with a language the person did not write in is
+   * answered in it.
    */
   private turnLanguage(k: string, text: string, fallback?: SupportedLang): SupportedLang {
     const evidence = languageEvidence(text);
-    const last = this.state.get(k)?.lastLang;
+    const state = this.state.get(k);
+    const last = state?.lastLang;
     const known = last !== undefined && last !== "unknown" ? last : undefined;
-    // A short message with weak evidence keeps the conversation's language.
-    if (
-      evidence.lang !== "unknown" &&
-      (known === undefined || evidence.lang === known || evidence.hits >= SWITCH_HITS)
-    ) {
+
+    // No conversation language yet: the words decide, or the organisation's.
+    if (known === undefined) {
+      this.setPending(k, undefined);
+      return evidence.lang !== "unknown" ? evidence.lang : (fallback ?? "unknown");
+    }
+
+    const pointsElsewhere = evidence.lang !== "unknown" && evidence.lang !== known && evidence.hits >= SWITCH_HITS;
+    if (!pointsElsewhere) {
+      this.setPending(k, undefined);
+      return known;
+    }
+
+    // Strong evidence for another language. The first such turn is `unknown`;
+    // a second one in a row moves the conversation to that language.
+    if (state?.pendingLang === evidence.lang) {
+      this.setPending(k, undefined);
       return evidence.lang;
     }
-    if (known !== undefined) return known;
-    if (evidence.lang !== "unknown") return evidence.lang;
-    return fallback ?? "unknown";
+    this.setPending(k, evidence.lang);
+    return "unknown";
+  }
+
+  /** Remembers, or forgets, the language the previous turn pointed to. */
+  private setPending(k: string, lang: SupportedLang | undefined): void {
+    const state = this.state.get(k);
+    if (!state) return;
+    if (lang === undefined) delete state.pendingLang;
+    else state.pendingLang = lang;
   }
 
   /**
@@ -442,10 +484,13 @@ export class TurnMetaTracker {
   }
 
   private record(k: string, now: number, lang: SupportedLang): void {
-    const previous = this.state.get(k)?.lastLang;
+    const previous = this.state.get(k);
     this.state.set(k, {
       lastAt: now,
-      lastLang: lang === "unknown" ? (previous ?? "unknown") : lang,
+      lastLang: lang === "unknown" ? (previous?.lastLang ?? "unknown") : lang,
+      // `turnLanguage` has already set or cleared the memory of a turn pointing
+      // to another language; keep it for the next turn.
+      pendingLang: previous?.pendingLang,
     });
   }
 }

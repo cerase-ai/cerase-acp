@@ -44,6 +44,11 @@ describe("a short message", () => {
   it("follows the person into another language when the words are plainly that language", () => {
     const tracker = new TurnMetaTracker();
     tracker.prefix("a", "u", "ciao, mi prepari la bozza della risposta per il cliente?", 0);
-    expect(tracker.prefix("a", "u", "can you write it in English for the client, please?", 1000)).toContain("lang=en");
+    // The first English sentence could be pasted, so it is `unknown`; the
+    // second one in a row moves the conversation.
+    expect(tracker.prefix("a", "u", "can you write it in English for the client, please?", 1000)).toContain(
+      "lang=unknown",
+    );
+    expect(tracker.prefix("a", "u", "thanks, that is everything for now", 2000)).toContain("lang=en");
   });
 });
