@@ -124,13 +124,15 @@ allowlist gates `/internal/inject`.
   the summary of its history: opencode sends nothing over ACP until the
   summary's first words, so a turn silent for 10 seconds asks the slot every 10
   seconds for the session's newest message
-  (`GET /session/{id}/message?limit=1` from inside the slot), and an assistant
-  message with `summary: true` and no `time.completed` is a summary under way.
-  Such a turn may stay silent up to 15 minutes (`COMPACTION_SILENCE_MS`); any
-  other is ended at the silence limit, on an answer asked after the limit was
-  reached. A turn still running after
-  `session.turn_ceiling_minutes` (default 45) is ended and the person asked to
-  split the request. The next message spawns a new child.
+  (`GET /session/{id}/message?limit=1` from inside the slot). An assistant
+  message with `summary: true` and no `time.completed` is a summary under way,
+  and such a turn may stay silent up to 15 minutes (`COMPACTION_SILENCE_MS`).
+  An assistant message with no `time.completed` and no `error` that is not a
+  summary is a model call still open, and such a turn may stay silent up to
+  `session.turn_model_wait_seconds` (default 900). Any other silence is ended
+  at the silence limit, on an answer asked after the limit was reached. A turn
+  still running after `session.turn_ceiling_minutes` (default 45) is ended and
+  the person asked to split the request. The next message spawns a new child.
 - **Text the ACP stream dropped.** After each turn the bridge reads the
   finished assistant message from opencode's REST API inside the slot
   (`docker exec` running `curl` against `127.0.0.1:3284`, with the slot's own
@@ -472,7 +474,7 @@ Every route but `/healthz` requires `Authorization: Bearer <CERASE_ACP_INTERNAL_
 |---|---|
 | `GET /healthz` | Unauthenticated liveness for the container healthcheck. `200 {status: "ok", adapters, ready, readyOf}`; `503 {status: "no_chat_transport"}` when every adapter reports itself down. Compare `ready` with `readyOf`: an agent whose channel has no readiness signal (Telegram, Slack, `web`) is counted in neither. |
 | `GET /internal/status` | Per agent: `id`, `channel`, `attached`, `ready` (`true`, `false`, or `null` for a channel with no readiness signal), `lastContactAgeMs`, `turnsInFlight`, and `failure` when the bridge has stopped trying. Plus `inject` (in flight, succeeded, failed, last failure) and `session` (the limits in force). |
-| `POST /internal/inject` | `{agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?}`. Runs `text` as a message from that user and answers 202 as soon as it is accepted; the turn's outcome is in the log and the `inject` block of `/internal/status`. With `surface_in_chat` (default `true`) a heads-up is posted first: `heads_up` when given, otherwise a fixed Italian line quoting the scheduled message. With `system_message_only` the text is delivered as it is and no turn runs, and a failed delivery answers 500. With `system_message_only` and `notice: {title, body, link?: {url, label}}` the message is a platform notice, drawn in the channel's own box (below), and `text` is the same notice spelled out. 400 on a missing field, on a malformed notice and on a notice without `system_message_only`, 401 without the bearer, 403 for a user not in the agent's allowlist. |
+| `POST /internal/inject` | `{agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, outcome_ref?}`. Runs `text` as a message from that user and answers 202 as soon as it is accepted; the turn's outcome is in the log and the `inject` block of `/internal/status`. With `outcome_ref`, the turn's outcome is posted to the control-plane's `POST /api/internal/inject-outcome` as `{ref, ok, error?, notice?}` once it ends; 400 for an `outcome_ref` that is not a string of 1 to 200 characters. With `surface_in_chat` (default `true`) a heads-up is posted first: `heads_up` when given, otherwise a fixed Italian line quoting the scheduled message. With `system_message_only` the text is delivered as it is and no turn runs, and a failed delivery answers 500. With `system_message_only` and `notice: {title, body, link?: {url, label}}` the message is a platform notice, drawn in the channel's own box (below), and `text` is the same notice spelled out. 400 on a missing field, on a malformed notice and on a notice without `system_message_only`, 401 without the bearer, 403 for a user not in the agent's allowlist. |
 
 ## Configuration
 
@@ -520,6 +522,7 @@ that agent refuses to start and names the problem, and the others run.
 | `idle_timeout_minutes` | yes | — | Stop an ACP child idle this long; the next message spawns a new one. |
 | `max_concurrent` | yes | — | Most ACP children at once; at the limit the least recently used is stopped. |
 | `turn_silence_seconds` | no | 180 | End a turn whose stream has said nothing this long. |
+| `turn_model_wait_seconds` | no | 900 | End a turn silent this long while its model call is still open. |
 | `turn_ceiling_minutes` | no | 45 | End a turn still running after this long. |
 
 ### The `workspace_chat` block

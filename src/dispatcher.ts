@@ -1010,6 +1010,7 @@ export class Dispatcher {
     // happened. Best-effort: a failure here is logged + folded into the
     // delivery outcome, never rethrown.
     let deliveryOk = drainResult.ok && retryDrain.ok && startedOver.ok;
+    let failureNotice: string | undefined;
     if (failed) {
       const lang = this.noticeLang(agentId, userId, text);
       const copy = this.interrupting
@@ -1023,18 +1024,15 @@ export class Dispatcher {
               : TURN_ERROR[lang];
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
       if (!r.ok) deliveryOk = false;
+      else failureNotice = copy;
     } else if (answerUnsent) {
       // The one more try a stop cut off did not fail for the reason it was
       // asked for, and the person is told what did happen.
       const lang = this.noticeLang(agentId, userId, text);
-      const r = await this.safeSend(
-        send,
-        this.interrupting ? updateInterruptedNotice(lang) : TURN_UNSENT[lang],
-        agentId,
-        userId,
-        "unsent-answer message",
-      );
+      const copy = this.interrupting ? updateInterruptedNotice(lang) : TURN_UNSENT[lang];
+      const r = await this.safeSend(send, copy, agentId, userId, "unsent-answer message");
       if (!r.ok) deliveryOk = false;
+      else failureNotice = copy;
     } else if (!produced) {
       // A turn that ran a tool and wrote nothing did something, and is not
       // asked again; one that did neither was, and every try came back empty.
@@ -1052,7 +1050,11 @@ export class Dispatcher {
     // Fail loud. A failed turn always yields `{ ok: false }`
     // (with the turn's own error); otherwise a swallowed delivery failure does.
     if (failed) {
-      return { ok: false, error: turnError ?? new Error("agent turn failed") };
+      return {
+        ok: false,
+        error: turnError ?? new Error("agent turn failed"),
+        ...(failureNotice ? { notice: failureNotice } : {}),
+      };
     }
     // A file the person never received cannot close as a delivered turn. The
     // assistant wrote its closing sentence before the upload was attempted, so
@@ -1064,7 +1066,11 @@ export class Dispatcher {
       return { ok: false, error: attachFailureError(attachFailures) };
     }
     if (answerUnsent) {
-      return { ok: false, error: new Error("the answer came out as tool-call markup twice and was not sent") };
+      return {
+        ok: false,
+        error: new Error("the answer came out as tool-call markup twice and was not sent"),
+        ...(failureNotice ? { notice: failureNotice } : {}),
+      };
     }
     if (!deliveryOk) {
       if (!startedOver.ok && drainResult.ok && retryDrain.ok) return startedOver;

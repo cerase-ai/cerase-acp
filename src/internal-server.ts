@@ -3,7 +3,7 @@
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person? }  → 202
+//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person?, outcome_ref? }  → 202
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first. The
@@ -14,6 +14,8 @@
 // The 202 means accepted (validation and allowlist passed), not that the turn
 // completed: the caller (AcpInjector) gives up after 15 s, a turn routinely
 // takes longer, and a caller that saw a timeout would send the message again.
+// An `outcome_ref` names where the detached turn's outcome is reported once it
+// ends (see InternalServerOptions.reportOutcome).
 // The heads-up and the turn run as a logged background task; failures show in
 // the logs and the `inject` block of GET /internal/status.
 // When `system_message_only` is true it instead delivers `text` straight to
@@ -29,6 +31,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Dispatcher } from "./dispatcher.js";
+import type { InjectOutcome } from "./inject-outcome.js";
 import { makeLogger } from "./logger.js";
 import { NoteCoalescer } from "./note-coalescer.js";
 import { parseNoticeRef, parsePlatformNotice } from "./platform-notice.js";
@@ -205,6 +208,12 @@ export interface InternalServerOptions {
    * caller that validates first.
    */
   isAllowed?: (agentId: string, userId: string) => boolean;
+  /**
+   * Reports the outcome of a detached inject turn named by its `outcome_ref`,
+   * once the turn ends: success, or the failure's error and the copy the person
+   * was sent. Absent: nothing is reported.
+   */
+  reportOutcome?: (ref: string, outcome: InjectOutcome) => Promise<unknown>;
 }
 
 /**
@@ -476,6 +485,18 @@ async function handleRequest(
     });
     return;
   }
+  // A scheduled message's caller was answered 202, so the outcome of its turn
+  // is reported back to the control-plane under this ref once the turn ends.
+  // The system-message-only path runs no turn, so a ref there is ignored.
+  const outcomeRefRaw = rec.outcome_ref;
+  let outcomeRef: string | undefined;
+  if (outcomeRefRaw !== undefined && outcomeRefRaw !== null) {
+    if (typeof outcomeRefRaw !== "string" || outcomeRefRaw === "" || outcomeRefRaw.length > 200) {
+      sendJson(res, 400, { error: "outcome_ref must be a non-empty string of at most 200 characters" });
+      return;
+    }
+    outcomeRef = outcomeRefRaw;
+  }
 
   if (systemMessageOnly) {
     try {
@@ -518,6 +539,7 @@ async function handleRequest(
     surfaceInChat,
     headsUp,
     byPerson: rec.from_person === true,
+    outcomeRef,
   }).catch((err) => {
     logger.error({ err, agentId, userId }, "detached inject task rejected unexpectedly");
     injects.fail(agentId, userId, err);
@@ -534,9 +556,25 @@ async function runInjectTurn(
   opts: InternalServerOptions,
   injects: InjectTracker,
   notes: NoteCoalescer,
-  p: { agentId: string; userId: string; text: string; surfaceInChat: boolean; headsUp: string; byPerson: boolean },
+  p: {
+    agentId: string;
+    userId: string;
+    text: string;
+    surfaceInChat: boolean;
+    headsUp: string;
+    byPerson: boolean;
+    outcomeRef?: string;
+  },
 ): Promise<void> {
-  const { agentId, userId, text, surfaceInChat, headsUp, byPerson } = p;
+  const { agentId, userId, text, surfaceInChat, headsUp, byPerson, outcomeRef } = p;
+  const reportOutcome = async (outcome: InjectOutcome): Promise<void> => {
+    if (!opts.reportOutcome || !outcomeRef) return;
+    try {
+      await opts.reportOutcome(outcomeRef, outcome);
+    } catch (err) {
+      logger.warn({ err, agentId, userId, ref: outcomeRef }, "could not report the inject turn's outcome");
+    }
+  };
   try {
     if (surfaceInChat) {
       // Deterministic heads-up before the model turn (best-effort — a
@@ -562,12 +600,19 @@ async function runInjectTurn(
     if (!result.ok) {
       logger.error({ err: result.error, agentId, userId }, "detached inject turn/delivery failed");
       injects.fail(agentId, userId, result.error);
+      await reportOutcome({
+        ok: false,
+        error: result.error.message,
+        ...(result.notice !== undefined ? { notice: result.notice } : {}),
+      });
       return;
     }
     injects.succeed();
+    await reportOutcome({ ok: true });
   } catch (err) {
     logger.error({ err, agentId, userId }, "detached inject dispatch failed");
     injects.fail(agentId, userId, err);
+    await reportOutcome({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
 }
 

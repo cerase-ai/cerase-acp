@@ -52,8 +52,8 @@ describe("a turn whose session is summarising its history", () => {
   let dir: string;
   let m: SessionManager | undefined;
   let asked: [string, string][];
-  // What the slot answers when asked which summary the session is writing.
-  let writing: string | null;
+  // What the slot answers when asked which model call the session has open.
+  let writing: { messageId: string; summary: boolean } | null;
   const probe = async (agent: AgentConfig, sessionId: string) => {
     asked.push([agent.id, sessionId]);
     return writing;
@@ -75,7 +75,7 @@ describe("a turn whose session is summarising its history", () => {
 
   it("is not killed while the session writes its summary past the silence limit, and is told when it starts and ends", async () => {
     const release = join(dir, "summary-written");
-    writing = "msg_summary";
+    writing = { messageId: "msg_summary", summary: true };
     m = new SessionManager(
       config([
         `FAKE_SUMMARY_UNTIL_FILE=${release}`,
@@ -84,7 +84,7 @@ describe("a turn whose session is summarising its history", () => {
         "FAKE_REPLY=ecco",
       ]),
       undefined,
-      { compactionProbe: probe, endpointResolver: () => null },
+      { openCallProbe: probe, endpointResolver: () => null },
     );
     const mm = m;
     const compacting: boolean[] = [];
@@ -111,7 +111,7 @@ describe("a turn whose session is summarising its history", () => {
   });
 
   it("is killed at the silence limit, as before, when the session is not summarising", async () => {
-    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { compactionProbe: probe });
+    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { openCallProbe: probe });
     const mm = m;
     const compacting: boolean[] = [];
     const turn = watch(mm.prompt("doc-qa", "111", "ciao", undefined, { onCompaction: (on) => compacting.push(on) }));
@@ -128,8 +128,8 @@ describe("a turn whose session is summarising its history", () => {
   });
 
   it("counts silence again once the slot no longer finds a summary under way", async () => {
-    writing = "msg_summary";
-    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { compactionProbe: probe });
+    writing = { messageId: "msg_summary", summary: true };
+    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { openCallProbe: probe });
     const mm = m;
     const compacting: boolean[] = [];
     const turn = watch(mm.prompt("doc-qa", "111", "ciao", undefined, { onCompaction: (on) => compacting.push(on) }));
@@ -148,8 +148,8 @@ describe("a turn whose session is summarising its history", () => {
   });
 
   it("is ended when the summary stays silent past the longest a summary is allowed", async () => {
-    writing = "msg_summary";
-    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { compactionProbe: probe });
+    writing = { messageId: "msg_summary", summary: true };
+    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { openCallProbe: probe });
     const mm = m;
     const turn = watch(mm.prompt("doc-qa", "111", "ciao"));
     await untilChild(() => expect(mm.activeSessionCount()).toBe(1));

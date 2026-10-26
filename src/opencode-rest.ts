@@ -16,7 +16,7 @@
 // here: `GET /session/{sessionID}/message/{messageID}` →
 // `{ info: AssistantMessage, parts: Part[] }` for the reconciliation, and
 // `GET /session/{sessionID}/message?limit=1` → the newest message alone, to
-// learn whether the session is writing its summary (see CompactionProbe).
+// learn which model call the session holds open (see OpenCall).
 
 import { execFile } from "node:child_process";
 import { makeLogger } from "./logger.js";
@@ -131,30 +131,40 @@ export function execFetcher(exec: SlotExec = dockerExec): CanonicalFetcher {
 }
 
 /**
- * Which summary of its history a session is writing right now: the id of that
- * message, or `null` when it is writing none or the slot could not say.
+ * The model call a session's newest message holds open: a summary of its
+ * history when `summary`, otherwise an answer.
  *
- * opencode 1.18.18 summarises a session in an assistant message of its own,
- * flagged `summary: true` (mode and agent `compaction`), and stamps
- * `time.completed` on it when the summary call ends. Its ACP layer sends no
- * update for that message until the summary's text streams, and the model
- * reads the whole conversation before it writes a word of it. So until then
- * the only place that says a summary is under way is the session's newest
- * message, which `GET /session/{id}/message?limit=1` returns.
+ * opencode writes an assistant message at the start of every model call and
+ * stamps `time.completed` on it when the call ends, or `error` when it is
+ * aborted. Its ACP layer sends no update until the first token, and a large
+ * prompt can take minutes to its first token, so until then the only place
+ * that says a call is under way is the session's newest message, which
+ * `GET /session/{id}/message?limit=1` returns.
  */
-export type CompactionProbe = (container: string, sessionId: string) => Promise<string | null>;
+export interface OpenCall {
+  messageId: string;
+  summary: boolean;
+}
 
-/** The probe that asks the slot's opencode server: see CompactionProbe. */
-export function execCompactionProbe(exec: SlotExec = dockerExec): CompactionProbe {
+/**
+ * Asks which model call a session's newest message holds open, or `null` when
+ * it holds none or the slot could not say.
+ */
+export type OpenCallProbe = (container: string, sessionId: string) => Promise<OpenCall | null>;
+
+/** The probe that asks the slot's opencode server: see OpenCall. */
+export function execOpenCallProbe(exec: SlotExec = dockerExec): OpenCallProbe {
   return async (container, sessionId) => {
     const body = await readSlot(exec, container, `/session/${encodeURIComponent(sessionId)}/message?limit=1`);
     if (!Array.isArray(body)) return null;
     const info = (body.at(-1) as { info?: unknown } | undefined)?.info as
-      | { id?: unknown; role?: unknown; summary?: unknown; time?: { completed?: unknown } }
+      | { id?: unknown; role?: unknown; summary?: unknown; error?: unknown; time?: { completed?: unknown } }
       | undefined;
-    if (info?.role !== "assistant" || info.summary !== true) return null;
+    if (info?.role !== "assistant") return null;
     if (typeof info.time?.completed === "number") return null;
-    return typeof info.id === "string" && info.id.length > 0 ? info.id : null;
+    if (info.error) return null;
+    if (typeof info.id !== "string" || info.id.length === 0) return null;
+    return { messageId: info.id, summary: info.summary === true };
   };
 }
 

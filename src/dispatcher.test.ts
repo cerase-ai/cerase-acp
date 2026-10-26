@@ -157,6 +157,7 @@ describe("Dispatcher", () => {
     await expect(d.handleMessage("doc-qa", "111", "ciao, come va?")).resolves.toEqual({
       ok: false,
       error: expect.any(Error),
+      notice: pickErrorMessage("ciao, come va?"),
     });
     expect(sent.length).toBe(1);
     expect(sent[0]).toBe(pickErrorMessage("ciao, come va?"));

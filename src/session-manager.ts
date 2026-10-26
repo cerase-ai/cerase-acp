@@ -5,11 +5,12 @@ import type { AgentConfig, BridgeConfig } from "./config.js";
 import { makeLogger } from "./logger.js";
 import {
   type CanonicalFetcher,
-  type CompactionProbe,
   defaultEndpointForAgent,
   defaultFetcher,
-  execCompactionProbe,
+  execOpenCallProbe,
   execSummaryStateProbe,
+  type OpenCall,
+  type OpenCallProbe,
   type RestEndpoint,
   type SummaryState,
   type SummaryStateProbe,
@@ -113,9 +114,16 @@ export interface SessionManagerOptions {
    * tool call the turn opened is still running: a sub-agent started with the
    * `task` tool sends this session nothing until it returns, and then only
    * the ceiling applies. Nor does it fire while the session is writing the
-   * summary of its history: see COMPACTION_SILENCE_MS.
+   * summary of its history (see COMPACTION_SILENCE_MS), nor while its newest
+   * message is a model call still open (see turnModelWaitMs).
    */
   turnSilenceMs?: number;
+  /**
+   * The silence a turn may keep while its session's newest message is a model
+   * call still open (no `time.completed`, no `error`), in place of the silence
+   * limit; the ceiling still applies.
+   */
+  turnModelWaitMs?: number;
   /**
    * The ceiling a turn cannot cross even while it keeps streaming, for the
    * turn that never stops rather than for the one that is slow. Reaching it
@@ -136,13 +144,13 @@ export interface SessionManagerOptions {
    */
   stateDir?: string;
   /**
-   * Asks which summary of its history a session is writing now: its message
-   * id, or null. Tests pass one. Without it the slot's opencode server is
-   * asked (execCompactionProbe), for an agent whose spawn is a `docker exec`
-   * into a slot; an agent with no slot has nothing to ask, and its silent
-   * turns end at the silence limit.
+   * Asks which model call a session's newest message holds open: a summary of
+   * its history or an answer, or null. Tests pass one. Without it the slot's
+   * opencode server is asked (execOpenCallProbe), for an agent whose spawn is
+   * a `docker exec` into a slot; an agent with no slot has nothing to ask, and
+   * its silent turns end at the silence limit.
    */
-  compactionProbe?: (agent: AgentConfig, sessionId: string) => Promise<string | null>;
+  openCallProbe?: (agent: AgentConfig, sessionId: string) => Promise<OpenCall | null>;
   /**
    * Asks where a session stands with the summaries of its history before a
    * person's message is sent to it (see SummaryState); null when it could not
@@ -483,9 +491,11 @@ export class SessionManager {
     // want the same ceiling, which is why the file gets to say.
     this.silencePinned = options?.turnSilenceMs !== undefined;
     this.ceilingPinned = options?.turnCeilingMs !== undefined;
+    this.modelWaitPinned = options?.turnModelWaitMs !== undefined;
     this.turnSilenceMs = options?.turnSilenceMs ?? (config.session.turn_silence_seconds ?? 180) * 1000;
     this.turnCeilingMs = options?.turnCeilingMs ?? (config.session.turn_ceiling_minutes ?? 45) * 60 * 1000;
-    this.compactionProbe = options?.compactionProbe;
+    this.turnModelWaitMs = options?.turnModelWaitMs ?? (config.session.turn_model_wait_seconds ?? 900) * 1000;
+    this.openCallProbe = options?.openCallProbe;
     this.summaryState = options?.summaryState;
   }
 
@@ -585,25 +595,27 @@ export class SessionManager {
     }
   }
 
-  // See SessionManagerOptions.compactionProbe.
-  private readonly compactionProbe?: (agent: AgentConfig, sessionId: string) => Promise<string | null>;
-  private readonly slotCompactionProbe: CompactionProbe = execCompactionProbe();
+  // See SessionManagerOptions.openCallProbe.
+  private readonly openCallProbe?: (agent: AgentConfig, sessionId: string) => Promise<OpenCall | null>;
+  private readonly slotOpenCallProbe: OpenCallProbe = execOpenCallProbe();
 
-  /** How this agent's sessions are asked whether they are summarising; undefined when they cannot be. */
-  private compactionProbeFor(agent: AgentConfig): ((sessionId: string) => Promise<string | null>) | undefined {
-    const injected = this.compactionProbe;
+  /** How this agent's sessions are asked which model call they hold open; undefined when they cannot be. */
+  private openCallProbeFor(agent: AgentConfig): ((sessionId: string) => Promise<OpenCall | null>) | undefined {
+    const injected = this.openCallProbe;
     if (injected) return (sessionId) => injected(agent, sessionId);
     const container = slotContainerOf(agent.spawn);
     if (container === null) return undefined;
-    return (sessionId) => this.slotCompactionProbe(container, sessionId);
+    return (sessionId) => this.slotOpenCallProbe(container, sessionId);
   }
 
   private turnSilenceMs: number;
   private turnCeilingMs: number;
+  private turnModelWaitMs: number;
   // A limit a caller passed explicitly is not the file's to change: only
   // tests pass one, and a reload must not undo the value a test pinned.
   private readonly silencePinned: boolean;
   private readonly ceilingPinned: boolean;
+  private readonly modelWaitPinned: boolean;
 
   /**
    * Take a reloaded `session` block without a restart.
@@ -623,6 +635,7 @@ export class SessionManager {
     this.maxConcurrent = session.max_concurrent;
     if (!this.silencePinned) this.turnSilenceMs = (session.turn_silence_seconds ?? 180) * 1000;
     if (!this.ceilingPinned) this.turnCeilingMs = (session.turn_ceiling_minutes ?? 45) * 60 * 1000;
+    if (!this.modelWaitPinned) this.turnModelWaitMs = (session.turn_model_wait_seconds ?? 900) * 1000;
   }
 
   /** The limits the running bridge enforces, as `agents.yaml` spells them. */
@@ -630,12 +643,14 @@ export class SessionManager {
     idle_timeout_minutes: number;
     max_concurrent: number;
     turn_silence_seconds: number;
+    turn_model_wait_seconds: number;
     turn_ceiling_minutes: number;
   } {
     return {
       idle_timeout_minutes: this.idleMs / 60_000,
       max_concurrent: this.maxConcurrent,
       turn_silence_seconds: this.turnSilenceMs / 1000,
+      turn_model_wait_seconds: this.turnModelWaitMs / 1000,
       turn_ceiling_minutes: this.turnCeilingMs / 60_000,
     };
   }
@@ -1017,13 +1032,14 @@ export class SessionManager {
       // this one nothing until it returns, so a silence that long is the work
       // and not a hang: while one is open only the ceiling ends the turn.
       const openToolCalls = new Set<string>();
-      // The summary of its history the session was last found writing. opencode
-      // sends nothing over ACP until the summary's first words, so the slot is
-      // asked while the turn is silent. An update that belongs to another
-      // message is the session past it: a tool call, or a chunk of the answer
-      // that follows the summary.
-      const askCompaction = this.compactionProbeFor(agent);
+      // The model call the session was last found holding open: the summary of
+      // its history or an answer. opencode sends nothing over ACP until the
+      // call's first token, so the slot is asked while the turn is silent. An
+      // update that belongs to another message is the session past the summary:
+      // a tool call, or a chunk of the answer that follows it.
+      const askOpenCall = this.openCallProbeFor(agent);
       let compaction: { messageId: string } | undefined;
+      let modelCall: { messageId: string } | undefined;
       let asking = false;
       let askedAt = Number.NEGATIVE_INFINITY;
       // When the last ask that was answered was sent.
@@ -1044,28 +1060,32 @@ export class SessionManager {
         }
       };
       const ask = () => {
-        if (!askCompaction || asking) return;
+        if (!askOpenCall || asking) return;
         asking = true;
         const sentAt = Date.now();
         askedAt = sentAt;
-        void askCompaction(entry!.sessionId)
+        void askOpenCall(entry!.sessionId)
           .catch((err: unknown) => {
             logger.warn(
               { agentId: agent.id, userId, reason: err instanceof Error ? err.message : String(err) },
-              "could not ask the slot whether the session is summarising — taken as not",
+              "could not ask the slot which model call the session holds open — taken as none",
             );
             return null;
           })
-          .then((messageId) => {
+          .then((call) => {
             asking = false;
             // An update that arrived while the ask was out is newer than its answer.
             if (promptOver || lastUpdateAt > sentAt) return;
             answeredAskAt = sentAt;
-            compactionIs(messageId ? { messageId } : undefined);
+            compactionIs(call?.summary ? { messageId: call.messageId } : undefined);
+            modelCall = call && !call.summary ? { messageId: call.messageId } : undefined;
           });
       };
       entry!.onUpdate = (update) => {
         lastUpdateAt = Date.now();
+        // The child spoke, so a later silence needs a fresh answer about the
+        // model call: the update may be the first token of that call.
+        modelCall = undefined;
         chunksReceived += 1;
         if (compaction) {
           const mid = (update as { messageId?: string | null }).messageId;
@@ -1109,11 +1129,13 @@ export class SessionManager {
         // A turn that keeps streaming keeps re-arming the silence limit and is
         // only ever ended by the ceiling.
         //
-        // A silent turn asks every COMPACTION_PROBE_EVERY_MS whether its session
-        // is writing its summary. While it is, the silence it may keep is
-        // COMPACTION_SILENCE_MS. Otherwise it is ended at the silence limit,
-        // on an answer asked after that limit was reached: a summary that
-        // started since the previous ask would be cut by an older one.
+        // A silent turn asks every COMPACTION_PROBE_EVERY_MS which model call
+        // its session has open. While the session writes the summary of its
+        // history the silence it may keep is COMPACTION_SILENCE_MS; while it
+        // holds an answer open it is turnModelWaitMs. Otherwise it is ended at
+        // the silence limit, on an answer asked after that limit was reached:
+        // a call that started since the previous ask would be cut by an older
+        // one.
         let watchdogId: NodeJS.Timeout | undefined;
         const watchdog = new Promise<never>((_, reject) => {
           const startedAt = Date.now();
@@ -1133,8 +1155,11 @@ export class SessionManager {
                 if (compaction) {
                   silenceMs = Math.max(this.turnSilenceMs, COMPACTION_SILENCE_MS);
                   if (silentFor >= silenceMs) reason = "silent";
+                } else if (modelCall) {
+                  silenceMs = Math.max(this.turnSilenceMs, this.turnModelWaitMs);
+                  if (silentFor >= silenceMs) reason = "silent";
                 } else if (silentFor >= this.turnSilenceMs) {
-                  if (!askCompaction || answeredAskAt >= lastUpdateAt + this.turnSilenceMs) reason = "silent";
+                  if (!askOpenCall || answeredAskAt >= lastUpdateAt + this.turnSilenceMs) reason = "silent";
                   else if (!asking) ask();
                   else if (now - askedAt >= COMPACTION_PROBE_TIMEOUT_MS) reason = "silent";
                 }
@@ -1149,6 +1174,7 @@ export class SessionManager {
                   silentFor,
                   chunksReceived,
                   compacting: compaction !== undefined,
+                  waitingOnModel: modelCall !== undefined,
                 },
                 reason === "ceiling"
                   ? "turn watchdog fired — the turn passed its ceiling while still running"

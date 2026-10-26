@@ -156,6 +156,9 @@ const SessionSchema = z.object({
   // the default belongs in one place (SessionManager) rather than in every
   // rendered config.
   turn_silence_seconds: z.number().int().positive().optional(),
+  // How long a turn may stay silent while the slot reports a model call still
+  // open. Optional for the same reason as turn_silence_seconds.
+  turn_model_wait_seconds: z.number().int().positive().optional(),
   // The ceiling a turn cannot cross even while it keeps streaming. It exists
   // for the turn that never stops rather than for the one that is slow, so it
   // is minutes and not seconds, and reaching it produces a reply that says so.

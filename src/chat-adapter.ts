@@ -32,8 +32,13 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  * `kept` is set by the bridge's send path on a chunk the channel could not
  * carry when it was written: it is kept and sent once the channel can
  * (kept-replies.ts), so the person receives it, later.
+ *
+ * On a failure, `notice` is the copy the person was sent about it, when one
+ * was sent and delivered.
  */
-export type DeliveryResult = { ok: true; withheld?: true; kept?: true; ref?: NoticeRef } | { ok: false; error: Error };
+export type DeliveryResult =
+  | { ok: true; withheld?: true; kept?: true; ref?: NoticeRef }
+  | { ok: false; error: Error; notice?: string };
 
 /**
  * How a channel that takes each answer as one message cuts it: into one

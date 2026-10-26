@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   defaultEndpointForAgent,
-  execCompactionProbe,
   execFetcher,
+  execOpenCallProbe,
   SLOT_REST_SCRIPT,
   type SlotExec,
 } from "./opencode-rest.js";
@@ -94,9 +94,10 @@ describe("execFetcher", () => {
 
 // opencode writes a session's summary as an assistant message of its own,
 // flagged `summary: true`, and stamps `time.completed` on it when the call
-// ends. Over ACP nothing says the summary started, so the newest message of
-// the session is what the watchdog asks about.
-describe("execCompactionProbe", () => {
+// ends. An answer is also an assistant message, and over ACP nothing says
+// either call started, so the newest message of the session is what the
+// watchdog asks about.
+describe("execOpenCallProbe", () => {
   const newest = (info: Record<string, unknown>, parts: unknown[] = []) => `${JSON.stringify([{ info, parts }])}\n200`;
   const summary = {
     id: "msg_sum",
@@ -106,19 +107,38 @@ describe("execCompactionProbe", () => {
     summary: true,
     time: { created: 1 },
   };
+  const answer = {
+    id: "msg_ans",
+    role: "assistant",
+    mode: "cerase",
+    agent: "cerase",
+    time: { created: 1 },
+  };
 
-  it("asks the slot for the session's newest message, the session id as an argument", async () => {
+  it("reports an open summary and asks the slot for the session's newest message, the session id as an argument", async () => {
     const { exec, calls } = recording(newest(summary));
-    expect(await execCompactionProbe(exec)("cerase-agent-3", "ses_$(id)")).toBe("msg_sum");
+    expect(await execOpenCallProbe(exec)("cerase-agent-3", "ses_$(id)")).toEqual({
+      messageId: "msg_sum",
+      summary: true,
+    });
     expect(calls).toEqual([
       ["exec", "cerase-agent-3", "sh", "-c", SLOT_REST_SCRIPT, "sh", "/session/ses_%24(id)/message?limit=1"],
     ]);
   });
 
-  it("finds no summary under way in a finished summary, an answer, or a person's message", async () => {
-    const probe = (stdout: string) => execCompactionProbe(recording(stdout).exec)("cerase-agent-3", "ses_a");
+  it("reports an open answer as a model call, not a summary", async () => {
+    const { exec } = recording(newest(answer));
+    expect(await execOpenCallProbe(exec)("cerase-agent-3", "ses_a")).toEqual({
+      messageId: "msg_ans",
+      summary: false,
+    });
+  });
+
+  it("finds no open model call in a finished summary, a finished answer, an aborted answer, a person's message, or an empty list", async () => {
+    const probe = (stdout: string) => execOpenCallProbe(recording(stdout).exec)("cerase-agent-3", "ses_a");
     expect(await probe(newest({ ...summary, time: { created: 1, completed: 2 } }))).toBeNull();
-    expect(await probe(newest({ ...summary, summary: undefined, mode: "cerase", agent: "cerase" }))).toBeNull();
+    expect(await probe(newest({ ...answer, time: { created: 1, completed: 2 } }))).toBeNull();
+    expect(await probe(newest({ ...answer, error: { name: "MessageAbortedError" } }))).toBeNull();
     expect(
       await probe(newest({ id: "msg_u", role: "user", time: { created: 1 } }, [{ type: "compaction", auto: true }])),
     ).toBeNull();
@@ -127,7 +147,7 @@ describe("execCompactionProbe", () => {
 
   it("answers null when the slot cannot say", async () => {
     const probe = (stdout: string, ok = true) =>
-      execCompactionProbe(recording(stdout, ok).exec)("cerase-agent-3", "ses_a");
+      execOpenCallProbe(recording(stdout, ok).exec)("cerase-agent-3", "ses_a");
     expect(await probe('{"name":"NotFound"}\n404')).toBeNull();
     expect(await probe("denied\n401")).toBeNull();
     expect(await probe("", false)).toBeNull();

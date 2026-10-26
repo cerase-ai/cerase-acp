@@ -35,6 +35,7 @@ import { type CredentialRejection, classifyCredentialRejection } from "./credent
 import { checkTenantCredit } from "./credit-check.js";
 import { Dispatcher, STOP_DRAIN_MS, STOP_NOTICE_MS } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
+import { postInjectOutcome } from "./inject-outcome.js";
 import { type AgentFailure, type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
 import { KeptReplies } from "./kept-replies.js";
 import { makeLogger } from "./logger.js";
@@ -1084,6 +1085,17 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           return isAllowed(config, agentId, userId);
         } catch {
           return false;
+        }
+      },
+      reportOutcome: async (ref, outcome) => {
+        const secret = controlPlaneSecret();
+        if (!secret) {
+          logger.warn({ ref }, "the inject turn's outcome was not reported: agents.yaml carries no internal_bearer");
+          return;
+        }
+        const posted = await postInjectOutcome(ref, outcome, { controlPlaneUrl, internalSecret: secret });
+        if (!posted) {
+          logger.warn({ ref }, "the inject turn's outcome could not be reported to the control-plane");
         }
       },
     });

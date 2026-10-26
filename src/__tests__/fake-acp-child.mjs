@@ -19,6 +19,9 @@
 //                              summary under FAKE_SUMMARY_ID. What opencode
 //                              does while it summarises a session: nothing
 //                              over ACP until the summary's first words.
+//   FAKE_SILENT_UNTIL_FILE  — before the reply, say nothing until this file
+//                              exists, then answer as usual. A child whose
+//                              model call is still open without summarising.
 //   FAKE_SUMMARY_ID         — the messageId of that summary's chunk.
 //   FAKE_CHUNKS             — number of session/update chunks (default 3)
 //   FAKE_PIECES             — the reply as the pieces it streams in, a JSON
@@ -545,6 +548,10 @@ rl.on("line", async (line) => {
       });
       const silentAfter = parseInt(process.env.FAKE_SILENT_AFTER_TOOL_MS ?? "0", 10);
       if (silentAfter > 0) await sleep(silentAfter);
+    }
+    const silentUntil = process.env.FAKE_SILENT_UNTIL_FILE;
+    if (silentUntil) {
+      while (!existsSync(silentUntil)) await sleep(10);
     }
     const summaryUntil = process.env.FAKE_SUMMARY_UNTIL_FILE;
     if (summaryUntil) {

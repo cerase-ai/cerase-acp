@@ -949,3 +949,127 @@ describe("internal-server /internal/notice/close", () => {
     expect(((await resp.json()) as { error: string }).error).toContain("message to edit not found");
   });
 });
+
+// A scheduled message's caller is answered 202 before its turn runs, so the
+// result of that detached turn has nowhere to go on the response. An
+// `outcome_ref` carried with the inject names where it is reported once the
+// turn ends: a success, or the failure's error and the copy the person was
+// sent.
+describe("internal-server /internal/inject reports the scheduled turn's outcome", () => {
+  let server: InternalServer;
+  let base: string;
+  let reportOutcome: ReturnType<typeof vi.fn>;
+  type TurnResult = import("./chat-adapter.js").DeliveryResult & { notice?: string };
+
+  const REF = "scheduled-message:9f1c:3";
+  const COPY = "Si è verificato un errore, riprova tra poco.";
+  const ERROR_TEXT =
+    "turn watchdog: opencode child produced nothing for 180000ms — killed and respawning on next prompt";
+
+  const start = async (outcome: TurnResult, report: ReturnType<typeof vi.fn> = vi.fn(async () => {})) => {
+    reportOutcome = report;
+    const fake = makeFakeDispatcher(outcome);
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      reportOutcome,
+    } as Parameters<typeof startInternalServer>[0]);
+    base = `http://127.0.0.1:${server.port()}`;
+    return fake.calls;
+  };
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const post = (body: unknown) =>
+    fetch(`${base}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify(body),
+    });
+
+  it("reports a failed turn's error and the copy the person was sent", async () => {
+    const calls = await start({ ok: false, error: new Error(ERROR_TEXT), notice: COPY });
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(reportOutcome).toHaveBeenCalledTimes(1));
+    expect(reportOutcome).toHaveBeenCalledWith(REF, { ok: false, error: ERROR_TEXT, notice: COPY });
+    expect(calls.handled).toHaveLength(1);
+  });
+
+  it("reports a successful turn as ok", async () => {
+    await start({ ok: true });
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(reportOutcome).toHaveBeenCalledTimes(1));
+    expect(reportOutcome).toHaveBeenCalledWith(REF, { ok: true });
+  });
+
+  it("reports nothing when the inject carries no outcome_ref", async () => {
+    const calls = await start({ ok: true });
+
+    const resp = await post({ agent_id: "a1", user_id: "u1", text: "manda la rassegna", surface_in_chat: false });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(1));
+    expect(reportOutcome).not.toHaveBeenCalled();
+  });
+
+  it("rejects an outcome_ref that is not a non-empty string of at most 200 characters, before any turn", async () => {
+    const calls = await start({ ok: true });
+
+    for (const outcomeRef of [7, "", "x".repeat(201)]) {
+      const resp = await post({
+        agent_id: "a1",
+        user_id: "u1",
+        text: "manda la rassegna",
+        surface_in_chat: false,
+        outcome_ref: outcomeRef,
+      });
+      expect(resp.status).toBe(400);
+    }
+    expect(calls.handled).toHaveLength(0);
+  });
+
+  it("a reportOutcome that rejects does not stop the server answering the next request", async () => {
+    const calls = await start(
+      { ok: true },
+      vi.fn(async () => {
+        throw new Error("control-plane down");
+      }),
+    );
+
+    const first = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+    });
+    expect(first.status).toBe(202);
+    await vi.waitFor(() => expect(reportOutcome).toHaveBeenCalledTimes(1));
+
+    const second = await post({ agent_id: "a1", user_id: "u1", text: "di nuovo", surface_in_chat: false });
+    expect(second.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(2));
+  });
+});
