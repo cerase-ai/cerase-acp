@@ -3,7 +3,7 @@
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person?, outcome_ref? }  → 202
+//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person?, outcome_ref? }  → 202 · 409 · 503 · 500
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first. The
@@ -21,7 +21,10 @@
 // When `system_message_only` is true it instead delivers `text` straight to
 // the DM as a system message and runs no model turn (a notification, not a
 // prompt the agent should answer); that path is a fast channel send, so it
-// stays synchronous and keeps its truthful 500 on delivery failure. With a `notice` ({ title, body, link? }),
+// stays synchronous and answers what the channel said: 409 `no_shared_server`
+// when Discord refuses the notice because the bot shares no server with the
+// person, 503 `channel_not_ready` when the client has not logged in yet, and
+// 500 for any other delivery failure. With a `notice` ({ title, body, link? }),
 // the system message is a platform notice, drawn in the channel's own box with
 // its link in a button (platform-notice.ts); `text` is then the same notice
 // spelled out, for a bridge that predates notices.
@@ -30,9 +33,11 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { isChannelNotReady } from "./channel-not-ready.js";
 import type { Dispatcher } from "./dispatcher.js";
 import type { InjectOutcome } from "./inject-outcome.js";
 import { makeLogger } from "./logger.js";
+import { isNoSharedServer } from "./no-shared-server.js";
 import { NoteCoalescer } from "./note-coalescer.js";
 import { parseNoticeRef, parsePlatformNotice } from "./platform-notice.js";
 
@@ -500,12 +505,37 @@ async function handleRequest(
 
   if (systemMessageOnly) {
     try {
-      // The delivery is the whole operation here — a `!ok`
-      // result (channel down) must surface as a truthful 500, not a blind 202.
+      // The delivery is the whole operation here, so a `!ok` result is
+      // answered by what refused it: 409 when Discord shares no server with
+      // the person, 503 when the client has not logged in, and 500 for any
+      // other failure.
       const result = notice
         ? await opts.dispatcher.sendNotice(agentId, userId, notice)
         : await opts.dispatcher.sendSystemMessage(agentId, userId, text);
       if (!result.ok) {
+        if (isNoSharedServer(result.error)) {
+          logger.warn(
+            { agentId, userId, failure: "no_shared_server" },
+            "Discord refuses this message: the assistant's bot shares no server with the person",
+          );
+          sendJson(res, 409, {
+            error: "no_shared_server",
+            detail:
+              "The bot shares no server with this person, so Discord refuses every DM to them. Add the bot to a server the person is in, using the link the console shows.",
+          });
+          return;
+        }
+        if (isChannelNotReady(result.error)) {
+          logger.warn(
+            { agentId, userId, failure: "channel_not_ready" },
+            "the channel cannot carry this message: its client has not logged in yet",
+          );
+          sendJson(res, 503, {
+            error: "channel_not_ready",
+            detail: "The channel's client has not logged in yet. The same request can be sent again once it has.",
+          });
+          return;
+        }
         logger.error({ err: result.error, agentId, userId }, "system-message-only inject delivery failed");
         sendJson(res, 500, { error: "delivery failed" });
         return;

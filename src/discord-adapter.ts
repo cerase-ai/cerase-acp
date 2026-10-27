@@ -16,6 +16,7 @@ import {
   Routes,
 } from "discord.js";
 import { extractDiscordFiles } from "./channel-attachments.js";
+import { channelNotReady } from "./channel-not-ready.js";
 import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
@@ -34,9 +35,19 @@ import { TypingSessions } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.discord");
 
+/**
+ * How long a send waits for a login that is under way before answering that
+ * the channel is not ready. It stays below the control-plane's 15 s inject
+ * timeout, so a waiting send answers before the caller gives up and sends the
+ * same request again.
+ */
+export const DISCORD_LOGIN_WAIT_MS = 10_000;
+
 export interface DiscordAdapterOptions {
   /** REST settings for the client. The tests point `api` at a stand-in Discord; production passes nothing. */
   rest?: ClientOptions["rest"];
+  /** How long a send waits for a login under way. Defaults to {@link DISCORD_LOGIN_WAIT_MS}. */
+  loginWaitMs?: number;
 }
 
 export function createDiscordAdapter(
@@ -47,6 +58,9 @@ export function createDiscordAdapter(
   // Cache per-user DM channels so we don't re-resolve on every chunk
   // of a multi-chunk reply.
   const dmChannels = new Map<string, DMChannel>();
+
+  // How long a send waits for a login under way; the option overrides it.
+  const loginWaitMs = options.loginWaitMs ?? DISCORD_LOGIN_WAIT_MS;
 
   // The typing keepalives currently running, keyed by the Discord user id.
   // The message handler starts one; the send target below is what ends it,
@@ -188,12 +202,26 @@ export function createDiscordAdapter(
   };
   let { client, reachability } = connect();
   let loginAttempted = false;
+  // True for exactly as long as the login on the current client is pending.
+  let loggingIn = false;
 
   // The DM channel with `userId`, opened once and kept.
   const dmChannel = async (userId: string): Promise<DMChannel> => {
     let channel = dmChannels.get(userId);
     if (!channel) {
-      const user = await client.users.fetch(userId);
+      // discord.js reads `client.user` to open a DM, and it is null until
+      // READY, so a send that arrives during the login waits for it rather than
+      // meeting discord.js's TypeError. A re-login replaces the client, so every
+      // pass reads `client` afresh rather than holding the one it started with.
+      const began = Date.now();
+      while (client.user === null && loggingIn && Date.now() - began < loginWaitMs) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const current = client;
+      if (current.user === null) {
+        throw channelNotReady(`agent "${agent.id}": its Discord client has not logged in yet`);
+      }
+      const user = await current.users.fetch(userId);
       channel = (await user.createDM()) as DMChannel;
       dmChannels.set(userId, channel);
     }
@@ -242,7 +270,12 @@ export function createDiscordAdapter(
         );
       }
       loginAttempted = true;
-      await client.login(agent.bot_token);
+      loggingIn = true;
+      try {
+        await client.login(agent.bot_token);
+      } finally {
+        loggingIn = false;
+      }
       // A completed login is a confirmed round-trip, so readiness starts from
       // a measured baseline rather than from an empty one.
       reachability.note();
@@ -318,12 +351,7 @@ export function createDiscordAdapter(
       // Return the outcome instead of throwing, so the bridge can log +
       // degrade gracefully on an attachment-upload failure.
       try {
-        let channel = dmChannels.get(userId);
-        if (!channel) {
-          const user = await client.users.fetch(userId);
-          channel = (await user.createDM()) as DMChannel;
-          dmChannels.set(userId, channel);
-        }
+        const channel = await dmChannel(userId);
         // A file upload is a message too, so it clears the indicator on
         // arrival and must be ordered behind the keepalive exactly as a text
         // chunk is.
@@ -347,12 +375,7 @@ export function createDiscordAdapter(
         // it with a backoff, then the failure surfaces all the way to the
         // inject status instead of being swallowed.
         try {
-          let channel = dmChannels.get(userId);
-          if (!channel) {
-            const user = await client.users.fetch(userId);
-            channel = (await user.createDM()) as DMChannel;
-            dmChannels.set(userId, channel);
-          }
+          const channel = await dmChannel(userId);
           // The message IS the clear, so it has to be the last thing Discord
           // hears about this turn. Ending the keepalive here — awaited, before
           // the send, not in the handler's `finally` after it — is what makes

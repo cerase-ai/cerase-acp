@@ -10,6 +10,11 @@
 // READY in answer to an Identify, or a close with `identifyCloseCode` when one
 // is set, which is how Discord refuses a token (4004) or a privileged intent
 // (4014). A Resume is answered with RESUMED.
+//
+// Two knobs shape a login and a refusal: `holdReady` withholds READY from an
+// Identify until the test calls `releaseReady()`, so a send can race the login.
+// `refusingDmsTo` makes the DM of a named person answer 50278 on a message
+// post, the way Discord refuses a bot that shares no server with them.
 
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -44,8 +49,14 @@ export interface FakeDiscord {
   identifyCloseCode: number | null;
   /** Answer the gateway lookup with a 401, as Discord answers a token it does not know. */
   refuseToken: boolean;
+  /** Withhold READY from an Identify until releaseReady() is called. Settable at any time. */
+  holdReady: boolean;
+  /** The people whose DM refuses a message post with 50278. */
+  refusingDmsTo: Set<string>;
   /** Every REST request received, in order. */
   requests: FakeDiscordRequest[];
+  /** Send the READY held from the Identifies received while holdReady was set. */
+  releaseReady(): void;
   /** Gateway connections opened since the fake started. */
   connections(): number;
   /** Gateway connections still open. */
@@ -68,9 +79,18 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 export async function startFakeDiscord(
-  init: { identifyCloseCode?: number | null; refuseToken?: boolean } = {},
+  init: {
+    identifyCloseCode?: number | null;
+    refuseToken?: boolean;
+    holdReady?: boolean;
+    refusingDmsTo?: Set<string>;
+  } = {},
 ): Promise<FakeDiscord> {
   const sockets = new Set<WebSocket>();
+  const heldReady = new Set<WebSocket>();
+  const dmChannelIds = new Map<string, string>();
+  const dmRecipients = new Map<string, string>();
+  let dmChannelCount = 0;
   let connections = 0;
   let sequence = 0;
   let messageId = 0;
@@ -101,8 +121,15 @@ export async function startFakeDiscord(
       }
       if (req.method === "POST" && path === "/api/v10/users/@me/channels") {
         const recipient = String((body as { recipient_id?: unknown } | undefined)?.recipient_id ?? "");
+        let channelId = dmChannelIds.get(recipient);
+        if (!channelId) {
+          dmChannelCount += 1;
+          channelId = (BigInt(FAKE_DM_CHANNEL_ID) + BigInt(dmChannelCount - 1)).toString();
+          dmChannelIds.set(recipient, channelId);
+          dmRecipients.set(channelId, recipient);
+        }
         return answer(200, {
-          id: FAKE_DM_CHANNEL_ID,
+          id: channelId,
           type: 1,
           last_message_id: null,
           recipients: [{ id: recipient, username: "person", discriminator: "0", global_name: null, avatar: null }],
@@ -110,6 +137,10 @@ export async function startFakeDiscord(
       }
       const channel = /^\/api\/v10\/channels\/(\d+)\/messages$/.exec(path);
       if (req.method === "POST" && channel) {
+        const recipient = dmRecipients.get(channel[1] ?? "");
+        if (recipient !== undefined && fake.refusingDmsTo.has(recipient)) {
+          return answer(400, { message: "Cannot send messages to this user", code: 50278 });
+        }
         messageId += 1;
         return answer(200, {
           id: String(800000000000000000 + messageId),
@@ -132,37 +163,48 @@ export async function startFakeDiscord(
     })();
   });
 
+  const sendReady = (socket: WebSocket): void => {
+    const { port } = server.address() as AddressInfo;
+    sequence += 1;
+    socket.send(
+      JSON.stringify({
+        op: 0,
+        s: sequence,
+        t: "READY",
+        d: {
+          v: 10,
+          user: BOT_USER,
+          guilds: [],
+          session_id: `session-${connections}`,
+          resume_gateway_url: `ws://127.0.0.1:${port}`,
+          shard: [0, 1],
+          application: { id: BOT_USER.id, flags: 0 },
+        },
+      }),
+    );
+  };
+
   const gateway = new WebSocketServer({ server });
   gateway.on("connection", (socket) => {
     connections += 1;
     sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
+    socket.on("close", () => {
+      sockets.delete(socket);
+      heldReady.delete(socket);
+    });
     socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
     socket.on("message", (raw) => {
       const payload = JSON.parse(String(raw)) as { op: number };
-      const { port } = server.address() as AddressInfo;
       if (payload.op === 2) {
         if (fake.identifyCloseCode !== null) {
           socket.close(fake.identifyCloseCode);
           return;
         }
-        sequence += 1;
-        socket.send(
-          JSON.stringify({
-            op: 0,
-            s: sequence,
-            t: "READY",
-            d: {
-              v: 10,
-              user: BOT_USER,
-              guilds: [],
-              session_id: `session-${connections}`,
-              resume_gateway_url: `ws://127.0.0.1:${port}`,
-              shard: [0, 1],
-              application: { id: BOT_USER.id, flags: 0 },
-            },
-          }),
-        );
+        if (fake.holdReady) {
+          heldReady.add(socket);
+          return;
+        }
+        sendReady(socket);
       } else if (payload.op === 6) {
         sequence += 1;
         socket.send(JSON.stringify({ op: 0, s: sequence, t: "RESUMED", d: {} }));
@@ -177,7 +219,16 @@ export async function startFakeDiscord(
     api: `http://127.0.0.1:${port}/api`,
     identifyCloseCode: init.identifyCloseCode ?? null,
     refuseToken: init.refuseToken ?? false,
+    holdReady: init.holdReady ?? false,
+    refusingDmsTo: new Set(init.refusingDmsTo ?? []),
     requests: [],
+    releaseReady() {
+      fake.holdReady = false;
+      for (const socket of heldReady) {
+        if (socket.readyState === 1) sendReady(socket);
+      }
+      heldReady.clear();
+    },
     connections: () => connections,
     openConnections: () => sockets.size,
     dropConnections(code: number) {

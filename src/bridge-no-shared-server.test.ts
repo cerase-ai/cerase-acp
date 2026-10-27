@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import { loadConfig } from "./config.js";
+import type { PlatformNotice } from "./platform-notice.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 const SECRET = "no-shared-server-secret";
@@ -28,6 +29,12 @@ const AGENT = "nora";
 const REFUSED_USER = "210000000000000111";
 const OTHER_USER = "210000000000000222";
 const REPLY = "La nota è stata inoltrata al cliente.";
+
+const NOTICE: PlatformNotice = {
+  title: "Collega il tuo account",
+  body: "«Nadia» può usare Gmail quando colleghi il tuo account.",
+  link: { url: "https://example.test/c/abc", label: "Collega Gmail" },
+};
 
 let dir: string;
 let path: string;
@@ -76,6 +83,8 @@ interface Channel {
   attempts: Attempt[];
   /** What the channel accepted, in order. */
   delivered: Attempt[];
+  /** Every notice that reached the adapter, in order. */
+  notices: Array<{ userId: string; notice: PlatformNotice }>;
   /** The people whose DMs are refused because the bot shares no server with them. */
   refusing: Set<string>;
   /** Whether the client is connected at all. */
@@ -83,7 +92,7 @@ interface Channel {
 }
 
 function channelRefusing(...userIds: string[]): Channel {
-  return { attempts: [], delivered: [], refusing: new Set(userIds), up: false };
+  return { attempts: [], delivered: [], notices: [], refusing: new Set(userIds), up: false };
 }
 
 interface BootOptions {
@@ -94,6 +103,8 @@ interface BootOptions {
    * bridge creates (boot, then each reload). Absent → that start succeeds.
    */
   starts?: Array<Error | undefined>;
+  /** Whether the scripted adapter sends notices. Absent → it has no sendNotice. */
+  notices?: boolean;
 }
 
 interface Booted {
@@ -145,6 +156,20 @@ async function boot(opts: BootOptions): Promise<Booted> {
             channel.delivered.push({ userId, chunk });
             return { ok: true };
           },
+        ...(opts.notices
+          ? {
+              async sendNotice(userId: string, notice: PlatformNotice): Promise<DeliveryResult> {
+                channel.notices.push({ userId, notice });
+                if (channel.refusing.has(userId)) {
+                  return { ok: false, error: noSharedServer() };
+                }
+                return {
+                  ok: true,
+                  ref: { channel: "discord", channelId: `dm-${userId}`, messageId: "m-1" },
+                };
+              },
+            }
+          : {}),
       };
       return adapter;
     },
@@ -170,6 +195,20 @@ async function inject(userId: string, text = "La proposta è stata approvata."):
     }),
   });
   expect(res.status).toBe(202);
+}
+
+async function injectNotice(userId: string): Promise<Response> {
+  return fetch(`${handle?.internalUrl}/internal/inject`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+    body: JSON.stringify({
+      agent_id: AGENT,
+      user_id: userId,
+      text: "Collega il tuo account",
+      system_message_only: true,
+      notice: NOTICE,
+    }),
+  });
 }
 
 async function injects(): Promise<{ in_flight: number; succeeded: number; failed: number }> {
@@ -358,5 +397,31 @@ describe("a person whose DMs Discord refuses with 50278", { timeout: 40_000 }, (
     const failure = (await statusOf(AGENT))?.failure;
     expect(failure?.kind).toBe("no_shared_server");
     expect(failure?.user_id).toBe(REFUSED_USER);
+  });
+});
+
+// A notice meets the same 50278 as a reply. It is answered to the
+// control-plane that sent it, attempted once, and the person is reported on
+// /internal/status as a refused reply is.
+describe("a notice Discord refuses with 50278", { timeout: 40_000 }, () => {
+  it("answers no_shared_server once and reports the person on /internal/status", async () => {
+    const channel = channelRefusing(REFUSED_USER);
+    await boot({ channel, notices: true });
+
+    const res = await injectNotice(REFUSED_USER);
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("no_shared_server");
+    expect(channel.notices).toHaveLength(1);
+    expect(channel.notices[0]?.userId).toBe(REFUSED_USER);
+
+    await vi.waitFor(
+      async () => {
+        const failure = (await statusOf(AGENT))?.failure;
+        expect(failure?.kind).toBe("no_shared_server");
+        expect(failure?.user_id).toBe(REFUSED_USER);
+      },
+      { timeout: 8000, interval: 50 },
+    );
   });
 });
