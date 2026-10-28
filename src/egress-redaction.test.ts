@@ -5,6 +5,7 @@ import {
   stripToolCallArtifacts,
   summaryHeadingStart,
 } from "./egress-redaction.js";
+import { withOpeningFence } from "./tool-call-markup.js";
 
 describe("M-CONNECTOR-CONNECT-AFFORDANCE-1 Stage 4: DSML tool-call leak scrub", () => {
   it("strips a spelled-out DSML tool_calls block, keeping the surrounding prose", () => {
@@ -363,5 +364,33 @@ describe("summaryHeadingStart", () => {
     expect(summaryHeadingStart("## Objectives for the quarter\n- grow")).toBe(-1);
     expect(summaryHeadingStart("Il prossimo passo: ## Next Move in linea")).toBe(-1);
     expect(summaryHeadingStart("")).toBe(-1);
+  });
+
+  it("finds the engine's title line above the sections", () => {
+    const text = "Ecco.\n## Anchored Summary\n## Objective\n- fatto";
+    expect(summaryHeadingStart(text)).toBe(text.indexOf("## Anchored Summary"));
+  });
+
+  it("does not read the title in prose", () => {
+    expect(summaryHeadingStart("Anchored summary of the session so far")).toBe(-1);
+  });
+});
+
+describe("withOpeningFence", () => {
+  it("moves a hold back to an opening fence directly above it", () => {
+    const text = "```\n## Anchored Summary";
+    expect(withOpeningFence(text, text.indexOf("##"), false)).toBe(0);
+  });
+
+  it("leaves a hold at a closing fence", () => {
+    const text = "```bash\ncode\n```\n## Anchored Summary";
+    const at = text.indexOf("##");
+    expect(withOpeningFence(text, at, false)).toBe(at);
+  });
+
+  it("does not reach a fence with two non-blank lines above the hold", () => {
+    const text = "```\nfoo\nbar\n## Anchored Summary";
+    const at = text.indexOf("##");
+    expect(withOpeningFence(text, at, false)).toBe(at);
   });
 });

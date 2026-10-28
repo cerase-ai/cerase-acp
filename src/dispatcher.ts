@@ -51,6 +51,7 @@ import {
   toolCallMarkupHoldStart,
   toolCallMarkupRetryPrompt,
   withheldMarkupStart,
+  withOpeningFence,
 } from "./tool-call-markup.js";
 import type { ToolStep } from "./tool-step.js";
 import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
@@ -1467,7 +1468,11 @@ export class Dispatcher {
     const buffer = new StreamBuffer({
       onFlush: deliver,
       wholeMessages: whole,
-      holdFrom: (piece) => earliest(summaryHeadingStart(piece), toolCallMarkupHoldStart(piece, fenceOpen)),
+      holdFrom: (piece) =>
+        earliest(
+          withOpeningFence(piece, summaryHeadingStart(piece), fenceOpen),
+          toolCallMarkupHoldStart(piece, fenceOpen),
+        ),
       onHeld: (held) => {
         if (isInternalSummaryBlock(held)) {
           logger.warn(

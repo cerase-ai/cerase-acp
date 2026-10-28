@@ -256,6 +256,10 @@ const SUMMARY_HEADING_LINES: ReadonlyArray<RegExp> = [
   /^\s*#{1,4}\s*relevant\s+files\s*$/im,
 ];
 
+// The engine writes this title line above the section headings. It is kept out
+// of SUMMARY_HEADING_LINES because that list mirrors cerase-core's prompt.
+const SUMMARY_TITLE_LINE = /^\s*#{1,4}\s*anchored\s+summary\s*$/im;
+
 /**
  * The engine's internal context-compaction summary.
  *
@@ -303,8 +307,8 @@ export function isInternalSummaryBlock(text: string): boolean {
 }
 
 /**
- * Where the first line that is one of the summary's own section headings
- * starts in `text`, or -1 when there is none.
+ * Where the first line that is the summary's title or one of its section
+ * headings starts in `text`, or -1 when there is none.
  *
  * Not a verdict, and deliberately weaker than isInternalSummaryBlock: one
  * heading is ordinary in an answer, which is why a whole reply needs three
@@ -317,7 +321,7 @@ export function isInternalSummaryBlock(text: string): boolean {
 export function summaryHeadingStart(text: string): number {
   if (!text) return -1;
   let first = -1;
-  for (const re of SUMMARY_HEADING_LINES) {
+  for (const re of [SUMMARY_TITLE_LINE, ...SUMMARY_HEADING_LINES]) {
     const m = re.exec(text);
     if (m && (first < 0 || m.index < first)) first = m.index;
   }

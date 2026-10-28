@@ -73,6 +73,28 @@ export function fenceOpenAfter(text: string, openBefore: boolean): boolean {
 }
 
 /**
+ * Move a hold that starts at `at` back to a fence line directly above it when
+ * that line opens the fence, so the opening fence is not sent ahead of the
+ * content it introduces. A closing fence, or a fence with another non-blank
+ * line after it, leaves `at` alone.
+ */
+export function withOpeningFence(text: string, at: number, fenceOpen: boolean): number {
+  if (at < 0) return at;
+  const before = text.slice(0, at).replace(/\n$/, "");
+  let lineEnd = before.length;
+  while (lineEnd > 0) {
+    const lineStart = before.lastIndexOf("\n", lineEnd - 1) + 1;
+    const line = before.slice(lineStart, lineEnd);
+    if (line.trim() !== "") {
+      if (/^[ \t]*(?:```|~~~)/.test(line) && !fenceOpenAfter(text.slice(0, lineStart), fenceOpen)) return lineStart;
+      return at;
+    }
+    lineEnd = lineStart - 1;
+  }
+  return at;
+}
+
+/**
  * Where the first line that opens a tool-call block starts, counting only
  * lines outside a code fence, or -1. `insideFence` says whether the text
  * begins inside one, for a caller that sees a message in pieces.

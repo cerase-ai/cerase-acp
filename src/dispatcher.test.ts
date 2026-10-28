@@ -420,6 +420,95 @@ describe("a reply that is only a block the bridge withholds", () => {
   });
 });
 
+// The hold starts only at a section heading, so the engine's title line
+// `## Anchored Summary` is flushed to the person on its own before it.
+describe("a summary written under the engine's title is held back whole and kept once", () => {
+  const TITLED_SUMMARY = [
+    "## Anchored Summary",
+    "## Objective",
+    "Verifica del riepilogo.",
+    "## Important Details",
+    "Nessun dato personale.",
+    "## Next Move",
+    "Nessuna azione.",
+  ].join("\n");
+  const ANSWER = "Ecco il resoconto della riunione.";
+  type Update = Parameters<SessionUpdateHandler>[0];
+  const text = (t: string): Update =>
+    ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } }) as Update;
+
+  /** A session manager whose n-th prompt streams `tries[n]`, and the last of them for every prompt after. */
+  function harness(tries: Update[][], send?: (chunk: string) => { ok: true; withheld?: true }) {
+    const sent: string[] = [];
+    const prompts: string[] = [];
+    const withheld: string[] = [];
+    const d = new Dispatcher({
+      config: makeConfig("unused"),
+      sessionManager: {
+        async prompt(_a: string, _u: string, promptText: string, onUpdate?: SessionUpdateHandler) {
+          const updates = tries[Math.min(prompts.length, tries.length - 1)]!;
+          prompts.push(promptText);
+          for (const u of updates) onUpdate?.(u);
+          return { stopReason: "end_turn" };
+        },
+      } as unknown as SessionManager,
+      turnMeta: new TurnMetaTracker(),
+      onSummaryWithheld: (_agentId, summary) => withheld.push(summary),
+      resolveSendTarget: () => async (chunk) => {
+        const result = send?.(chunk) ?? { ok: true };
+        if (!result.withheld) sent.push(chunk);
+        return result;
+      },
+    });
+    return { d, sent, prompts, withheld };
+  }
+
+  it("sends none of a one-chunk titled summary and hands it over once, whole", async () => {
+    const h = harness([[text(TITLED_SUMMARY)], [text(ANSWER)]]);
+    await expect(h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo?")).resolves.toEqual({ ok: true });
+    expect(h.sent).toEqual([ANSWER]);
+    expect(h.withheld).toHaveLength(1);
+    expect(h.withheld[0]!.trim()).toBe(TITLED_SUMMARY.trim());
+  });
+
+  it("sends none of a titled summary split across chunks, the first being the title alone", async () => {
+    const chunks = [
+      "## Anchored Summary\n",
+      "## Objec",
+      "tive\nVerifica del riepilogo.",
+      "\n## Important Details\nNessun ",
+      "dato personale.\n## Next Move\nNessuna ",
+      "azione.",
+    ];
+    expect(chunks.join("")).toBe(TITLED_SUMMARY);
+    const h = harness([chunks.map(text), [text(ANSWER)]]);
+    await expect(h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo?")).resolves.toEqual({ ok: true });
+    expect(h.sent).toEqual([ANSWER]);
+    expect(h.withheld).toHaveLength(1);
+    expect(h.withheld[0]!.trim()).toBe(TITLED_SUMMARY.trim());
+  });
+
+  it("sends none of a fenced titled summary, not even the opening fence", async () => {
+    const FENCED = `\`\`\`\n${TITLED_SUMMARY}\n\`\`\``;
+    const h = harness([[text(FENCED)], [text(ANSWER)]]);
+    await expect(h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo?")).resolves.toEqual({ ok: true });
+    expect(h.sent).toEqual([ANSWER]);
+    expect(h.withheld).toHaveLength(1);
+    expect(h.withheld[0]).toContain("## Anchored Summary");
+    expect(h.withheld[0]).toContain("## Objective");
+  });
+
+  it("keeps the closing fence with the answer and starts the hold at the title", async () => {
+    const LEAD = "Ecco lo script:\n```bash\necho ciao\n```";
+    const h = harness([[text(`${LEAD}\n${TITLED_SUMMARY}`)]]);
+    await expect(h.d.handleMessage("doc-qa", "111", "mi fai il riepilogo?")).resolves.toEqual({ ok: true });
+    expect(h.prompts).toHaveLength(1);
+    expect(h.sent).toEqual([LEAD]);
+    expect(h.withheld).toHaveLength(1);
+    expect(h.withheld[0]!.startsWith("## Anchored Summary")).toBe(true);
+  });
+});
+
 // No AI-Act first-contact disclosure is sent: the
 // assistant is USER-facing (the employee was given it and knows it's an AI), so
 // Art. 50's "obvious from the context of use" exemption applies. Guard that no
