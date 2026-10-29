@@ -14,8 +14,8 @@
 //     exception, by the operator's decision: the speech balloon Google Chat
 //     shows while an answer is being written, chosen over a sentence saying
 //     so. It reads the same in every language and is never part of a notice.
-//   - say whether the thing is permanent. "I could not attach it" and "this
-//     channel cannot carry attachments" call for different next moves.
+//   - say whether the thing is permanent: a failure retrying can fix and one
+//     it cannot call for different next moves.
 //
 // Italian is the fallback for a conversation whose language was never
 // determined, because the appliance ships Italian-first.
@@ -57,14 +57,89 @@ export function unnamedFile(lang: SupportedLang): string {
   return pick({ it: "il file", en: "the file", es: "el archivo", fr: "le fichier" }, lang);
 }
 
-/** The channel itself carries no attachments; retrying will never help. */
-export function attachmentsUnsupportedNotice(fileName: string, lang: SupportedLang): string {
+const MONTHS: Record<Exclude<SupportedLang, "unknown">, readonly string[]> = {
+  it: [
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre",
+  ],
+  en: [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ],
+  es: [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+  ],
+  fr: [
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+  ],
+};
+
+/**
+ * The attachment reached the bridge but the channel could not carry it, so it
+ * is offered as a link instead. The address is spelled out rather than hidden
+ * behind a label because this is the only place the person can read it, and
+ * the notice says the day it stops working so they know whether to act now.
+ * The address closes the sentence, so no full stop is read as part of it.
+ *
+ * The day is read from the date part of `expiresAt` exactly as the
+ * control-plane wrote it, without a time-zone conversion: the expiry belongs
+ * to the link's own day, and shifting it into the bridge's zone could name
+ * yesterday or tomorrow for a reader in another one.
+ */
+export function fileLinkNotice(fileName: string, url: string, expiresAt: string, lang: SupportedLang): string {
+  const date = expiresAt.slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  const day = match ? String(Number(match[3])) : date;
+  const monthIndex = match ? Number(match[2]) - 1 : -1;
+  const month = (l: Exclude<SupportedLang, "unknown">): string => MONTHS[l][monthIndex] ?? date;
   return pick(
     {
-      it: `Su questo canale non posso mandare allegati, quindi ${fileName} resta da parte. Se preferisci te ne incollo qui il contenuto.`,
-      en: `This channel cannot carry attachments, so ${fileName} stays on my side. I can paste its contents here instead if you prefer.`,
-      es: `Este canal no admite archivos adjuntos, así que ${fileName} se queda aquí conmigo. Si prefieres, pego su contenido en el chat.`,
-      fr: `Ce canal n'accepte pas les pièces jointes, donc ${fileName} reste de mon côté. Je peux coller son contenu ici si tu préfères.`,
+      it: `Puoi scaricare ${fileName} da questo link, che scade il ${day} ${month("it")}: ${url}`,
+      en: `You can download ${fileName} from this link, which expires on ${day} ${month("en")}: ${url}`,
+      es: `Puedes descargar ${fileName} desde este enlace, que caduca el ${day} de ${month("es")}: ${url}`,
+      fr: `Tu peux télécharger ${fileName} depuis ce lien, qui expire le ${day} ${month("fr")} : ${url}`,
     },
     lang,
   );

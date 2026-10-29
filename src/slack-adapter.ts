@@ -7,8 +7,11 @@
 // docs/operator/slack-setup.md. A file the person shares is downloaded with
 // the bot token into the slot's workspace. Slack shows no typing indicator for
 // the turn; its status line (turn-status.ts) is a message of the app's own,
-// edited in place and deleted when the turn ends. The adapter has no sendFile,
-// so a file the assistant attaches is not sent and the bridge tells the person.
+// edited in place and deleted when the turn ends. A file the assistant
+// attaches is uploaded into the direct message Slack opens for the person.
+// Slack refuses a token that cannot upload (`missing_scope`,
+// `not_allowed_token_type`) and a file past the workspace cap
+// (`file_too_large`); each asks the bridge for a link instead.
 //
 // A platform notice is posted as Block Kit blocks with its link in a URL
 // button (platform-notice.ts). Slack reports a click on that button to the app
@@ -21,7 +24,7 @@
 
 import type { App } from "@slack/bolt";
 import { extractSlackFiles } from "./channel-attachments.js";
-import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult, OutgoingFile, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { buildOversizeNotice, ingestInboundAttachments, prependUploadMarker } from "./inbound-attachments.js";
@@ -31,6 +34,19 @@ import { messageStatusLine } from "./status-line.js";
 import { detectLanguage } from "./turn-meta.js";
 
 const logger = makeLogger("cerase-acp.slack");
+
+/**
+ * The refusals that mean this file cannot be uploaded by this app: a token
+ * without `files:write` (`missing_scope`, `not_allowed_token_type`) and a file
+ * past the workspace's cap (`file_too_large`). Each asks for a link instead.
+ */
+const LINK_INSTEAD_CODES = new Set(["missing_scope", "not_allowed_token_type", "file_too_large"]);
+
+/** The Slack Web API error code an Error carries, when it is one the API named. */
+function slackRefusalCode(err: unknown): string | undefined {
+  const data = (err as { data?: { error?: unknown } } | null)?.data;
+  return typeof data?.error === "string" ? data.error : undefined;
+}
 
 export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): ChatAdapter {
   if (!agent.bot_token || !agent.slack_app_token) {
@@ -175,6 +191,34 @@ export function createSlackAdapter(agent: AgentConfig, dispatcher: Dispatcher): 
         await update({ channel: ref.channelId, ts: ref.ts, text, blocks } as unknown as Parameters<typeof update>[0]);
         return { ok: true };
       } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    },
+    async sendFile(userId: string, file: OutgoingFile): Promise<DeliveryResult> {
+      try {
+        if (!app) {
+          throw new Error(`slack adapter for agent "${agent.id}" not started — refusing to upload`);
+        }
+        // The upload goes to the direct message Slack opens for the person,
+        // so the file lands where the conversation is rather than in the
+        // app's own storage.
+        const opened = await app.client.conversations.open({ users: userId });
+        const channelId = opened.channel?.id;
+        if (!channelId) throw new Error("Slack named no direct message for the upload");
+        // A comment rides on the upload, so the sentence that introduces the
+        // file and the file arrive as one message.
+        await app.client.files.uploadV2({
+          channel_id: channelId,
+          file: file.bytes,
+          filename: file.name,
+          ...(file.caption !== undefined ? { initial_comment: file.caption } : {}),
+        });
+        return { ok: true };
+      } catch (err) {
+        const code = slackRefusalCode(err);
+        if (code !== undefined && LINK_INSTEAD_CODES.has(code)) {
+          return { ok: false, linkInstead: true, error: err instanceof Error ? err : new Error(String(err)) };
+        }
         return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
       }
     },

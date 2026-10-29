@@ -5,8 +5,10 @@
 // Telegram refuses it, so the bridge reports the agent down and retries it.
 // While a turn runs the typing action is refreshed every 4 s. The files a
 // person sends (documents, photos, voice, audio and video) are fetched through
-// getFileLink into the slot's workspace. The adapter has no sendFile, so a file
-// the assistant attaches is not sent and the bridge tells the person.
+// getFileLink into the slot's workspace. A file the assistant attaches goes
+// out as a document, up to Telegram's 50 MB cap; past it, or when Telegram
+// answers the upload with a 413, the adapter asks the bridge to send a link
+// instead.
 //
 // A platform notice is a quoted block under a bold heading, in Telegram's HTML,
 // with its link in an inline URL button (platform-notice.ts). Telegram refuses
@@ -24,7 +26,7 @@
 
 import type { Telegraf } from "telegraf";
 import { extractTelegramFiles, type TelegramMessageLike } from "./channel-attachments.js";
-import type { ChatAdapter, DeliveryResult, StatusLine } from "./chat-adapter.js";
+import type { ChatAdapter, DeliveryResult, OutgoingFile, StatusLine } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import {
@@ -46,6 +48,18 @@ import { detectLanguage } from "./turn-meta.js";
 import { startTypingKeepalive } from "./typing-keepalive.js";
 
 const logger = makeLogger("cerase-acp.telegram");
+
+/** Telegram refuses a bot's document past 50 MB, and answers the upload with a 413. */
+const TELEGRAM_DOCUMENT_LIMIT_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Telegram's refusal of an upload for its size, whether the SDK put the status
+ * on the Error's own code or in the API answer it carries.
+ */
+function isDocumentTooLarge(err: unknown): boolean {
+  const e = err as { code?: unknown; response?: { error_code?: unknown } } | null;
+  return e?.code === 413 || e?.response?.error_code === 413;
+}
 
 /**
  * Telegram's refusal of a message for its button: a 400 whose description names
@@ -274,6 +288,36 @@ export function createTelegramAdapter(agent: AgentConfig, dispatcher: Dispatcher
         );
         return { ok: true };
       } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    },
+    async sendFile(userId: string, file: OutgoingFile): Promise<DeliveryResult> {
+      // Telegram caps a bot's document at 50 MB, and an over-limit upload is
+      // refused with a 413. Both mean the channel cannot carry this one, not
+      // that it was lost, so they ask the bridge for a link.
+      if (file.bytes.length > TELEGRAM_DOCUMENT_LIMIT_BYTES) {
+        return {
+          ok: false,
+          linkInstead: true,
+          error: new Error("the file is over Telegram's 50 MB document limit"),
+        };
+      }
+      try {
+        if (!bot) {
+          throw new Error(`telegram adapter for agent "${agent.id}" not started — refusing to sendDocument`);
+        }
+        // A caption rides on the document itself, so the sentence that
+        // introduces the file and the file arrive as one message.
+        await bot.telegram.sendDocument(
+          userId,
+          { source: file.bytes, filename: file.name },
+          file.caption !== undefined ? { caption: file.caption } : undefined,
+        );
+        return { ok: true };
+      } catch (err) {
+        if (isDocumentTooLarge(err)) {
+          return { ok: false, linkInstead: true, error: err instanceof Error ? err : new Error(String(err)) };
+        }
         return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
       }
     },

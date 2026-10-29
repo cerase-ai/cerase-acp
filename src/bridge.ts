@@ -35,6 +35,7 @@ import { type CredentialRejection, classifyCredentialRejection } from "./credent
 import { checkTenantCredit } from "./credit-check.js";
 import { Dispatcher, STOP_DRAIN_MS, STOP_NOTICE_MS } from "./dispatcher.js";
 import { isInternalSummaryBlock, redactEngineIdentifiers, stripToolCallArtifacts } from "./egress-redaction.js";
+import { requestFileLink } from "./file-link.js";
 import { postInjectOutcome } from "./inject-outcome.js";
 import { type AgentFailure, type AgentLiveness, type InternalServer, startInternalServer } from "./internal-server.js";
 import { KeptReplies } from "./kept-replies.js";
@@ -43,9 +44,9 @@ import { isNoSharedServer } from "./no-shared-server.js";
 import { PendingMessages, replayPending } from "./pending-messages.js";
 import {
   attachmentFailedNotice,
-  attachmentsUnsupportedNotice,
   attachmentUnreadableNotice,
   displayFileName,
+  fileLinkNotice,
   unnamedFile,
 } from "./platform-notices.js";
 import { fetchRecentConversation } from "./recent-conversation.js";
@@ -461,6 +462,25 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // the caller returns it, so a channel that also went down lets the
           // whole reply be kept, files and all.
           let captionFallback: DeliveryResult | undefined;
+          // The channel cannot carry this file itself, so it reaches the
+          // person as a control-plane link instead. A link is a delivery, not
+          // a lost attachment: nothing is recorded unless asking for it fails.
+          const linkInsteadOfUpload = async (fileName: string, relPath: string): Promise<void> => {
+            try {
+              const link = await requestFileLink(agentId, relPath, {
+                controlPlaneUrl,
+                internalSecret: requireControlPlaneSecret(),
+              });
+              await inner(fileLinkNotice(link.name, link.url, link.expiresAt, lang));
+            } catch (err) {
+              logger.warn({ err, agentId, relPath }, "attach: the control-plane refused a file link");
+              await inner(attachmentFailedNotice(fileName, lang));
+              attachOutcomes.record(agentId, userId, {
+                fileName,
+                reason: `the control-plane refused a link: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
+          };
           for (const [index, relPath] of relPaths.entries()) {
             const fileName = displayFileName(relPath);
             try {
@@ -475,23 +495,28 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
                   ...(fileCaption !== undefined ? { caption: fileCaption } : {}),
                 });
                 if (!fileResult.ok) {
-                  logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
                   // The caption was the only copy of the words, so a refused
-                  // captioned upload has to deliver them as their own message,
-                  // before the person is told the file did not arrive.
+                  // upload has to deliver them as their own message, before
+                  // the person is told how the file went.
                   if (fileCaption !== undefined) captionFallback = await inner(fileCaption);
-                  await inner(attachmentFailedNotice(file.name, lang));
-                  attachOutcomes.record(agentId, userId, {
-                    fileName: file.name,
-                    reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
-                  });
+                  if (fileResult.linkInstead) {
+                    // The channel could not carry the file but the bridge has
+                    // it whole, so the link is the delivery and the failed
+                    // upload is not recorded as one.
+                    await linkInsteadOfUpload(file.name, relPath);
+                  } else {
+                    logger.warn({ err: fileResult.error, agentId, relPath }, "attach: sendFile reported failure");
+                    await inner(attachmentFailedNotice(file.name, lang));
+                    attachOutcomes.record(agentId, userId, {
+                      fileName: file.name,
+                      reason: `the channel refused the upload: ${fileResult.error?.message ?? "no reason given"}`,
+                    });
+                  }
                 }
               } else {
-                await inner(attachmentsUnsupportedNotice(file.name, lang));
-                attachOutcomes.record(agentId, userId, {
-                  fileName: file.name,
-                  reason: "this channel cannot carry attachments at all",
-                });
+                // An adapter with no upload at all still reaches the person,
+                // through a link the control-plane serves.
+                await linkInsteadOfUpload(file.name, relPath);
               }
             } catch (err) {
               logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");

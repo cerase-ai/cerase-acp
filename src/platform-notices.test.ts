@@ -8,17 +8,17 @@ import {
 } from "./dispatcher.js";
 import {
   attachmentFailedNotice,
-  attachmentsUnsupportedNotice,
   attachmentUnreadableNotice,
   deliveryFailureNotice,
   directMessagesOnlyNotice,
   displayFileName,
+  fileLinkNotice,
   keptMessagesExpiredNotice,
   oversizeUploadNotice,
 } from "./platform-notices.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
-const ALL = [attachmentFailedNotice, attachmentUnreadableNotice, attachmentsUnsupportedNotice];
+const ALL = [attachmentFailedNotice, attachmentUnreadableNotice];
 
 describe("platform notices", () => {
   it("speaks the reader's language, not always Italian", () => {
@@ -45,14 +45,6 @@ describe("platform notices", () => {
         expect(text.trim().startsWith("(")).toBe(false);
       }
     }
-  });
-
-  it("separates the retryable failure from the one retrying can never fix", () => {
-    const retryable = attachmentFailedNotice("a.md", "en").toLowerCase();
-    const permanent = attachmentsUnsupportedNotice("a.md", "en").toLowerCase();
-    expect(retryable).toContain("try again");
-    expect(permanent).toContain("cannot");
-    expect(permanent).not.toContain("try again");
   });
 
   it("shows the file name and never the workspace path", () => {
@@ -175,7 +167,7 @@ describe("one register across every platform notice", () => {
       ...(["it", "en", "es", "fr", "unknown"] as const).flatMap((l) => [
         attachmentFailedNotice("f", l),
         attachmentUnreadableNotice("f", l),
-        attachmentsUnsupportedNotice("f", l),
+        fileLinkNotice("f", "https://box.example.test/f/0", "2026-11-05T09:00:00+01:00", l),
         deliveryFailureNotice(l),
         directMessagesOnlyNotice(l),
         keptMessagesExpiredNotice(l, 1),

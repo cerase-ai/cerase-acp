@@ -35,10 +35,16 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  *
  * On a failure, `notice` is the copy the person was sent about it, when one
  * was sent and delivered.
+ *
+ * `linkInstead` asks the bridge to reach the person with a control-plane link
+ * rather than the upload: the channel cannot carry this file now, but the file
+ * itself reached the bridge whole, so a link is a delivery of it rather than
+ * a failure of the attachment. It is how a channel says "too large for me"
+ * without saying "lost".
  */
 export type DeliveryResult =
   | { ok: true; withheld?: true; kept?: true; ref?: NoticeRef }
-  | { ok: false; error: Error; notice?: string };
+  | { ok: false; error: Error; notice?: string; linkInstead?: true };
 
 /**
  * How a channel that takes each answer as one message cuts it: into one
