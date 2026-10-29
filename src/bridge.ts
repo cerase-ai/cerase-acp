@@ -56,6 +56,7 @@ import { startTestInjectionServer, type TestInjectionServer } from "./test-injec
 import { fetchToolStep } from "./tool-step.js";
 import { fetchTurnContext, formatWallClock } from "./turn-context.js";
 import { TurnMetaTracker } from "./turn-meta.js";
+import { requestVoiceTranscript } from "./voice-transcript.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
 
 const logger = makeLogger("cerase-acp.bridge");
@@ -726,6 +727,14 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // chat.
     creditCheck: (agentId) =>
       checkTenantCredit(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
+    // The words of a voice message, from the same control-plane and internal
+    // bearer as the file-link requests. A failed transcription answers null and
+    // leaves the turn to the upload path.
+    transcribeVoice: (agentId, path) =>
+      requestVoiceTranscript(agentId, path, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+      }),
     // The organization's wall clock, and the pair's last turn when this
     // process has just started and remembers nobody. Wired on the same
     // condition as the gate above and for the same reason: without the

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectLanguage, formatGap, makeTurnMetaBlock, TurnMetaTracker } from "./turn-meta.js";
+import { detectLanguage, formatGap, makeTurnMetaBlock, personWords, TurnMetaTracker } from "./turn-meta.js";
 
 describe("formatGap", () => {
   it("returns 'first' when prevAt is undefined", () => {
@@ -49,6 +49,36 @@ describe("detectLanguage", () => {
     expect(detectLanguage("")).toBe("unknown");
     expect(detectLanguage("123 456")).toBe("unknown");
     expect(detectLanguage("xy zw qr")).toBe("unknown");
+  });
+});
+
+describe("a transcribed voice message", () => {
+  const TRANSCRIPT = "Ciao Matilde, mi prepari la bozza dell'offerta?";
+  const VOICE = `[Voice message, transcribed from uploads/1-0/voice.ogg: «${TRANSCRIPT}»]`;
+
+  it("keeps the transcript's words and drops the marker words and the path", () => {
+    const words = personWords(VOICE);
+
+    expect(words).toContain(TRANSCRIPT);
+    expect(words).not.toContain("Voice message");
+    expect(words).not.toContain("transcribed from");
+    expect(words).not.toContain("uploads/1-0/voice.ogg");
+  });
+
+  it("tags an Italian-only voice message as Italian", () => {
+    expect(detectLanguage(VOICE)).toBe("it");
+  });
+
+  it("moves an Italian conversation to English by the rule a typed message follows", () => {
+    const t = new TurnMetaTracker();
+    const t0 = 1_700_000_000_000;
+    const english = "[Voice message, transcribed from uploads/1-0/voice.ogg: «Thanks, that is everything for now»]";
+
+    expect(t.prefix("doc-qa", "user-A", "ciao", t0)).toContain("lang=it");
+    // One strong turn in another language could be pasted text, so it is
+    // tagged unknown; the next one in a row moves the conversation.
+    expect(t.prefix("doc-qa", "user-A", english, t0 + 60 * 1000)).toContain("lang=unknown");
+    expect(t.prefix("doc-qa", "user-A", english, t0 + 120 * 1000)).toContain("lang=en");
   });
 });
 

@@ -300,9 +300,14 @@ const UPLOADED_FILES = /^\[Uploaded files: [^\]\n]*\]\s*$/gm;
 // removes it; the same text further down is something the person wrote.
 const CONSOLE_PAGE = /^\s*\[console_page:[^\]\n]*\]\s*/;
 
+// The line the dispatcher puts in front of an audio upload once the
+// control-plane has transcribed it. The transcript is what the person said, so
+// it counts as their words; the marker's own wording and the path do not.
+const VOICE_MESSAGE = /^\[Voice message, transcribed from .*: «(.*)»\]\s*$/gm;
+
 /** The words of a message the person wrote, without what the bridge or the console added to it. */
 export function personWords(text: string): string {
-  return (text ?? "").replace(CONSOLE_PAGE, "").replace(UPLOADED_FILES, "").trim();
+  return (text ?? "").replace(VOICE_MESSAGE, "$1").replace(CONSOLE_PAGE, "").replace(UPLOADED_FILES, "").trim();
 }
 
 export function detectLanguage(raw: string): SupportedLang {

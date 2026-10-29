@@ -56,8 +56,22 @@ import {
 import type { ToolStep } from "./tool-step.js";
 import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
 import { TurnStatus } from "./turn-status.js";
+import { isTranscribableAudio, voiceTranscriptLine } from "./voice-transcript.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
+
+// The line `prependUploadMarker` puts in front of a message carrying uploads.
+// Its paths are workspace-relative and contain no comma or bracket, so the
+// list can be split on commas.
+const UPLOADED_FILES_LINE = /^\[Uploaded files: ([^\]\n]*)\]/m;
+
+/** The audio paths of an `[Uploaded files: …]` line, in upload order. */
+function uploadedAudio(uploads: RegExpExecArray): string[] {
+  return (uploads[1] ?? "")
+    .split(",")
+    .map((path) => path.trim())
+    .filter((path) => path !== "" && isTranscribableAudio(path));
+}
 
 // The send target reports delivery success/failure instead of
 // `Promise<void>`, so a swallowed channel error can surface.
@@ -96,6 +110,13 @@ export interface DispatcherDeps {
    * overspend the reactive catch below still covers.
    */
   creditCheck?: (agentId: string) => Promise<{ exhausted: boolean }>;
+  /**
+   * Transcribes one uploaded audio file, returning null when its words cannot
+   * be had. Optional for the same reason `creditCheck` is: the test-injection
+   * dispatcher has no control-plane, and a turn without a transcript is still
+   * a turn.
+   */
+  transcribeVoice?: (agentId: string, path: string) => Promise<string | null>;
   /**
    * The organization's wall clock and the pair's last turn, from the side that
    * persists both. Optional for the same reason `creditCheck` is: the
@@ -694,6 +715,19 @@ export class Dispatcher {
     // messages and platform notes are left out: the person did not write them
     // during that work. A message that cannot be sent that way waits below.
     const person = byPerson && !isPlatformNote(text);
+    // A voice message reaches the bridge as an upload path and nothing else.
+    // Ask for its words before the prompt is built, so the assistant opens
+    // with what the person said. The upload marker is written only for a file
+    // the person sent, so it identifies their message even on an inject that
+    // did not carry `from_person`; a platform note is never transcribed.
+    // Only then is the turn's status made this early, because a transcription
+    // can take a while and the person keeps the signal a running turn gives;
+    // every other message makes it when its turn comes, as before.
+    let status: TurnStatus | undefined;
+    if (!isPlatformNote(text) && (person || UPLOADED_FILES_LINE.test(text)) && this.hasAudioToTranscribe(text)) {
+      status = line && this.turnStatus(agentId, userId, text, line);
+      text = await this.transcribeVoiceAttachments(agentId, text);
+    }
     const conversationKey = `${agentId}:${userId}`;
     let prepared: PreparedPrompt | undefined;
     const sm = this.deps.sessionManager;
@@ -718,6 +752,7 @@ export class Dispatcher {
           try {
             await alongside;
             logger.info({ agentId, userId, textLen: text.length }, "the message was sent into the work in progress");
+            void status?.close();
             return { ok: true };
           } finally {
             holding();
@@ -739,7 +774,7 @@ export class Dispatcher {
     // turn, and on 6 October one queued behind the person's «??» left them
     // reading nothing while the answer to their earlier message waited.
     const { release, waited } = await this.turnInOrder(agentId, userId);
-    const status = line && this.turnStatus(agentId, userId, text, line);
+    status ??= line && this.turnStatus(agentId, userId, text, line);
     try {
       // A bridge that began to stop while this message waited keeps it for
       // the next one: the assistant has not seen it.
@@ -768,6 +803,42 @@ export class Dispatcher {
       logger.warn({ err, agentId, userId }, "no status line for this turn: the channel could not make one");
       return undefined;
     }
+  }
+
+  /**
+   * The person's message with one voice line per transcribed audio upload, in
+   * the order the files were uploaded and immediately before the
+   * `[Uploaded files: …]` line. A file the control-plane could not transcribe
+   * leaves the message as it was for that file.
+   */
+  private async transcribeVoiceAttachments(agentId: string, text: string): Promise<string> {
+    const transcribe = this.deps.transcribeVoice;
+    const uploads = UPLOADED_FILES_LINE.exec(text);
+    if (!transcribe || !uploads) return text;
+    const audio = uploadedAudio(uploads);
+    if (audio.length === 0) return text;
+
+    const lines: string[] = [];
+    for (const path of audio) {
+      let transcript: string | null = null;
+      try {
+        transcript = await transcribe(agentId, path);
+      } catch (err) {
+        logger.warn({ err, agentId, path }, "the voice message could not be transcribed");
+      }
+      if (transcript !== null) lines.push(voiceTranscriptLine(path, transcript));
+    }
+    if (lines.length === 0) return text;
+
+    const marker = uploads[0];
+    const start = uploads.index;
+    return `${text.slice(0, start)}${lines.join("\n")}\n${marker}${text.slice(start + marker.length)}`;
+  }
+
+  /** Whether this message has an uploaded audio file and a way to transcribe it. */
+  private hasAudioToTranscribe(text: string): boolean {
+    const uploads = UPLOADED_FILES_LINE.exec(text);
+    return this.deps.transcribeVoice !== undefined && uploads !== null && uploadedAudio(uploads).length > 0;
   }
 
   /** What decides the status line of one turn: see turn-status.ts. */
