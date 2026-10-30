@@ -44,7 +44,7 @@ import type { ReachabilitySnapshot } from "./reachability.js";
  */
 export type DeliveryResult =
   | { ok: true; withheld?: true; kept?: true; ref?: NoticeRef }
-  | { ok: false; error: Error; notice?: string; linkInstead?: true };
+  | { ok: false; error: Error; notice?: string; linkInstead?: true; retryable?: boolean };
 
 /**
  * How a channel that takes each answer as one message cuts it: into one

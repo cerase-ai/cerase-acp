@@ -1111,6 +1111,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       dispatcher: productionDispatcher,
       internalSecret: acpInjectSecret,
       port: Number(process.env.CERASE_ACP_INTERNAL_PORT ?? "7476"),
+      retryDelayMs: Number(process.env.CERASE_ACP_SCHEDULED_RETRY_MS ?? "120000"),
       getAgentStatus,
       getSessionLimits: () => sessionManager.sessionLimits(),
       // Gate inject on the agent's allowlist (unknown agent → reject).

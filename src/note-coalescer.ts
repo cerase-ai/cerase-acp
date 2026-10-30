@@ -37,6 +37,13 @@ export function isPlatformNote(text: string): boolean {
   return text.startsWith(PLATFORM_NOTE_PREFIX);
 }
 
+/** What a note carries to the dispatcher besides its words. */
+export interface NoteTurnOptions {
+  byPerson?: boolean;
+  holdFailureCopy?: boolean;
+  failureLabel?: string;
+}
+
 /** The part of the dispatcher the coalescer drives. */
 export interface NoteTurns {
   handleMessage(
@@ -44,7 +51,7 @@ export interface NoteTurns {
     userId: string,
     text: string,
     receivedAt?: number,
-    options?: { byPerson?: boolean },
+    options?: NoteTurnOptions,
   ): Promise<DeliveryResult>;
   /**
    * Settles when every turn of the conversation that is running now has
@@ -75,7 +82,7 @@ export class NoteCoalescer {
     userId: string,
     text: string,
     receivedAt?: number,
-    options?: { byPerson?: boolean },
+    options?: NoteTurnOptions,
   ): Promise<DeliveryResult> {
     if (!isPlatformNote(text)) return this.turns.handleMessage(agentId, userId, text, receivedAt, options);
 
@@ -87,7 +94,7 @@ export class NoteCoalescer {
     }
 
     const running = typeof this.turns.turnsRunning === "function" ? this.turns.turnsRunning(agentId, userId) : null;
-    if (running === null) return this.turns.handleMessage(agentId, userId, text);
+    if (running === null) return this.turns.handleMessage(agentId, userId, text, receivedAt, options);
 
     const notes = [text];
     const result = running
@@ -99,7 +106,7 @@ export class NoteCoalescer {
         if (notes.length > 1) {
           logger.info({ agentId, userId, notes: notes.length }, "platform notes that waited share one turn");
         }
-        return this.turns.handleMessage(agentId, userId, notes.join(NOTE_SEPARATOR));
+        return this.turns.handleMessage(agentId, userId, notes.join(NOTE_SEPARATOR), undefined, options);
       });
     this.waiting.set(key, { notes, result });
     return result;

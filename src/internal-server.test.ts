@@ -1,27 +1,49 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { headsUpText, type InternalServer, startInternalServer } from "./internal-server.js";
 
+// A turn result the fake may carry beyond DeliveryResult: `retryable` is the
+// dispatcher's signal that the turn is worth one more try, which the endpoint
+// under test reads.
+type FakeTurnResult = { ok: true } | { ok: false; error: Error; notice?: string; retryable?: boolean };
+
+type FakeOutcome = import("./chat-adapter.js").DeliveryResult | FakeTurnResult;
+
+interface FakeHandledOptions {
+  byPerson?: boolean;
+  holdFailureCopy?: boolean;
+  failureLabel?: string;
+}
+
 // Minimal Dispatcher fake — records the calls the endpoint makes.
 // Both methods return a DeliveryResult; an optional
 // `outcome` lets a test simulate a failed turn/delivery so we can assert the
-// endpoint surfaces it as a 500.
+// endpoint surfaces it as a 500. An array is consumed one result per
+// `handleMessage` call, so a test can give the first try and the retry
+// different outcomes.
 function makeFakeDispatcher(
-  outcome: import("./chat-adapter.js").DeliveryResult = { ok: true },
+  outcome: FakeOutcome | FakeOutcome[] = { ok: true },
   // null: the agent's channel cannot close a notice at all.
   closeOutcome: import("./chat-adapter.js").DeliveryResult | null = { ok: true },
 ) {
   const calls: {
     handled: Array<[string, string, string]>;
-    handledOptions: Array<{ byPerson?: boolean } | undefined>;
+    handledOptions: Array<FakeHandledOptions | undefined>;
+    handledAt: number[];
     system: Array<[string, string, string]>;
     notices: Array<[string, string, unknown]>;
     closed: Array<[string, unknown, unknown, string]>;
   } = {
     handled: [],
     handledOptions: [],
+    handledAt: [],
     system: [],
     notices: [],
     closed: [],
+  };
+  let handled = 0;
+  const outcomeAt = (index: number): import("./chat-adapter.js").DeliveryResult => {
+    const chosen = Array.isArray(outcome) ? outcome[Math.min(index, outcome.length - 1)] : outcome;
+    return (chosen ?? { ok: true }) as import("./chat-adapter.js").DeliveryResult;
   };
   const dispatcher = {
     async handleMessage(
@@ -29,19 +51,20 @@ function makeFakeDispatcher(
       userId: string,
       text: string,
       _receivedAt?: number,
-      options?: { byPerson?: boolean },
+      options?: FakeHandledOptions,
     ) {
       calls.handled.push([agentId, userId, text]);
       calls.handledOptions.push(options);
-      return outcome;
+      calls.handledAt.push(Date.now());
+      return outcomeAt(handled++);
     },
     async sendSystemMessage(agentId: string, userId: string, text: string) {
       calls.system.push([agentId, userId, text]);
-      return outcome;
+      return outcomeAt(0);
     },
     async sendNotice(agentId: string, userId: string, notice: unknown) {
       calls.notices.push([agentId, userId, notice]);
-      return outcome;
+      return outcomeAt(0);
     },
     async closeNotice(agentId: string, ref: unknown, notice: unknown, closed: string) {
       calls.closed.push([agentId, ref, notice, closed]);
@@ -1071,5 +1094,197 @@ describe("internal-server /internal/inject reports the scheduled turn's outcome"
     const second = await post({ agent_id: "a1", user_id: "u1", text: "di nuovo", surface_in_chat: false });
     expect(second.status).toBe(202);
     await vi.waitFor(() => expect(calls.handled).toHaveLength(2));
+  });
+});
+
+// A scheduled message's turn that fails for a reason worth another try runs
+// once more after a delay. The person hears about the failure only if the
+// second try fails too, and the notice then names the scheduled message.
+describe("internal-server /internal/inject retries a scheduled turn once", () => {
+  let server: InternalServer;
+  let base: string;
+  let reportOutcome: ReturnType<typeof vi.fn>;
+
+  const REF = "scheduled-message:9f1c:3";
+  const LABEL = "Rassegna";
+  const FIRST_ERROR = "opencode crashed";
+  const SECOND_ERROR = "opencode crashed again";
+  const COPY = "Non sono riuscito a completare «Rassegna», nemmeno riprovando.";
+
+  const start = async (
+    outcomes: FakeOutcome | FakeOutcome[],
+    extra: { retryDelayMs?: number; report?: ReturnType<typeof vi.fn> } = {},
+  ) => {
+    reportOutcome = extra.report ?? vi.fn(async () => {});
+    const fake = makeFakeDispatcher(outcomes);
+    server = await startInternalServer({
+      dispatcher: fake.dispatcher,
+      internalSecret: SECRET,
+      port: 0,
+      host: "127.0.0.1",
+      retryDelayMs: extra.retryDelayMs ?? 5,
+      reportOutcome,
+    } as Parameters<typeof startInternalServer>[0]);
+    base = `http://127.0.0.1:${server.port()}`;
+    return fake.calls;
+  };
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const post = (body: unknown) =>
+    fetch(`${base}/internal/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify(body),
+    });
+
+  it("tries a retryable failed turn once more, without holding the failure copy, and reports the second try's success", async () => {
+    const calls = await start([{ ok: false, retryable: true, error: new Error(FIRST_ERROR) }, { ok: true }]);
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+      label: LABEL,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(2));
+    expect(calls.handled[0]).toEqual(["a1", "u1", "manda la rassegna"]);
+    expect(calls.handled[1]).toEqual(calls.handled[0]);
+    expect(calls.handledOptions[0]).toMatchObject({ holdFailureCopy: true });
+    expect(calls.handledOptions[1]).not.toHaveProperty("holdFailureCopy");
+    expect(calls.handledOptions[1]).toMatchObject({ failureLabel: LABEL });
+
+    await vi.waitFor(() => expect(reportOutcome).toHaveBeenCalledTimes(1));
+    expect(reportOutcome).toHaveBeenCalledWith(REF, { ok: true });
+  });
+
+  it("reports only the second try's failure, with the copy naming the scheduled message", async () => {
+    const calls = await start([
+      { ok: false, retryable: true, error: new Error(FIRST_ERROR) },
+      { ok: false, error: new Error(SECOND_ERROR), notice: COPY },
+    ]);
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+      label: LABEL,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(2));
+    await vi.waitFor(() => expect(reportOutcome).toHaveBeenCalledTimes(1));
+    expect(reportOutcome).toHaveBeenCalledWith(REF, { ok: false, error: SECOND_ERROR, notice: COPY });
+    expect(reportOutcome).not.toHaveBeenCalledWith(REF, expect.objectContaining({ error: FIRST_ERROR }));
+  });
+
+  it("handles a failure that is not retryable once, and reports it once", async () => {
+    const credit =
+      "I crediti dell'organizzazione sono esauriti — avvisa il tuo amministratore, che può chiederne altri a Cerase.";
+    const calls = await start({ ok: false, error: new Error("cerase credit gate: credits exhausted"), notice: credit });
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+      label: LABEL,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(reportOutcome).toHaveBeenCalledTimes(1));
+    expect(reportOutcome).toHaveBeenCalledWith(REF, {
+      ok: false,
+      error: "cerase credit gate: credits exhausted",
+      notice: credit,
+    });
+    // Give a wrong retry time to show up before asserting it never came.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(calls.handled).toHaveLength(1);
+  });
+
+  it("never retries an inject without an outcome_ref, and holds no failure copy for it", async () => {
+    const calls = await start([{ ok: false, retryable: true, error: new Error(FIRST_ERROR) }, { ok: true }]);
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(1));
+    // Give a wrong retry time to show up before asserting it never came.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(calls.handled).toHaveLength(1);
+    expect(calls.handledOptions[0]).not.toHaveProperty("holdFailureCopy");
+    expect(reportOutcome).not.toHaveBeenCalled();
+  });
+
+  it("does not start the second try before retryDelayMs has elapsed", async () => {
+    const calls = await start([{ ok: false, retryable: true, error: new Error(FIRST_ERROR) }, { ok: true }], {
+      retryDelayMs: 60,
+    });
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+    });
+
+    expect(resp.status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(2), { timeout: 2000 });
+    const first = calls.handledAt[0];
+    const second = calls.handledAt[1];
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second! - first!).toBeGreaterThanOrEqual(55);
+  });
+
+  it("refuses a label that is not a string, before any turn", async () => {
+    const calls = await start({ ok: true });
+
+    const resp = await post({
+      agent_id: "a1",
+      user_id: "u1",
+      text: "manda la rassegna",
+      surface_in_chat: false,
+      outcome_ref: REF,
+      label: 7,
+    });
+
+    expect(resp.status).toBe(400);
+    expect(calls.handled).toHaveLength(0);
+  });
+
+  // The control-plane accepts a label of 200 characters, and one emoji is two
+  // UTF-16 units here: a label is only the copy's name for the message, so a
+  // long one is cut rather than costing the scheduled turn.
+  it("runs the turn for a label of 200 characters with an emoji, and cuts one longer than 200", async () => {
+    const retryable = { ok: false, retryable: true, error: new Error(FIRST_ERROR) };
+    const failed = { ok: false, error: new Error(SECOND_ERROR) };
+    const calls = await start([retryable, failed, retryable, failed]);
+    const body = { agent_id: "a1", user_id: "u1", text: "manda la rassegna", surface_in_chat: false, outcome_ref: REF };
+
+    const emoji = `📬${"x".repeat(199)}`;
+    expect((await post({ ...body, label: emoji })).status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(2));
+    expect(calls.handledOptions[1]).toMatchObject({ failureLabel: emoji });
+
+    expect((await post({ ...body, label: "y".repeat(250) })).status).toBe(202);
+    await vi.waitFor(() => expect(calls.handled).toHaveLength(4));
+    expect(calls.handledOptions[3]).toMatchObject({ failureLabel: "y".repeat(200) });
   });
 });

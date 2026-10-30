@@ -3,7 +3,7 @@
 //
 //   POST /internal/inject
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
-//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person?, outcome_ref? }  → 202 · 409 · 503 · 500
+//     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person?, outcome_ref?, label? }  → 202 · 409 · 503 · 500
 //
 // It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
 // user had sent it, optionally posting a deterministic heads-up first. The
@@ -15,7 +15,9 @@
 // completed: the caller (AcpInjector) gives up after 15 s, a turn routinely
 // takes longer, and a caller that saw a timeout would send the message again.
 // An `outcome_ref` names where the detached turn's outcome is reported once it
-// ends (see InternalServerOptions.reportOutcome).
+// ends (see InternalServerOptions.reportOutcome). A scheduled turn that fails
+// with a generic error is tried once more after `retryDelayMs`; `label` names
+// the scheduled message in the second-failure copy.
 // The heads-up and the turn run as a logged background task; failures show in
 // the logs and the `inject` block of GET /internal/status.
 // When `system_message_only` is true it instead delivers `text` straight to
@@ -219,6 +221,11 @@ export interface InternalServerOptions {
    * was sent. Absent: nothing is reported.
    */
   reportOutcome?: (ref: string, outcome: InjectOutcome) => Promise<unknown>;
+  /**
+   * How long a scheduled turn named by an `outcome_ref` waits before its one
+   * retry. Defaults to 120000 ms.
+   */
+  retryDelayMs?: number;
 }
 
 /**
@@ -502,6 +509,19 @@ async function handleRequest(
     }
     outcomeRef = outcomeRefRaw;
   }
+  // The scheduled message's name, for the copy of a second failed try. The
+  // control-plane allows 200 characters, counted as characters and not as
+  // UTF-16 units, so a longer one is cut here rather than refused: a label
+  // only names the message, and refusing it would cost the scheduled turn.
+  const labelRaw = rec.label;
+  let label: string | undefined;
+  if (labelRaw !== undefined && labelRaw !== null) {
+    if (typeof labelRaw !== "string") {
+      sendJson(res, 400, { error: "label must be a string" });
+      return;
+    }
+    label = Array.from(labelRaw).slice(0, 200).join("");
+  }
 
   if (systemMessageOnly) {
     try {
@@ -570,6 +590,7 @@ async function handleRequest(
     headsUp,
     byPerson: rec.from_person === true,
     outcomeRef,
+    label,
   }).catch((err) => {
     logger.error({ err, agentId, userId }, "detached inject task rejected unexpectedly");
     injects.fail(agentId, userId, err);
@@ -594,9 +615,10 @@ async function runInjectTurn(
     headsUp: string;
     byPerson: boolean;
     outcomeRef?: string;
+    label?: string;
   },
 ): Promise<void> {
-  const { agentId, userId, text, surfaceInChat, headsUp, byPerson, outcomeRef } = p;
+  const { agentId, userId, text, surfaceInChat, headsUp, byPerson, outcomeRef, label } = p;
   const reportOutcome = async (outcome: InjectOutcome): Promise<void> => {
     if (!opts.reportOutcome || !outcomeRef) return;
     try {
@@ -626,7 +648,23 @@ async function runInjectTurn(
     // A platform note that arrives during a turn of its conversation waits
     // for it with the other notes, and they run as one turn; anything else
     // goes straight to the dispatcher, marked with who wrote it.
-    const result = await notes.submit(agentId, userId, text, undefined, { byPerson });
+    // A scheduled turn whose outcome is reported holds a generic failure's
+    // copy back, because it gets one more try after the delay. Only the final
+    // try is reported, and only a second failure reaches the person.
+    let result = await notes.submit(
+      agentId,
+      userId,
+      text,
+      undefined,
+      outcomeRef ? { byPerson, holdFailureCopy: true } : { byPerson },
+    );
+    if (outcomeRef && !result.ok && result.retryable === true) {
+      await new Promise<void>((resolve) => setTimeout(resolve, opts.retryDelayMs ?? 120_000));
+      result = await notes.submit(agentId, userId, text, undefined, {
+        byPerson,
+        ...(label ? { failureLabel: label } : {}),
+      });
+    }
     if (!result.ok) {
       logger.error({ err: result.error, agentId, userId }, "detached inject turn/delivery failed");
       injects.fail(agentId, userId, result.error);

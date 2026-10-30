@@ -318,6 +318,18 @@ export function pickNoCreditsMessage(text: string): string {
   return TURN_NO_CREDITS[detectLanguage(text)];
 }
 
+// A scheduled message's turn failed once, was held back so the person did not
+// hear about a transient error, and failed again on the retry. The copy names
+// the scheduled message, because by now the person may no longer remember
+// what they asked for.
+const TURN_RETRY_FAILED: Record<"it" | "en" | "es" | "fr" | "unknown", (label: string) => string> = {
+  it: (label) => `Non sono riuscito a completare «${label}», nemmeno riprovando.`,
+  en: (label) => `I could not complete "${label}", even on a second try.`,
+  es: (label) => `No he podido completar «${label}», ni siquiera al reintentarlo.`,
+  fr: (label) => `Je n'ai pas pu terminer « ${label} », même en réessayant.`,
+  unknown: (label) => `I could not complete "${label}", even on a second try.`,
+};
+
 // Dedicated copy for a turn the watchdog ended at its CEILING: the child was
 // alive and streaming the whole time and simply ran past the configured limit.
 // The generic "something went wrong" invites an immediate retry of the same
@@ -390,6 +402,19 @@ export interface HandleMessageOptions {
    * whatever this says.
    */
   byPerson?: boolean;
+  /**
+   * Hold the generic failure copy back, so a caller that will try once more
+   * can keep a transient error from reaching the person. The result then
+   * carries `retryable: true` and no notice. Every failure with a copy of its
+   * own (no credits, interrupted, restart outlasted, too long) is sent as usual,
+   * and so is one whose try ran a tool or wrote to the person.
+   */
+  holdFailureCopy?: boolean;
+  /**
+   * The scheduled message's name, used by the second-failure copy that
+   * replaces the generic one. Ignored when the failure has a copy of its own.
+   */
+  failureLabel?: string;
 }
 
 /** What a turn's prompt carries besides the person's words: see `preparePrompt`. */
@@ -648,7 +673,7 @@ export class Dispatcher {
     receivedAt = Date.now(),
     options?: HandleMessageOptions,
   ): Promise<DeliveryResult> {
-    const turn = this.runTurn(agentId, userId, text, receivedAt, options?.byPerson !== false);
+    const turn = this.runTurn(agentId, userId, text, receivedAt, options?.byPerson !== false, options);
     this.trackTurn(agentId, userId, turn);
     return turn;
   }
@@ -659,6 +684,7 @@ export class Dispatcher {
     text: string,
     receivedAt: number,
     byPerson: boolean,
+    options?: HandleMessageOptions,
   ): Promise<DeliveryResult> {
     // Allowlist gate. isAllowed throws on unknown agent id — let that
     // propagate so the adapter logs it as a wiring bug.
@@ -782,6 +808,8 @@ export class Dispatcher {
       return await this.answer(agentId, userId, text, receivedAt, send, status, {
         writtenAt: person && waited ? receivedAt : undefined,
         prepared,
+        holdFailureCopy: options?.holdFailureCopy,
+        failureLabel: options?.failureLabel,
       });
     } finally {
       // After the turn's last follow-up, and not awaited: a status line the
@@ -895,7 +923,12 @@ export class Dispatcher {
     receivedAt: number,
     send: SendTarget,
     status: TurnStatus | undefined,
-    opts: { writtenAt?: number; prepared?: PreparedPrompt } = {},
+    opts: {
+      writtenAt?: number;
+      prepared?: PreparedPrompt;
+      holdFailureCopy?: boolean;
+      failureLabel?: string;
+    } = {},
   ): Promise<DeliveryResult> {
     // Behind any turn of this conversation still waiting out a restart.
     await this.holds.get(`${agentId}:${userId}`);
@@ -1085,15 +1118,29 @@ export class Dispatcher {
     let failureNotice: string | undefined;
     if (failed) {
       const lang = this.noticeLang(agentId, userId, text);
-      const copy = this.interrupting
-        ? updateInterruptedNotice(lang)
-        : creditExhausted
-          ? TURN_NO_CREDITS[lang]
-          : restartOutlasted
-            ? restartOutlastedNotice(lang)
-            : isTurnCeilingError(turnError)
-              ? TURN_TOO_LONG[lang]
-              : TURN_ERROR[lang];
+      // The failure is generic when none of the cases with a copy of their own
+      // below applies: only that one is worth holding for a retry, and only
+      // when the try neither ran a tool nor wrote to the person. A try that
+      // did either did something a second run would do again.
+      const generic = !this.interrupting && !creditExhausted && !restartOutlasted && !isTurnCeilingError(turnError);
+      if (generic && opts.holdFailureCopy === true && !acted && !produced) {
+        return {
+          ok: false,
+          error: turnError ?? new Error("agent turn failed"),
+          retryable: true,
+        };
+      }
+      const copy = generic
+        ? opts.failureLabel !== undefined
+          ? TURN_RETRY_FAILED[lang](opts.failureLabel)
+          : TURN_ERROR[lang]
+        : this.interrupting
+          ? updateInterruptedNotice(lang)
+          : creditExhausted
+            ? TURN_NO_CREDITS[lang]
+            : restartOutlasted
+              ? restartOutlastedNotice(lang)
+              : TURN_TOO_LONG[lang];
       const r = await this.safeSend(send, copy, agentId, userId, "turn-error message");
       if (!r.ok) deliveryOk = false;
       else failureNotice = copy;
