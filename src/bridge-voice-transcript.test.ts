@@ -213,7 +213,9 @@ describe("a voice message reaches the assistant as words", () => {
     );
     await ended(run, "succeeded");
 
-    expect(run.prompt()).toBe(`[turn_meta: gap=first, lang=unknown]\n\n${VOICE_MESSAGE}`);
+    expect(run.prompt()).toBe(
+      `[turn_meta: gap=first, lang=unknown; before your first tool call, say in one line what you understood and will do]\n\n${VOICE_MESSAGE}`,
+    );
     expect(run.prompt()).not.toContain("[Voice message");
     expect(run.transcripts).toHaveLength(1);
   });

@@ -1237,7 +1237,7 @@ describe("the clock in front of every turn", () => {
     expect(res.status).toBe(202);
 
     await vi.waitFor(() => expect(chat.join("")).toContain("che ore sono?"), { timeout: 8000, interval: 50 });
-    expect(chat.join("")).toMatch(/now=[a-zà-ù]+ \d{4}-\d{2}-\d{2} \d{2}:\d{2} Europe\/Rome\]/);
+    expect(chat.join("")).toMatch(/now=[a-zà-ù]+ \d{4}-\d{2}-\d{2} \d{2}:\d{2} Europe\/Rome[;\]]/);
     expect(bearers.length).toBeGreaterThan(0);
     expect(new Set(bearers)).toEqual(new Set(["Bearer bearer-from-agents-yaml"]));
   });

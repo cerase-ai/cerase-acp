@@ -314,6 +314,12 @@ export function detectLanguage(raw: string): SupportedLang {
   return languageEvidence(raw).lang;
 }
 
+// The platform says rule 2 of the baseline again in every turn's own message,
+// because an assistant whose earlier conversation rarely shows that line stops
+// writing it; the sentence holds no `]`, so whatever takes the block out whole
+// still does.
+export const TURN_RULE = "before your first tool call, say in one line what you understood and will do";
+
 export function makeTurnMetaBlock(parts: {
   gap: string;
   lang: SupportedLang;
@@ -325,10 +331,11 @@ export function makeTurnMetaBlock(parts: {
   // never had; last because the block is a suffix and everything before it is
   // what the assistant has been reading since the first version. The age of a
   // message written during the previous work is appended after the clock, or
-  // after `lang` when there is none, and is absent on every other turn.
+  // after `lang` when there is none, and is absent on every other turn. The
+  // rule comes last.
   const clock = parts.now ? `, now=${parts.now}` : "";
   const written = parts.writtenAgo ? `, written_during_previous_work=${parts.writtenAgo} ago` : "";
-  return `[turn_meta: gap=${parts.gap}, lang=${parts.lang}${clock}${written}]\n\n`;
+  return `[turn_meta: gap=${parts.gap}, lang=${parts.lang}${clock}${written}; ${TURN_RULE}]\n\n`;
 }
 
 interface TurnState {
