@@ -55,6 +55,7 @@ import { fetchSessionSummary, postSessionSummary } from "./session-summary.js";
 import { startTestInjectionServer, type TestInjectionServer } from "./test-injection.js";
 import { fetchToolStep } from "./tool-step.js";
 import { fetchTurnContext, formatWallClock } from "./turn-context.js";
+import { postTurnEnded } from "./turn-ended.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 import { requestVoiceTranscript } from "./voice-transcript.js";
 import { readAgentWorkspaceFile } from "./workspace-files.js";
@@ -757,6 +758,21 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         instructionsChanged: ctx.instructionsChanged,
         notes: ctx.notes,
       };
+    },
+    // The end of every turn, so the control-plane can send the person one
+    // approval link for the turn's actions. Wired on the same condition as the
+    // gate above and for the same reason: without the internal bearer there is
+    // nothing to authenticate with.
+    //
+    // The platform comes from the agent's own configuration, as it does for
+    // the turn context above.
+    turnEnded: async (agentId, userId) => {
+      const platform = config.agents.find((a) => a.id === agentId)?.channel;
+      await postTurnEnded(
+        agentId,
+        { platform, platformUserId: userId },
+        { controlPlaneUrl, internalSecret: requireControlPlaneSecret() },
+      );
     },
     // How the assistant's previous conversation ended, for a new one. Wired on
     // the same condition as the gate above.

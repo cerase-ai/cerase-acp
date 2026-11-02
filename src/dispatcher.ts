@@ -129,6 +129,14 @@ export interface DispatcherDeps {
     userId: string,
   ) => Promise<{ clock?: string; lastTurnAt?: number; instructionsChanged?: boolean; notes?: string[] }>;
   /**
+   * Tells the control-plane that a turn ended, so it can send the person one
+   * approval link for the turn's actions. Optional for the same reason
+   * `turnContext` is: the test-injection dispatcher has no control-plane, and a
+   * turn is worth more than the link. Called once at the end of every turn it
+   * runs, failed ones included, and not awaited.
+   */
+  turnEnded?: (agentId: string, userId: string) => Promise<void>;
+  /**
    * How the assistant's previous conversation ended, for the first message of a
    * new one. Optional: the test-injection dispatcher has no control-plane, and a
    * conversation is worth more than its carry-over.
@@ -817,6 +825,13 @@ export class Dispatcher {
       // the next turn of the conversation.
       void status?.close();
       release();
+      // After the turn's last follow-up, and not awaited: the control-plane
+      // sends the person one approval link for the turn's actions when it hears
+      // the turn ended, and a control-plane that cannot hear it must hold up
+      // neither this turn's result nor the next turn of the conversation.
+      void this.deps.turnEnded?.(agentId, userId)?.catch((err) => {
+        logger.warn({ err, agentId, userId }, "the turn's end could not be reported to the control-plane");
+      });
     }
   }
 
