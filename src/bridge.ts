@@ -304,7 +304,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
   // Replies the agent's channel could not carry when they were written, kept
   // until it can: see kept-replies.ts.
   const keptReplies = new KeptReplies(stateDir);
-  const turnMeta = new TurnMetaTracker();
+  // The conversation languages the previous bridge kept, so a restart does not
+  // tag the first message with its own words instead of the conversation's.
+  const turnMeta = new TurnMetaTracker({ stateDir });
   // Shared by the send path (which records) and the production dispatcher
   // (which reads at the end of the turn). Only the production dispatcher has
   // an attach path to record from.

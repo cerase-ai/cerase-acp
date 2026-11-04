@@ -5,7 +5,18 @@
 // it by the rules in the baseline prompt,
 // cerase-core's control-plane/config/defaults/agents-baseline.md.
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { makeLogger } from "./logger.js";
+
+const logger = makeLogger("cerase-acp.turn-meta");
+
 export type SupportedLang = "it" | "en" | "es" | "fr" | "unknown";
+
+type KnownLang = Exclude<SupportedLang, "unknown">;
+
+/** The file in the state directory that keeps each conversation's language across a restart. */
+export const TURN_LANGUAGES_FILE = "turn-languages.json";
 
 // Sub-second/minute/hour/day formatter. Designed to be terse so the
 // agent's prompt-prefix cache hits more often.
@@ -44,6 +55,7 @@ const WORDS: Record<Exclude<SupportedLang, "unknown">, string[]> = {
     "che",
     "il",
     "lo",
+    "le",
     "gli",
     "una",
     "uno",
@@ -339,7 +351,9 @@ export function makeTurnMetaBlock(parts: {
 }
 
 interface TurnState {
-  lastAt: number;
+  // Absent for a pair whose language was read from the state directory: the
+  // gap still comes from the resolver, as it did before the restart.
+  lastAt?: number;
   // The language hint already computed for the meta block, kept so the
   // notices the bridge writes by itself can be written in it too.
   lastLang: SupportedLang;
@@ -364,6 +378,23 @@ export type LastTurnResolver = (agentId: string, userId: string) => Promise<numb
 
 export class TurnMetaTracker {
   private state = new Map<string, TurnState>();
+  private readonly dir: string | undefined;
+  /** The languages the state directory holds, rewritten whole whenever one changes. */
+  private readonly languages: Map<string, KnownLang>;
+
+  /**
+   * With a state directory, the conversation languages the previous bridge
+   * kept are read once here: a restart must not forget them, or the first
+   * message after a release is tagged with its own words' language instead of
+   * the conversation's. A missing or unreadable file starts empty, and a pair
+   * read this way has a language but no turn time, so the gap still comes from
+   * the resolver.
+   */
+  constructor(options: { stateDir?: string } = {}) {
+    this.dir = options.stateDir;
+    this.languages = this.readLanguages();
+    for (const [k, lang] of this.languages) this.state.set(k, { lastLang: lang });
+  }
 
   /**
    * Computes the meta block for `text` and records this turn's
@@ -497,12 +528,59 @@ export class TurnMetaTracker {
 
   private record(k: string, now: number, lang: SupportedLang): void {
     const previous = this.state.get(k);
+    const lastLang = lang === "unknown" ? (previous?.lastLang ?? "unknown") : lang;
     this.state.set(k, {
       lastAt: now,
-      lastLang: lang === "unknown" ? (previous?.lastLang ?? "unknown") : lang,
+      lastLang,
       // `turnLanguage` has already set or cleared the memory of a turn pointing
       // to another language; keep it for the next turn.
       pendingLang: previous?.pendingLang,
     });
+
+    // Only the language is kept, never the message: a restart needs to know
+    // what language to answer in, not what was said. A turn tagged `unknown`
+    // leaves the conversation's known language alone.
+    if (lastLang !== "unknown" && this.languages.get(k) !== lastLang) {
+      this.languages.set(k, lastLang);
+      this.writeLanguages();
+    }
+  }
+
+  /** The conversation languages the state directory holds; anything unreadable starts empty. */
+  private readLanguages(): Map<string, KnownLang> {
+    const languages = new Map<string, KnownLang>();
+    if (!this.dir) return languages;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(join(this.dir, TURN_LANGUAGES_FILE), "utf8"));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        logger.warn(
+          { reason: (err as Error).message },
+          "the conversation languages kept by the previous bridge could not be read; each conversation starts with no known language and the file is replaced on the next write",
+        );
+      }
+      return languages;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return languages;
+    for (const [k, lang] of Object.entries(parsed)) {
+      if (lang === "it" || lang === "en" || lang === "es" || lang === "fr") languages.set(k, lang);
+    }
+    return languages;
+  }
+
+  private writeLanguages(): void {
+    if (!this.dir) return;
+    try {
+      mkdirSync(this.dir, { recursive: true });
+      const tmp = join(this.dir, `${TURN_LANGUAGES_FILE}.tmp`);
+      writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.languages)), { mode: 0o600 });
+      renameSync(tmp, join(this.dir, TURN_LANGUAGES_FILE));
+    } catch (err) {
+      logger.error(
+        { reason: (err as Error).message },
+        "the conversation languages could not be written to the state directory; this turn is still answered from memory",
+      );
+    }
   }
 }
