@@ -329,8 +329,12 @@ export function detectLanguage(raw: string): SupportedLang {
 // The platform says rule 2 of the baseline again in every turn's own message,
 // because an assistant whose earlier conversation rarely shows that line stops
 // writing it; the sentence holds no `]`, so whatever takes the block out whole
-// still does.
-export const TURN_RULE = "before your first tool call, say in one line what you understood and will do";
+// still does. The second clause is here for the same reason: a model copies the
+// form of address of its own earlier replies, and only this line beside the
+// identity block's own rule moves it. The privacy hook matches both clauses
+// literally, so a change here is a change in `cerase_pii_hook.py` too.
+export const TURN_RULE =
+  "before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise";
 
 export function makeTurnMetaBlock(parts: {
   gap: string;

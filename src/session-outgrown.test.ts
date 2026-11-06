@@ -257,7 +257,8 @@ describe("a message whose session outgrew its summary", () => {
     expect(answer).toMatch(/^assistant: \[session_result: started over\]\n\n/);
     expect(answer).toContain(SUMMARY.text);
     expect(answer).toContain(`written ${SUMMARY.at}`);
-    expect(answer).toMatch(/\n\neveryone: \[turn_meta: [^\]]*\]\n\nCiao, mi prepari il riassunto/);
+    // The echoed prompt is long enough to be sent in pieces, cut at a paragraph.
+    expect(answer).toMatch(/everyone: \[turn_meta: [^\]]*\]\n\nCiao, mi prepari il riassunto/);
   });
 
   it("starts over without a summary when there is none, or none can be read, and says so", async () => {
