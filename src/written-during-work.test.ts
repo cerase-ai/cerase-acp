@@ -63,6 +63,8 @@ interface HarnessOptions {
   sendDelayMs?: number;
   onFirstDeliveryStart?: () => void;
   onFirstDeliveryEnd?: () => void;
+  /** Called each time the control-plane is told the work so far is over. */
+  turnEnded?: () => void;
 }
 
 function makeHarness(opts: HarnessOptions = {}): Harness {
@@ -99,6 +101,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
     config,
     sessionManager: manager,
     turnMeta: new TurnMetaTracker(),
+    turnEnded: async () => opts.turnEnded?.(),
     resolveSendTarget: () => async (text) => {
       const first = deliveries === 0;
       deliveries += 1;
@@ -294,6 +297,57 @@ describe("a message written while the previous work runs", () => {
     expect(writtenDuringPreviousWork(secondText)).toBe(true);
 
     expect(answers(harness.sent)).toEqual(["answer to: first", "answer to: second"]);
+  });
+
+  it("waits for a scheduled work to end and runs as its own work, marked", async () => {
+    harness = makeHarness();
+    const { dispatcher } = harness;
+
+    const scheduled = dispatcher.handleMessage("doc-qa", "111", "scheduled", Date.now(), { byPerson: false });
+    await harness.waitFor(
+      (entries) =>
+        entries.some(
+          (entry) => entry.loop === 1 && !entry.answer && entry.taken.some((t) => personPart(t) === "scheduled"),
+        ),
+      "the scheduled work's first tool step",
+    );
+    const person = dispatcher.handleMessage("doc-qa", "111", "person");
+
+    const results = await Promise.all([scheduled, person]);
+    expect(results).toEqual([{ ok: true }, { ok: true }]);
+
+    const entries = harness.readLog();
+    expect(takenBy(entries, 1).filter((t) => personPart(t) === "person")).toHaveLength(0);
+    const personSteps = entries.filter((entry) => entry.taken.some((t) => personPart(t) === "person"));
+    expect(personSteps).toHaveLength(1);
+    expect(personSteps[0]!.loop).toBe(2);
+    expect(writtenDuringPreviousWork(personSteps[0]!.taken.find((t) => personPart(t) === "person")!)).toBe(true);
+  });
+
+  it("closes the approvals of the work so far as it joins, before that work ends", async () => {
+    let ended = 0;
+    harness = makeHarness({ turnEnded: () => (ended += 1) });
+    const { dispatcher } = harness;
+
+    const first = dispatcher.handleMessage("doc-qa", "111", "first");
+    await harness.waitFor(
+      (entries) =>
+        entries.some(
+          (entry) => entry.loop === 1 && !entry.answer && entry.taken.some((t) => personPart(t) === "first"),
+        ),
+      "the first work's first tool step",
+    );
+    expect(ended).toBe(0);
+    const second = dispatcher.handleMessage("doc-qa", "111", "second");
+    const told = await harness.waitFor(
+      (entries) => ended === 1 || entries.some((entry) => entry.loop === 1 && entry.answer),
+      "the control-plane told, or the work answering",
+    );
+
+    expect(ended).toBe(1);
+    expect(told.some((entry) => entry.loop === 1 && entry.answer)).toBe(false);
+    await Promise.all([first, second]);
+    expect(ended).toBe(2);
   });
 
   it("does not take a scheduled message into the work, nor mark it", async () => {

@@ -444,6 +444,8 @@ export class Dispatcher {
   // `turnInOrder`. Every turn waits for the one before it to end, follow-ups
   // included.
   private inOrder = new Map<string, Promise<void>>();
+  /** The conversations whose running turn a person asked for, by agent and user. */
+  private byPersonNow = new Set<string>();
 
   // Per conversation, the turns `handleMessage` is running now, whoever sent
   // them: an adapter, a scheduled message, a platform note.
@@ -747,7 +749,10 @@ export class Dispatcher {
     // model's next step and answers it with that work, so the person is heard
     // without waiting for the answer to their earlier message. Scheduled
     // messages and platform notes are left out: the person did not write them
-    // during that work. A message that cannot be sent that way waits below.
+    // during that work. Nor does a message go into a work nobody asked for
+    // just now, a scheduled message or a platform note: it is a request of its
+    // own, and its gated actions would share that work's approval page. A
+    // message that cannot be sent that way waits below.
     const person = byPerson && !isPlatformNote(text);
     // A voice message reaches the bridge as an upload path and nothing else.
     // Ask for its words before the prompt is built, so the assistant opens
@@ -769,7 +774,7 @@ export class Dispatcher {
     // platform notes waiting for this conversation and records this turn's
     // time: a message with no work to join is built when its own turn comes.
     const working = typeof sm.workInProgress === "function" && sm.workInProgress(agentId, userId);
-    if (person && this.inOrder.has(conversationKey) && working) {
+    if (person && this.inOrder.has(conversationKey) && working && this.byPersonNow.has(conversationKey)) {
       try {
         // Built once: a message that falls back after a failed send keeps the
         // mark of having been written during the previous work, and the notes
@@ -782,6 +787,9 @@ export class Dispatcher {
           prepared.context ? { context: prepared.context } : undefined,
         );
         if (alongside) {
+          // What the work asked so far reaches the person now, on its page:
+          // what is asked from here on may serve this message.
+          this.reportTurnEnded(agentId, userId);
           const holding = this.deps.sessionManager.holdTurn(agentId);
           try {
             await alongside;
@@ -808,6 +816,7 @@ export class Dispatcher {
     // turn, and on 6 October one queued behind the person's «??» left them
     // reading nothing while the answer to their earlier message waited.
     const { release, waited } = await this.turnInOrder(agentId, userId);
+    if (person) this.byPersonNow.add(conversationKey);
     status ??= line && this.turnStatus(agentId, userId, text, line);
     try {
       // A bridge that began to stop while this message waited keeps it for
@@ -824,15 +833,22 @@ export class Dispatcher {
       // channel is slow to take down holds up neither this turn's result nor
       // the next turn of the conversation.
       void status?.close();
+      this.byPersonNow.delete(conversationKey);
       release();
-      // After the turn's last follow-up, and not awaited: the control-plane
-      // sends the person one approval link for the turn's actions when it hears
-      // the turn ended, and a control-plane that cannot hear it must hold up
-      // neither this turn's result nor the next turn of the conversation.
-      void this.deps.turnEnded?.(agentId, userId)?.catch((err) => {
-        logger.warn({ err, agentId, userId }, "the turn's end could not be reported to the control-plane");
-      });
+      this.reportTurnEnded(agentId, userId);
     }
+  }
+
+  /**
+   * Tell the control-plane the work so far is over, so it sends the person one
+   * approval link for what that work asked. Not awaited: a control-plane that
+   * cannot hear it must hold up neither this turn's result nor the next turn of
+   * the conversation.
+   */
+  private reportTurnEnded(agentId: string, userId: string): void {
+    void this.deps.turnEnded?.(agentId, userId)?.catch((err) => {
+      logger.warn({ err, agentId, userId }, "the turn's end could not be reported to the control-plane");
+    });
   }
 
   /**
