@@ -70,6 +70,11 @@ jobs:
         continue-on-error: true
         run: bash scripts/secrets-guard.sh
 
+      # Every image this repo builds names its base by digest, and no build pipes
+      # an installer into a shell. Same script in every repo, synced from core.
+      - name: Image bases guard
+        run: bash scripts/image-bases-guard.sh
+
       - name: Install gitleaks
         id: gitleaks_install
         continue-on-error: true
