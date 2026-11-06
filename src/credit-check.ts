@@ -16,9 +16,12 @@
 // true, 200 → false) or THROWS. It must NOT swallow errors — the dispatcher
 // fails OPEN on a throw (a control-plane glitch must never block chat).
 
+import { controlPlaneHeaders } from "./control-plane-headers.js";
+
 export interface CreditCheckOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -35,7 +38,7 @@ export async function checkTenantCredit(agentId: string, opts: CreditCheckOption
 
   const resp = await f(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${opts.internalSecret}` },
+    headers: controlPlaneHeaders(opts),
   });
 
   // 402 Payment Required = tenant below the credit safety buffer (exhausted).

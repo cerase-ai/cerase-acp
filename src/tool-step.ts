@@ -9,6 +9,7 @@
 // `POST /api/internal/tool-step/{agent}` with the control-plane's bearer and
 // `{"tool", "input", "lang"}`; the answer is 200 `{"sentence": "…"}`.
 
+import { controlPlaneHeaders } from "./control-plane-headers.js";
 import type { SupportedLang } from "./turn-meta.js";
 
 /**
@@ -24,6 +25,7 @@ const MAX_SENTENCE_CHARS = 300;
 export interface ToolStepOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }
@@ -47,7 +49,7 @@ export async function fetchToolStep(agentId: string, step: ToolStep, opts: ToolS
   const resp = await f(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${opts.internalSecret}`,
+      ...controlPlaneHeaders(opts),
       "Content-Type": "application/json",
       Accept: "application/json",
     },

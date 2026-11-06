@@ -13,16 +13,18 @@ const SECRET = "internal-secret";
 const opts = (fetchImpl: typeof fetch, extra: { timeoutMs?: number } = {}) => ({
   controlPlaneUrl: CONTROL_PLANE,
   internalSecret: SECRET,
+  bridgeSecret: "bridge-secret",
   fetchImpl,
   ...extra,
 });
 
 function recording(answer: unknown, status = 200) {
-  const seen = { url: "", method: "", auth: "", contentType: "", body: "" };
+  const seen = { url: "", method: "", auth: "", bridge: "", contentType: "", body: "" };
   const fetchImpl = (async (url: string, init?: RequestInit) => {
     seen.url = url;
     seen.method = init?.method ?? "";
     seen.auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
+    seen.bridge = (init?.headers as Record<string, string> | undefined)?.["X-Cerase-Bridge-Secret"] ?? "";
     seen.contentType = (init?.headers as Record<string, string> | undefined)?.["Content-Type"] ?? "";
     seen.body = (init?.body as string | undefined) ?? "";
     return new Response(JSON.stringify(answer), { status });
@@ -39,6 +41,7 @@ describe("requestVoiceTranscript", () => {
     expect(seen.method).toBe("POST");
     expect(seen.url).toBe("http://control-plane.test:9999/api/internal/voice-transcripts");
     expect(seen.auth).toBe(`Bearer ${SECRET}`);
+    expect(seen.bridge).toBe("bridge-secret");
     expect(seen.contentType).toBe("application/json");
     expect(JSON.parse(seen.body)).toEqual({
       agent_id: "agent-1",

@@ -11,6 +11,7 @@
 // as the person's words.
 
 import { bridgePromptLine } from "./bridge-prompt.js";
+import { controlPlaneHeaders } from "./control-plane-headers.js";
 
 export interface RecentTurn {
   role: "person" | "assistant";
@@ -26,6 +27,7 @@ export interface RecentConversation {
 export interface RecentConversationOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -36,7 +38,7 @@ export async function fetchRecentConversation(
 ): Promise<RecentConversation | undefined> {
   const f = opts.fetchImpl ?? fetch;
   const url = `${opts.controlPlaneUrl.replace(/\/$/, "")}/api/internal/recent-conversation/${encodeURIComponent(agentId)}`;
-  const resp = await f(url, { headers: { Authorization: `Bearer ${opts.internalSecret}` } });
+  const resp = await f(url, { headers: controlPlaneHeaders(opts) });
   if (!resp.ok) throw new Error(`recent-conversation: HTTP ${resp.status}`);
   const body = (await resp.json()) as {
     conversation?: { ended_at?: string; turns?: { role?: string; text?: string }[] } | null;

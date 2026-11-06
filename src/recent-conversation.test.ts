@@ -7,7 +7,7 @@ import { fetchRecentConversation, recentConversationNote } from "./recent-conver
 // conversation and the person's «manda pure» reached a new one, which held
 // nothing of it. Every name here is invented.
 
-const OPTS = { controlPlaneUrl: "http://cp:8000", internalSecret: "s3cret" };
+const OPTS = { controlPlaneUrl: "http://cp:8000", internalSecret: "s3cret", bridgeSecret: "bridge-secret" };
 
 function answering(body: unknown, status = 200): typeof fetch {
   return (async () =>
@@ -21,9 +21,11 @@ describe("the end of the previous conversation", () => {
   it("is read from the control-plane with the bearer, person and assistant turns only", async () => {
     let seen = "";
     let bearer = "";
+    let bridge = "";
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       seen = String(url);
       bearer = String((init?.headers as Record<string, string>)?.Authorization ?? "");
+      bridge = String((init?.headers as Record<string, string>)?.["X-Cerase-Bridge-Secret"] ?? "");
       return new Response(
         JSON.stringify({
           conversation: {
@@ -44,6 +46,7 @@ describe("the end of the previous conversation", () => {
 
     expect(seen).toBe("http://cp:8000/api/internal/recent-conversation/agent-3");
     expect(bearer).toBe("Bearer s3cret");
+    expect(bridge).toBe("bridge-secret");
     expect(recent?.turns.map((t) => t.role)).toEqual(["person", "assistant"]);
   });
 

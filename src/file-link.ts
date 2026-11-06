@@ -9,8 +9,11 @@
 // is nothing to send, so a refusal is thrown and the caller tells the person
 // the attachment did not arrive.
 //
-// The route is internal, so the request carries the control-plane bearer, and
-// the answer is reshaped into the camelCase this codebase uses.
+// The route is internal, so the request carries the control-plane bearer and
+// the bridge secret, and the answer is reshaped into the camelCase this
+// codebase uses.
+
+import { controlPlaneHeaders } from "./control-plane-headers.js";
 
 /** A served file: where it is, what it is called, and when the address stops working. */
 export interface FileLink {
@@ -23,6 +26,7 @@ export interface FileLink {
 export interface FileLinkOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -51,8 +55,8 @@ export async function requestFileLink(agentId: string, path: string, opts: FileL
   const resp = await f(url, {
     method: "POST",
     headers: {
+      ...controlPlaneHeaders(opts),
       "Content-Type": "application/json",
-      Authorization: `Bearer ${opts.internalSecret}`,
     },
     body: JSON.stringify({ agent_id: agentId, path }),
   });

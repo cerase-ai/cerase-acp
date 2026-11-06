@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { postTurnEnded } from "./turn-ended.js";
 
-const OPTS = { controlPlaneUrl: "http://cp:8000/", internalSecret: "s3cret" };
+const OPTS = { controlPlaneUrl: "http://cp:8000/", internalSecret: "s3cret", bridgeSecret: "bridge-secret" };
 
 function recordingFetch(status = 204): {
   fetchImpl: typeof fetch;
@@ -34,6 +34,7 @@ describe("postTurnEnded", () => {
     expect(init?.method).toBe("POST");
     const headers = new Headers(init?.headers);
     expect(headers.get("authorization")).toBe("Bearer s3cret");
+    expect(headers.get("x-cerase-bridge-secret")).toBe("bridge-secret");
     expect(headers.get("content-type")).toContain("application/json");
     expect(JSON.parse(String(init?.body))).toEqual({ platform: "discord", platform_user_id: "12345" });
   });

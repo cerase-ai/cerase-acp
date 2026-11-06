@@ -17,9 +17,12 @@
 // the tracker has no state for a pair, which after a restart is once per
 // conversation and never again.
 
+import { controlPlaneHeaders } from "./control-plane-headers.js";
+
 export interface TurnContextOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -78,7 +81,7 @@ export async function fetchTurnContext(
     `${opts.controlPlaneUrl.replace(/\/$/, "")}/api/internal/turn-context/${encodeURIComponent(agentId)}` +
     (qs ? `?${qs}` : "");
 
-  const resp = await f(url, { headers: { Authorization: `Bearer ${opts.internalSecret}` } });
+  const resp = await f(url, { headers: controlPlaneHeaders(opts) });
   if (!resp.ok) {
     throw new Error(`turn-context: HTTP ${resp.status}`);
   }

@@ -23,7 +23,11 @@ function fakeFetch(answer: () => Response | Promise<Response>, seen: Seen[]): ty
   }) as typeof fetch;
 }
 
-const OPTS = { controlPlaneUrl: "http://cerase-control-plane:8000/", internalSecret: "bearer-from-agents-yaml" };
+const OPTS = {
+  controlPlaneUrl: "http://cerase-control-plane:8000/",
+  internalSecret: "bearer-from-agents-yaml",
+  bridgeSecret: "bridge-secret",
+};
 const STEP = {
   tool: "cerase-gateway_call_recipe",
   input: { recipe_name: "google-workspace.getGoogleSheetContent", args: { spreadsheetId: "abc", range: "A1:Z9" } },
@@ -44,6 +48,7 @@ describe("the sentence of a step", () => {
         method: "POST",
         headers: {
           Authorization: "Bearer bearer-from-agents-yaml",
+          "X-Cerase-Bridge-Secret": "bridge-secret",
           "Content-Type": "application/json",
           Accept: "application/json",
         },

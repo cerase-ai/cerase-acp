@@ -5,12 +5,14 @@ describe("postSessionSummary", () => {
   const opts = (fetchImpl: typeof fetch) => ({
     controlPlaneUrl: "http://cerase-control-plane:8000",
     internalSecret: "s",
+    bridgeSecret: "bridge-secret",
     fetchImpl,
   });
 
-  it("POSTs the trimmed summary with the bearer + JSON body, returns true on 2xx", async () => {
+  it("POSTs the trimmed summary with the bearer + bridge secret + JSON body, returns true on 2xx", async () => {
     let seenUrl = "";
     let seenAuth = "";
+    let seenBridge = "";
     let seenMethod = "";
     let seenBody = "";
     const fakeFetch = (async (url: string, init?: RequestInit) => {
@@ -19,6 +21,7 @@ describe("postSessionSummary", () => {
       // See approval-link.test.ts: `?.` on the cast, so an undefined `init`
       // fails the header assertion instead of throwing inside the double.
       seenAuth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
+      seenBridge = (init?.headers as Record<string, string> | undefined)?.["X-Cerase-Bridge-Secret"] ?? "";
       seenBody = init?.body as string;
       return { ok: true } as Response;
     }) as unknown as typeof fetch;
@@ -29,6 +32,7 @@ describe("postSessionSummary", () => {
     expect(seenMethod).toBe("POST");
     expect(seenUrl).toBe("http://cerase-control-plane:8000/api/internal/session-summary");
     expect(seenAuth).toBe("Bearer s");
+    expect(seenBridge).toBe("bridge-secret");
     expect(JSON.parse(seenBody)).toEqual({ agent_id: "agent-1", summary: "## Anchored Summary" });
   });
 

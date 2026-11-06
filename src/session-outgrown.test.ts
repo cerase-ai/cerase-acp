@@ -331,24 +331,35 @@ describe("the notice the person reads", () => {
 });
 
 describe("reading the last summary from the control-plane", () => {
-  it("GETs it by the bridge's agent id with the internal bearer", async () => {
-    const calls: { url: string; auth: string | null }[] = [];
+  it("GETs it by the bridge's agent id with the internal bearer and the bridge secret", async () => {
+    const calls: { url: string; auth: string | null; bridge: string | null }[] = [];
     const got = await fetchSessionSummary("agent-1", {
       controlPlaneUrl: "http://cp:8000/",
       internalSecret: "s3cret",
+      bridgeSecret: "bridge-secret",
       fetchImpl: (async (url: string, init?: RequestInit) => {
-        calls.push({ url, auth: new Headers(init?.headers).get("Authorization") });
+        calls.push({
+          url,
+          auth: new Headers(init?.headers).get("Authorization"),
+          bridge: new Headers(init?.headers).get("X-Cerase-Bridge-Secret"),
+        });
         return new Response(JSON.stringify({ summary: `  ${SUMMARY.text}  `, summarised_at: SUMMARY.at }));
       }) as typeof fetch,
     });
-    expect(calls).toEqual([{ url: "http://cp:8000/api/internal/session-summary/agent-1", auth: "Bearer s3cret" }]);
+    expect(calls).toEqual([
+      {
+        url: "http://cp:8000/api/internal/session-summary/agent-1",
+        auth: "Bearer s3cret",
+        bridge: "bridge-secret",
+      },
+    ]);
     expect(got).toEqual(SUMMARY);
   });
 
   it("answers none for an assistant with no summary, and throws on a refusal", async () => {
     const answering = (status: number, body: unknown) =>
       (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
-    const opts = { controlPlaneUrl: "http://cp", internalSecret: "s" };
+    const opts = { controlPlaneUrl: "http://cp", internalSecret: "s", bridgeSecret: "bridge-secret" };
     expect(
       await fetchSessionSummary("agent-1", {
         ...opts,

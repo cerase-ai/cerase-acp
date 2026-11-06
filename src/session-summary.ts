@@ -13,10 +13,12 @@
 // replaced by a new one, and the new one starts from this summary.
 
 import { bridgePromptLine } from "./bridge-prompt.js";
+import { controlPlaneHeaders } from "./control-plane-headers.js";
 
 export interface SessionSummaryOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -39,8 +41,8 @@ export async function postSessionSummary(
     const resp = await f(url, {
       method: "POST",
       headers: {
+        ...controlPlaneHeaders(opts),
         "Content-Type": "application/json",
-        Authorization: `Bearer ${opts.internalSecret}`,
       },
       body: JSON.stringify({ agent_id: agentId, summary: trimmed }),
     });
@@ -71,7 +73,7 @@ export async function fetchSessionSummary(
 ): Promise<LastSummary | undefined> {
   const f = opts.fetchImpl ?? fetch;
   const url = `${opts.controlPlaneUrl.replace(/\/$/, "")}/api/internal/session-summary/${encodeURIComponent(agentId)}`;
-  const resp = await f(url, { headers: { Authorization: `Bearer ${opts.internalSecret}` } });
+  const resp = await f(url, { headers: controlPlaneHeaders(opts) });
   if (!resp.ok) throw new Error(`session-summary: HTTP ${resp.status}`);
   const body = (await resp.json()) as { summary?: unknown; summarised_at?: unknown };
   const text = typeof body.summary === "string" ? body.summary.trim() : "";

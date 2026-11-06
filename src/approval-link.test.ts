@@ -39,11 +39,13 @@ describe("fetchPendingApprovalLink", () => {
   const opts = (fetchImpl: typeof fetch) => ({
     controlPlaneUrl: "http://cerase-control-plane:8000",
     internalSecret: "s",
+    bridgeSecret: "bridge-secret",
     fetchImpl,
   });
 
-  it("returns the link from the control-plane + sends the bearer", async () => {
+  it("returns the link from the control-plane + sends the bearer and bridge secret", async () => {
     let seenAuth = "";
+    let seenBridge = "";
     let seenUrl = "";
     const fakeFetch = (async (url: string, init?: RequestInit) => {
       seenUrl = url;
@@ -53,12 +55,14 @@ describe("fetchPendingApprovalLink", () => {
       // Authorization header" rather than "the fake crashed". A test double
       // that can fail for its own reasons reports the wrong defect.
       seenAuth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
+      seenBridge = (init?.headers as Record<string, string> | undefined)?.["X-Cerase-Bridge-Secret"] ?? "";
       return { ok: true, json: async () => ({ approval_link: LINK }) } as Response;
     }) as unknown as typeof fetch;
 
     const link = await fetchPendingApprovalLink("agent-1", opts(fakeFetch));
     expect(link).toBe(LINK);
     expect(seenAuth).toBe("Bearer s");
+    expect(seenBridge).toBe("bridge-secret");
     expect(seenUrl).toContain("/api/internal/approval-pending-link?agent_id=agent-1");
   });
 

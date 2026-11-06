@@ -5,6 +5,7 @@
 // request this is best-effort -- a refused, empty or slow transcription leaves
 // the turn as it was -- so the client answers null instead of throwing.
 
+import { controlPlaneHeaders } from "./control-plane-headers.js";
 import { makeLogger } from "./logger.js";
 
 const logger = makeLogger("cerase-acp.voice-transcript");
@@ -15,6 +16,7 @@ const AUDIO_EXTENSIONS = new Set(["ogg", "oga", "opus", "mp3", "m4a", "wav", "we
 export interface VoiceTranscriptOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }
@@ -35,8 +37,8 @@ export async function requestVoiceTranscript(
     const resp = await f(url, {
       method: "POST",
       headers: {
+        ...controlPlaneHeaders(opts),
         "Content-Type": "application/json",
-        Authorization: `Bearer ${opts.internalSecret}`,
       },
       body: JSON.stringify({ agent_id: agentId, path }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),

@@ -12,6 +12,7 @@ const SECRET = "internal-secret";
 const opts = (fetchImpl: typeof fetch) => ({
   controlPlaneUrl: CONTROL_PLANE,
   internalSecret: SECRET,
+  bridgeSecret: "bridge-secret",
   fetchImpl,
 });
 
@@ -23,11 +24,12 @@ const ANSWER = {
 };
 
 function recording(answer: unknown, status = 201) {
-  const seen = { url: "", method: "", auth: "", contentType: "", body: "" };
+  const seen = { url: "", method: "", auth: "", bridge: "", contentType: "", body: "" };
   const fetchImpl = (async (url: string, init?: RequestInit) => {
     seen.url = url;
     seen.method = init?.method ?? "";
     seen.auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
+    seen.bridge = (init?.headers as Record<string, string> | undefined)?.["X-Cerase-Bridge-Secret"] ?? "";
     seen.contentType = (init?.headers as Record<string, string> | undefined)?.["Content-Type"] ?? "";
     seen.body = (init?.body as string | undefined) ?? "";
     return { ok: status >= 200 && status < 300, status, json: async () => answer } as Response;
@@ -44,6 +46,7 @@ describe("requestFileLink", () => {
     expect(seen.method).toBe("POST");
     expect(seen.url).toBe("http://control-plane.test:9999/api/internal/file-links");
     expect(seen.auth).toBe(`Bearer ${SECRET}`);
+    expect(seen.bridge).toBe("bridge-secret");
     expect(seen.contentType).toBe("application/json");
     expect(JSON.parse(seen.body)).toEqual({
       agent_id: "agent-1",

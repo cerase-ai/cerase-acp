@@ -13,7 +13,7 @@ import { fetchTurnContext, resetTurnContextCache } from "./turn-context.js";
 // the conversation's last message (turn-context's `instructions_changed`); the
 // bridge says it, once, in front of the turn.
 
-const OPTS = { controlPlaneUrl: "http://cp:8000", internalSecret: "s3cret" };
+const OPTS = { controlPlaneUrl: "http://cp:8000", internalSecret: "s3cret", bridgeSecret: "bridge-secret" };
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });

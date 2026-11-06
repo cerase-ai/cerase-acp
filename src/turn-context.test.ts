@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { cachedTimezoneIfFresh, fetchTurnContext, formatWallClock, resetTurnContextCache } from "./turn-context.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
-const OPTS = { controlPlaneUrl: "http://cp:8000", internalSecret: "s3cret" };
+const OPTS = { controlPlaneUrl: "http://cp:8000", internalSecret: "s3cret", bridgeSecret: "bridge-secret" };
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -18,8 +18,10 @@ beforeEach(() => {
 describe("fetchTurnContext", () => {
   it("carries the person's channel identity, or the last turn cannot be found", async () => {
     let seen = "";
-    const fetchImpl = (async (url: string) => {
+    let seenBridge = "";
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
       seen = String(url);
+      seenBridge = (init?.headers as Record<string, string> | undefined)?.["X-Cerase-Bridge-Secret"] ?? "";
       return jsonResponse({ timezone: "Europe/Rome", now: "2026-08-16T14:05:00+02:00", last_turn_at: null });
     }) as unknown as typeof fetch;
 
@@ -29,6 +31,7 @@ describe("fetchTurnContext", () => {
     expect(seen).toContain("platform=discord");
     expect(seen).toContain("platform_user_id=12345");
     expect(seen).toContain("notes=1");
+    expect(seenBridge).toBe("bridge-secret");
   });
 
   it("reads the platform's notes, keeping only the strings that say something", async () => {

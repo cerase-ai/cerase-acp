@@ -6,6 +6,8 @@
 // is exactly what we're gating, so if it held the token it could
 // self-approve). The chat carries only a link, no buttons.
 
+import { controlPlaneHeaders } from "./control-plane-headers.js";
+
 const PLACEHOLDER = "{{APPROVAL_LINK}}";
 
 /**
@@ -35,6 +37,7 @@ export function needsApprovalLink(text: string): boolean {
 export interface PendingLinkOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -51,7 +54,7 @@ export async function fetchPendingApprovalLink(agentId: string, opts: PendingLin
   // throws instead of returning null: the caller substitutes an
   // explanatory fallback rather than silently dropping the placeholder.
   const resp = await f(url, {
-    headers: { Authorization: `Bearer ${opts.internalSecret}` },
+    headers: controlPlaneHeaders(opts),
   });
   if (!resp.ok) {
     throw new Error(`approval-pending-link returned HTTP ${resp.status}`);

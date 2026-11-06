@@ -178,6 +178,7 @@ describe("a file the channel cannot carry reaches the person as a link", () => {
 
     expect(run.links).toHaveLength(1);
     expect(run.links[0]!.url).toBe(`${CONTROL_PLANE}/api/internal/file-links`);
+    expect(new Headers(run.links[0]!.init?.headers).get("X-Cerase-Bridge-Secret")).toBe("file-link-no-send-acp-secret");
     expect(JSON.parse(String(run.links[0]!.init?.body))).toEqual({
       agent_id: "file-link-no-send",
       path: "outputs/offerta.pdf",

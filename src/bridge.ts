@@ -360,6 +360,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     void postSessionSummary(agentId, summary, {
       controlPlaneUrl,
       internalSecret: secret,
+      bridgeSecret: acpInjectSecret,
     }).catch((err) => {
       logger.warn({ err, agentId }, "postSessionSummary failed (fire-and-forget)");
     });
@@ -391,6 +392,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       const link = await fetchPendingApprovalLink(agentId, {
         controlPlaneUrl,
         internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
       });
       return applyApprovalLink(chunk, link);
     } catch (err) {
@@ -474,6 +476,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
               const link = await requestFileLink(agentId, relPath, {
                 controlPlaneUrl,
                 internalSecret: requireControlPlaneSecret(),
+                bridgeSecret: acpInjectSecret,
               });
               await inner(fileLinkNotice(link.name, link.url, link.expiresAt, lang));
             } catch (err) {
@@ -729,7 +732,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // dispatcher fails open on a throw — a control-plane glitch must not block
     // chat.
     creditCheck: (agentId) =>
-      checkTenantCredit(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
+      checkTenantCredit(agentId, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
+      }),
     // The words of a voice message, from the same control-plane and internal
     // bearer as the file-link requests. A failed transcription answers null and
     // leaves the turn to the upload path.
@@ -737,6 +744,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       requestVoiceTranscript(agentId, path, {
         controlPlaneUrl,
         internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
       }),
     // The organization's wall clock, and the pair's last turn when this
     // process has just started and remembers nobody. Wired on the same
@@ -752,7 +760,7 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       const ctx = await fetchTurnContext(
         agentId,
         { platform, platformUserId: userId },
-        { controlPlaneUrl, internalSecret: requireControlPlaneSecret() },
+        { controlPlaneUrl, internalSecret: requireControlPlaneSecret(), bridgeSecret: acpInjectSecret },
       );
       return {
         clock: formatWallClock(Date.now(), ctx.timezone),
@@ -773,18 +781,26 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
       await postTurnEnded(
         agentId,
         { platform, platformUserId: userId },
-        { controlPlaneUrl, internalSecret: requireControlPlaneSecret() },
+        { controlPlaneUrl, internalSecret: requireControlPlaneSecret(), bridgeSecret: acpInjectSecret },
       );
     },
     // How the assistant's previous conversation ended, for a new one. Wired on
     // the same condition as the gate above.
     recentConversation: (agentId) =>
-      fetchRecentConversation(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
+      fetchRecentConversation(agentId, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
+      }),
     onSummaryWithheld: captureSummary,
     // What a session that replaces one too large to summarise starts from.
     // Wired on the same condition as the gate above.
     lastSummary: (agentId) =>
-      fetchSessionSummary(agentId, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
+      fetchSessionSummary(agentId, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
+      }),
     // Asked of the adapter at every turn rather than once, because a reload
     // replaces an agent's adapter in the map this reads.
     wholeAnswers: (agentId) => adapters.get(agentId)?.wholeAnswers,
@@ -796,7 +812,11 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // the control-plane holds. Without the bearer the call fails, and the
     // line says the bridge's plain sentence.
     toolStep: (agentId, step) =>
-      fetchToolStep(agentId, step, { controlPlaneUrl, internalSecret: requireControlPlaneSecret() }),
+      fetchToolStep(agentId, step, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
+      }),
     // A platform notice goes to the adapter as it is, past every filter of the
     // send target below: those clean what the model wrote, and the platform
     // wrote this. An adapter that draws no notice gets it spelled out through

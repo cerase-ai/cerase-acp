@@ -2,9 +2,12 @@
 // once it hears the turn ended. So the bridge tells it, at the end of every
 // turn it runs, which assistant and which person the turn was for.
 
+import { controlPlaneHeaders } from "./control-plane-headers.js";
+
 export interface TurnEndedOptions {
   controlPlaneUrl: string;
   internalSecret: string;
+  bridgeSecret: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -29,7 +32,7 @@ export async function postTurnEnded(
   const resp = await f(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${opts.internalSecret}`,
+      ...controlPlaneHeaders(opts),
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
