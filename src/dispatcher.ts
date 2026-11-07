@@ -32,6 +32,7 @@ import {
   updateInterruptedNotice,
   workingNotice,
 } from "./platform-notices.js";
+import { hostsNamedIn } from "./reachable-hosts.js";
 import { type RecentConversation, recentConversationNote } from "./recent-conversation.js";
 import { RESTART_HOLD_MS, RESTART_RETRY_MS } from "./restart-hold.js";
 import { type DrainResult, SendQueue } from "./send-queue.js";
@@ -110,6 +111,14 @@ export interface DispatcherDeps {
    * overspend the reactive catch below still covers.
    */
   creditCheck?: (agentId: string) => Promise<{ exhausted: boolean }>;
+  /**
+   * Hands the hosts a person names in their message to the control-plane
+   * before the turn runs, so the assistant can open the pages they asked
+   * about. Optional because the test-injection dispatcher has no control-plane;
+   * a rejection is logged and the turn proceeds, because a control-plane glitch
+   * must not block chat.
+   */
+  grantReachableHosts?: (agentId: string, hosts: string[]) => Promise<void>;
   /**
    * Transcribes one uploaded audio file, returning null when its words cannot
    * be had. Optional for the same reason `creditCheck` is: the test-injection
@@ -754,6 +763,19 @@ export class Dispatcher {
     // own, and its gated actions would share that work's approval page. A
     // message that cannot be sent that way waits below.
     const person = byPerson && !isPlatformNote(text);
+    // The hosts the person names reach the control-plane before the turn, so
+    // the assistant can open the pages they asked about. A grant that fails is
+    // only logged: the turn must not wait on, or be lost to, the control-plane.
+    if (person && this.deps.grantReachableHosts) {
+      const hosts = hostsNamedIn(text);
+      if (hosts.length > 0) {
+        try {
+          await this.deps.grantReachableHosts(agentId, hosts);
+        } catch (err) {
+          logger.warn({ err, agentId }, "the hosts named in the message could not be granted — the turn proceeds");
+        }
+      }
+    }
     // A voice message reaches the bridge as an upload path and nothing else.
     // Ask for its words before the prompt is built, so the assistant opens
     // with what the person said. The upload marker is written only for a file

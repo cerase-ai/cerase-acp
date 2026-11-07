@@ -49,6 +49,7 @@ import {
   fileLinkNotice,
   unnamedFile,
 } from "./platform-notices.js";
+import { grantReachableHosts } from "./reachable-hosts.js";
 import { fetchRecentConversation } from "./recent-conversation.js";
 import { SessionManager } from "./session-manager.js";
 import { fetchSessionSummary, postSessionSummary } from "./session-summary.js";
@@ -733,6 +734,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
     // chat.
     creditCheck: (agentId) =>
       checkTenantCredit(agentId, {
+        controlPlaneUrl,
+        internalSecret: requireControlPlaneSecret(),
+        bridgeSecret: acpInjectSecret,
+      }),
+    // The hosts a person names in their message, handed to the control-plane
+    // before the turn so the assistant can open the pages they asked about.
+    // Wired beside the credit gate, on the same options.
+    grantReachableHosts: (agentId, hosts) =>
+      grantReachableHosts(agentId, hosts, {
         controlPlaneUrl,
         internalSecret: requireControlPlaneSecret(),
         bridgeSecret: acpInjectSecret,
