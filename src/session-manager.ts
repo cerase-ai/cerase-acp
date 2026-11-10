@@ -7,8 +7,11 @@ import {
   type CanonicalFetcher,
   defaultEndpointForAgent,
   defaultFetcher,
+  execMessageKindProbe,
   execOpenCallProbe,
   execSummaryStateProbe,
+  type MessageKind,
+  type MessageKindProbe,
   type OpenCall,
   type OpenCallProbe,
   type RestEndpoint,
@@ -151,6 +154,13 @@ export interface SessionManagerOptions {
    * its silent turns end at the silence limit.
    */
   openCallProbe?: (agent: AgentConfig, sessionId: string) => Promise<OpenCall | null>;
+  /**
+   * Asks whether one message is a summary of the session's history or an
+   * answer, or null when the slot cannot say. Tests pass one. Without it the
+   * slot's opencode server is asked, for an agent whose spawn is a `docker
+   * exec` into a slot; an agent with no slot answers null.
+   */
+  messageKindProbe?: (agent: AgentConfig, sessionId: string, messageId: string) => Promise<MessageKind | null>;
   /**
    * Asks where a session stands with the summaries of its history before a
    * person's message is sent to it (see SummaryState); null when it could not
@@ -496,6 +506,7 @@ export class SessionManager {
     this.turnCeilingMs = options?.turnCeilingMs ?? (config.session.turn_ceiling_minutes ?? 45) * 60 * 1000;
     this.turnModelWaitMs = options?.turnModelWaitMs ?? (config.session.turn_model_wait_seconds ?? 900) * 1000;
     this.openCallProbe = options?.openCallProbe;
+    this.messageKindProbe = options?.messageKindProbe;
     this.summaryState = options?.summaryState;
   }
 
@@ -606,6 +617,39 @@ export class SessionManager {
     const container = slotContainerOf(agent.spawn);
     if (container === null) return undefined;
     return (sessionId) => this.slotOpenCallProbe(container, sessionId);
+  }
+
+  // See SessionManagerOptions.messageKindProbe.
+  private readonly messageKindProbe?: (
+    agent: AgentConfig,
+    sessionId: string,
+    messageId: string,
+  ) => Promise<MessageKind | null>;
+  private readonly slotMessageKind: MessageKindProbe = execMessageKindProbe();
+
+  /**
+   * Whether one message of this pair's live session is a summary or an answer,
+   * or null when there is no session to ask or the slot cannot say. Never
+   * throws: a failed lookup must not withhold an answer.
+   */
+  async messageKind(agentId: string, userId: string, messageId: string): Promise<MessageKind | null> {
+    const entry = this.entries.get(sessionKey(agentId, userId));
+    if (!entry || entry.closed) return null;
+    const agent = this.agentsById.get(agentId);
+    if (!agent) return null;
+    try {
+      const injected = this.messageKindProbe;
+      if (injected) return await injected(agent, entry.sessionId, messageId);
+      const container = slotContainerOf(agent.spawn);
+      if (container === null) return null;
+      return await this.slotMessageKind(container, entry.sessionId, messageId);
+    } catch (err) {
+      logger.debug(
+        { agentId, userId, messageId, err: err instanceof Error ? err.message : String(err) },
+        "could not ask the slot what kind of message this is — taken as unknown",
+      );
+      return null;
+    }
   }
 
   private turnSilenceMs: number;

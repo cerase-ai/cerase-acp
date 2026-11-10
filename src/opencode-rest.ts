@@ -168,6 +168,35 @@ export function execOpenCallProbe(exec: SlotExec = dockerExec): OpenCallProbe {
   };
 }
 
+/**
+ * What a message is: a summary of the session's history, which must never reach
+ * the chat, or an answer, which must.
+ */
+export type MessageKind = "summary" | "answer";
+
+/** Asks which kind a message is; `null` when the slot cannot say. */
+export type MessageKindProbe = (container: string, sessionId: string, messageId: string) => Promise<MessageKind | null>;
+
+/**
+ * The probe that asks the slot's opencode server about one message. opencode
+ * marks a summary with `summary: true`, `mode: "compaction"` or
+ * `agent: "compaction"`, depending on the version and the path that wrote it;
+ * any other assistant message is an answer, and a person's message is neither.
+ */
+export function execMessageKindProbe(exec: SlotExec = dockerExec): MessageKindProbe {
+  return async (container, sessionId, messageId) => {
+    const path = `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
+    const body = (await readSlot(exec, container, path)) as {
+      info?: { role?: unknown; summary?: unknown; mode?: unknown; agent?: unknown };
+    } | null;
+    const info = body?.info;
+    if (!info) return null;
+    if (info.summary === true || info.mode === "compaction" || info.agent === "compaction") return "summary";
+    if (info.role === "assistant") return "answer";
+    return null;
+  };
+}
+
 /** Production fetcher: `docker exec` through the bridge's docker proxy. */
 export const defaultFetcher: CanonicalFetcher = execFetcher();
 

@@ -20,6 +20,7 @@ import { googleLinksNote } from "./google-links.js";
 import { withInstructionsChanged } from "./instructions-changed.js";
 import { makeLogger } from "./logger.js";
 import { isPlatformNote } from "./note-coalescer.js";
+import type { MessageKind } from "./opencode-rest.js";
 import type { PendingMessages } from "./pending-messages.js";
 import { withPlatformNotes } from "./platform-notes.js";
 import { type NoticeRef, noticeText, type PlatformNotice } from "./platform-notice.js";
@@ -60,6 +61,12 @@ import { TurnStatus } from "./turn-status.js";
 import { isTranscribableAudio, voiceTranscriptLine } from "./voice-transcript.js";
 
 const logger = makeLogger("cerase-acp.dispatcher");
+
+/**
+ * How long a message-kind lookup may take before the message is taken for an
+ * answer: a slow slot must never withhold an answer.
+ */
+const MESSAGE_KIND_TIMEOUT_MS = 5_000;
 
 // The line `prependUploadMarker` puts in front of a message carrying uploads.
 // Its paths are workspace-relative and contain no comma or bracket, so the
@@ -405,10 +412,20 @@ interface RestartHold {
 /** One prompt's reply on its way from the ACP stream to the send queue: see `Dispatcher.replyStream`. */
 interface ReplyStream {
   push: (update: Parameters<SessionUpdateHandler>[0]) => boolean;
-  end: () => void;
+  /** Flush what is left, after any pending message-kind lookup has answered. */
+  end: () => Promise<void>;
   /** Drop whatever is held and not yet queued, and take nothing more. */
   discard: () => void;
   endedInMarkup: () => boolean;
+}
+
+/** One message whose kind a reply stream is deciding: see `Dispatcher.replyStream`. */
+interface HeldMessage {
+  id: string;
+  kind: MessageKind | "pending";
+  /** The whole text of a summary, kept until the message ends. */
+  text: string;
+  withheld: boolean;
 }
 
 /** What `Dispatcher.handleMessage` accepts besides the message itself. */
@@ -1113,7 +1130,7 @@ export class Dispatcher {
       // A failed or aborted turn ends here too, so text held back in it is
       // judged the same way and either delivered or withheld, never dropped
       // unread and never carried into the next turn.
-      reply.end();
+      await reply.end();
       const last = await queue.drain();
       if (drainResult.ok) drainResult = last;
       produced = produced && this.spoke(queue, last, reply);
@@ -1143,7 +1160,7 @@ export class Dispatcher {
         restartOutlasted = err instanceof SessionRestartError;
         logger.error({ err, agentId, userId, creditExhausted }, "the try after an empty turn failed");
       } finally {
-        reply.end();
+        await reply.end();
         const drained = await queue.drain();
         if (drainResult.ok) drainResult = drained;
         produced = produced && this.spoke(queue, drained, reply);
@@ -1494,7 +1511,7 @@ export class Dispatcher {
       failed = true;
       logger.error({ err, agentId, userId }, "the retry after an answer written as tool-call markup failed");
     } finally {
-      reply.end();
+      await reply.end();
     }
     const drain = await queue.drain();
     const answered = !failed && !reply.endedInMarkup() && this.spoke(queue, drain, reply);
@@ -1537,7 +1554,7 @@ export class Dispatcher {
     } catch (err) {
       logger.error({ err, agentId, userId, failures }, "attach: the correction turn itself failed");
     } finally {
-      reply.end();
+      await reply.end();
       await queue.drain();
       this.deps.attachOutcomes?.take(agentId, userId);
     }
@@ -1679,15 +1696,140 @@ export class Dispatcher {
       },
     });
     let messageId: string | undefined;
+    // The message whose kind is being decided: its text waits here rather than
+    // in the buffer, because a summary must be dropped whole and an answer must
+    // keep its place in the stream.
+    let heldMessage: HeldMessage | undefined;
+    // Every message id this turn has asked about, with the answer: a message's
+    // kind is asked once, however many chunks carry its id.
+    const messageKinds = new Map<string, MessageKind | "pending">();
+    // Work on a message waits here, in arrival order, so a lookup that answers
+    // late cannot let a later message overtake the one before it.
+    let tail: Promise<void> = Promise.resolve();
+    let queued = 0;
+    let discarded = false;
+    const kindOf = this.deps.sessionManager.messageKind;
+    const kindProbe =
+      typeof kindOf === "function"
+        ? (id: string): Promise<MessageKind | null> =>
+            new Promise((resolve) => {
+              let settled = false;
+              let timer: NodeJS.Timeout | undefined;
+              const finish = (kind: MessageKind | null) => {
+                if (settled) return;
+                settled = true;
+                if (timer) clearTimeout(timer);
+                resolve(kind === "summary" || kind === "answer" ? kind : null);
+              };
+              timer = setTimeout(() => finish(null), MESSAGE_KIND_TIMEOUT_MS);
+              try {
+                void Promise.resolve(kindOf.call(this.deps.sessionManager, agentId, userId, id)).then(
+                  (kind) => finish(kind),
+                  () => finish(null),
+                );
+              } catch {
+                finish(null);
+              }
+            })
+        : undefined;
+
+    const enqueue = (task: () => Promise<void> | void) => {
+      queued += 1;
+      tail = tail
+        .then(task)
+        .catch((err) => {
+          logger.warn(
+            { err, agentId },
+            "judging a message's kind failed — its text is delivered as it would have been",
+          );
+        })
+        .finally(() => {
+          queued -= 1;
+        });
+    };
+
+    const notifyWithheld = (text: string) => {
+      logger.warn({ agentId }, "egress: withheld a summary by its message");
+      try {
+        this.deps.onSummaryWithheld?.(agentId, text);
+      } catch (err) {
+        logger.warn({ err, agentId }, "capturing a withheld summary failed — ignored");
+      }
+    };
+
+    const finishMessage = (message: HeldMessage) => {
+      if (discarded) return;
+      if (message.kind === "summary" && !message.withheld) {
+        message.withheld = true;
+        notifyWithheld(message.text);
+      }
+      if (heldMessage === message) heldMessage = undefined;
+    };
+
+    const processChunk = async (id: string, text: string) => {
+      if (discarded) return;
+      if (heldMessage && heldMessage.id !== id) finishMessage(heldMessage);
+      let message = heldMessage;
+      if (!message || message.id !== id) {
+        message = { id, kind: messageKinds.get(id) ?? "pending", text: "", withheld: false };
+        heldMessage = message;
+        if (message.kind === "pending") {
+          const verdict = await kindProbe!(id);
+          if (discarded) return;
+          const resolved: MessageKind = verdict ?? "answer";
+          messageKinds.set(id, resolved);
+          message.kind = resolved;
+        }
+      }
+      // An answer goes on to the buffer as it was pushed. A summary is kept
+      // whole and dropped when its message ends.
+      if (message.kind === "summary") message.text += text;
+      else buffer.push(text);
+    };
+
     return {
       push: (update) => {
         if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-          buffer.flush();
-          if (whole) sendAnswer();
+          if (kindProbe && queued > 0) {
+            enqueue(() => {
+              if (discarded) return;
+              buffer.flush();
+              if (whole) sendAnswer();
+            });
+          } else {
+            buffer.flush();
+            if (whole) sendAnswer();
+          }
           return false;
         }
         if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;
         const next = (update as { messageId?: string }).messageId;
+        const text = update.content.text;
+        if (next && kindProbe) {
+          enqueue(async () => {
+            if (discarded) return;
+            if (messageId && next !== messageId) {
+              // The message before ends here: nothing of it runs into this one.
+              if (heldMessage) finishMessage(heldMessage);
+              buffer.flush();
+              buffer.release();
+              fenceOpen = false;
+            }
+            messageId = next;
+            await processChunk(next, text);
+          });
+          return true;
+        }
+        if (kindProbe && queued > 0) {
+          // A chunk with no message id, such as the reconciler's, waits behind
+          // the messages still being judged so it never overtakes their text.
+          enqueue(() => {
+            if (discarded) return;
+            if (heldMessage?.kind === "summary") heldMessage.text += text;
+            else buffer.push(text);
+          });
+          return true;
+        }
         if (next && messageId && next !== messageId) {
           // The message before ends here: nothing of it runs into this one.
           buffer.flush();
@@ -1695,14 +1837,19 @@ export class Dispatcher {
           fenceOpen = false;
         }
         if (next) messageId = next;
-        buffer.push(update.content.text);
+        buffer.push(text);
         return true;
       },
-      end: () => {
+      end: async () => {
+        await tail;
+        if (discarded) return;
+        if (heldMessage) finishMessage(heldMessage);
         buffer.end();
         sendAnswer();
       },
       discard: () => {
+        discarded = true;
+        heldMessage = undefined;
         buffer.discard();
         answer = [];
       },
