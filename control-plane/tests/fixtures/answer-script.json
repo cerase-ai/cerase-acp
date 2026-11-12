@@ -1,0 +1,66 @@
+{
+  "about": [
+    "Answers the DM bridge (cerase-acp) holds back because most of their letters are in another writing system than the person's message, and answers it lets through. The console leaves out the same text when it reads the transcript.",
+    "The rule both sides apply. A letter is a Unicode letter (\\p{L}); a letter of another script is one outside the Latin script. When the person's own words, without the [turn_meta: ...] block, have no letters or more than half of their letters are Latin, the first line of an answer that holds a letter of another script starts a hold, which runs from the start of that line to the end of the assistant message. The held part is left out when it holds at least min_letters letters of other scripts and they are more than half of its letters; otherwise the whole answer is shown. What comes before the held part is shown with its trailing whitespace trimmed.",
+    "The answer the assistant gives to the bridge's [reply_result: other script] prompt is shown as it is: the assistant was told to keep that writing system only when the person asked for it.",
+    "'person' is the person's own words, 'answer' one assistant message, 'shown' what of it reaches the person.",
+    "This file is cerase-core's. cerase-acp carries a copy written by scripts/sync-tooling.sh and pinned in its scripts/TOOLING.sha256: edit it here, then re-sync."
+  ],
+  "min_letters": 12,
+  "cases": [
+    {
+      "name": "an answer in Chinese after tool results, to a person writing Italian",
+      "person": "Mi controlli lo stato degli ordini di oggi?",
+      "answer": "状态：今天有三个订单已经发货，还有一个订单正在处理中。",
+      "shown": ""
+    },
+    {
+      "name": "an Italian sentence, then a paragraph in Chinese",
+      "person": "Mi controlli lo stato degli ordini di oggi?",
+      "answer": "Ho controllato gli ordini di oggi.\n\n状态：今天有三个订单已经发货，还有一个订单正在处理中。",
+      "shown": "Ho controllato gli ordini di oggi."
+    },
+    {
+      "name": "an answer in Cyrillic to a person writing Italian",
+      "person": "Hai scritto al fornitore?",
+      "answer": "Статус: письмо поставщику отправлено, ответа пока нет.",
+      "shown": ""
+    },
+    {
+      "name": "an answer in Chinese to a person whose message has no letters",
+      "person": "👍",
+      "answer": "状态：今天有三个订单已经发货，还有一个订单正在处理中。",
+      "shown": ""
+    },
+    {
+      "name": "a supplier's name in Chinese inside an Italian answer",
+      "person": "Chi è il fornitore dei tessuti?",
+      "answer": "Il fornitore è 宏达纺织有限公司, con sede a Ningbo: spedisce entro venerdì e il listino è aggiornato a ottobre.",
+      "shown": "Il fornitore è 宏达纺织有限公司, con sede a Ningbo: spedisce entro venerdì e il listino è aggiornato a ottobre."
+    },
+    {
+      "name": "a short line in Chinese, under the limit",
+      "person": "Come si scrive il nome dell'azienda in cinese?",
+      "answer": "Si scrive così:\n\n宏达纺织",
+      "shown": "Si scrive così:\n\n宏达纺织"
+    },
+    {
+      "name": "a line in Chinese followed by a longer Italian paragraph",
+      "person": "Mi controlli lo stato degli ordini di oggi?",
+      "answer": "状态：今天有三个订单已经发货。\n\nIn sintesi: tre ordini sono partiti e uno è ancora in lavorazione, te lo confermo appena arriva.",
+      "shown": "状态：今天有三个订单已经发货。\n\nIn sintesi: tre ordini sono partiti e uno è ancora in lavorazione, te lo confermo appena arriva."
+    },
+    {
+      "name": "a person writing Chinese gets an answer in Chinese",
+      "person": "请帮我查看今天的订单状态",
+      "answer": "今天有三个订单已经发货，还有一个订单正在处理中。",
+      "shown": "今天有三个订单已经发货，还有一个订单正在处理中。"
+    },
+    {
+      "name": "an Italian answer with accents and a euro sign",
+      "person": "Quanto costa la spedizione?",
+      "answer": "La spedizione costa 12,50 € e arriva entro giovedì; è già inclusa nell'ordine.",
+      "shown": "La spedizione costa 12,50 € e arriva entro giovedì; è già inclusa nell'ordine."
+    }
+  ]
+}

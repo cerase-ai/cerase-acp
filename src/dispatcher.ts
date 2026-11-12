@@ -7,6 +7,12 @@
 
 import { isAllowed } from "./allowlist.js";
 import {
+  otherScriptLineStart,
+  otherScriptRetryPrompt,
+  personWritesLatin,
+  withheldOtherScriptStart,
+} from "./answer-script.js";
+import {
   type AttachFailure,
   type AttachOutcomeTracker,
   attachFailureError,
@@ -56,7 +62,7 @@ import {
   withOpeningFence,
 } from "./tool-call-markup.js";
 import type { ToolStep } from "./tool-step.js";
-import { detectLanguage, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
+import { detectLanguage, personWords, type SupportedLang, type TurnMetaTracker } from "./turn-meta.js";
 import { TurnStatus } from "./turn-status.js";
 import { isTranscribableAudio, voiceTranscriptLine } from "./voice-transcript.js";
 
@@ -417,6 +423,7 @@ interface ReplyStream {
   /** Drop whatever is held and not yet queued, and take nothing more. */
   discard: () => void;
   endedInMarkup: () => boolean;
+  endedInOtherScript: () => boolean;
 }
 
 /** One message whose kind a reply stream is deciding: see `Dispatcher.replyStream`. */
@@ -1018,7 +1025,10 @@ export class Dispatcher {
       };
     }
 
-    let { queue, reply } = this.openReply(agentId, userId, send, text);
+    // The writing system to judge this turn's answer against: the person's own
+    // words, without what the bridge or the console added to the message.
+    const judgeScript = personWritesLatin(personWords(text));
+    let { queue, reply } = this.openReply(agentId, userId, send, text, judgeScript);
 
     // Built once: a message that tried to join the work in progress and fell
     // back keeps the prefix and context built for that try, so the mark of
@@ -1079,7 +1089,7 @@ export class Dispatcher {
       const drained = await queue.drain();
       if (!drained.ok) drainResult = drained;
       produced = false;
-      ({ queue, reply } = this.openReply(agentId, userId, send, text));
+      ({ queue, reply } = this.openReply(agentId, userId, send, text, judgeScript));
     };
     try {
       try {
@@ -1150,7 +1160,7 @@ export class Dispatcher {
         { agentId, userId, attempt: emptyTries, of: EMPTY_TURN_RETRIES },
         "the turn ended with no text and no tool call — asking the assistant again",
       );
-      ({ queue, reply } = this.openReply(agentId, userId, send, text));
+      ({ queue, reply } = this.openReply(agentId, userId, send, text, judgeScript));
       try {
         await this.deps.sessionManager.prompt(agentId, userId, emptyTurnRetryPrompt(), onUpdate, { onCompaction });
       } catch (err) {
@@ -1173,7 +1183,33 @@ export class Dispatcher {
     let answerUnsent = false;
     let retryDrain: DrainResult = { ok: true };
     if (!failed && reply.endedInMarkup()) {
-      const retry = await this.retryUnsentAnswer(agentId, userId, send, text, watch, onCompaction);
+      const retry = await this.retryUnsentAnswer(
+        agentId,
+        userId,
+        send,
+        text,
+        watch,
+        onCompaction,
+        toolCallMarkupRetryPrompt(),
+        judgeScript,
+      );
+      retryDrain = retry.drain;
+      answerUnsent = !retry.answered;
+    } else if (!failed && reply.endedInOtherScript()) {
+      // The answer was held back for its writing system, and the assistant is
+      // told to write it again in the conversation's language. The retry's own
+      // answer is delivered as it is: judging its script again would hold back
+      // exactly the text the person may have asked for.
+      const retry = await this.retryUnsentAnswer(
+        agentId,
+        userId,
+        send,
+        text,
+        watch,
+        onCompaction,
+        otherScriptRetryPrompt(this.noticeLang(agentId, userId, text)),
+        false,
+      );
       retryDrain = retry.drain;
       answerUnsent = !retry.answered;
     }
@@ -1257,7 +1293,7 @@ export class Dispatcher {
     if (answerUnsent) {
       return {
         ok: false,
-        error: new Error("the answer came out as tool-call markup twice and was not sent"),
+        error: new Error("the answer was held back twice and was not sent"),
         ...(failureNotice ? { notice: failureNotice } : {}),
       };
     }
@@ -1480,11 +1516,11 @@ export class Dispatcher {
   }
 
   /**
-   * Give the assistant one more try after its answer came out as a tool call
-   * written as text, on the same session, and report whether it answered this
-   * time. Its reply takes the same path as any other, so a second answer of
-   * the same kind is held back too; a retry that itself fails counts as no
-   * answer. It is never retried again.
+   * Give the assistant one more try on the same session, with `prompt`, and
+   * report whether it answered this time. Its reply takes the same path as any
+   * other, judged for its writing system when `judgeScript` says so; a second
+   * answer held back for the same reason is not retried again. A retry that
+   * itself fails counts as no answer.
    */
   private async retryUnsentAnswer(
     agentId: string,
@@ -1493,14 +1529,16 @@ export class Dispatcher {
     text: string,
     watch: SessionUpdateHandler,
     onCompaction: (compacting: boolean) => void,
+    prompt: string,
+    judgeScript: boolean,
   ): Promise<{ answered: boolean; drain: DrainResult }> {
-    const { queue, reply } = this.openReply(agentId, userId, send, text);
+    const { queue, reply } = this.openReply(agentId, userId, send, text, judgeScript);
     let failed = false;
     try {
       await this.deps.sessionManager.prompt(
         agentId,
         userId,
-        toolCallMarkupRetryPrompt(),
+        prompt,
         (update) => {
           watch(update);
           reply.push(update);
@@ -1509,12 +1547,13 @@ export class Dispatcher {
       );
     } catch (err) {
       failed = true;
-      logger.error({ err, agentId, userId }, "the retry after an answer written as tool-call markup failed");
+      logger.error({ err, agentId, userId }, "the retry after an answer that was not sent failed");
     } finally {
       await reply.end();
     }
     const drain = await queue.drain();
-    const answered = !failed && !reply.endedInMarkup() && this.spoke(queue, drain, reply);
+    const answered =
+      !failed && !reply.endedInMarkup() && !reply.endedInOtherScript() && this.spoke(queue, drain, reply);
     if (!answered) {
       logger.warn({ agentId, userId }, "the retry did not produce an answer either — telling the person to ask again");
     }
@@ -1569,6 +1608,7 @@ export class Dispatcher {
     userId: string,
     send: SendTarget,
     text: string,
+    judgeScript = personWritesLatin(personWords(text)),
   ): { queue: SendQueue; reply: ReplyStream } {
     const whole = this.deps.wholeAnswers?.(agentId);
     const queue = new SendQueue({
@@ -1576,7 +1616,7 @@ export class Dispatcher {
       failureMarker: deliveryFailureNotice(this.noticeLang(agentId, userId, text)),
       split: whole ? (answer) => whole.split(answer) : undefined,
     });
-    return { queue, reply: this.replyStream(queue, agentId, userId, whole !== undefined) };
+    return { queue, reply: this.replyStream(queue, agentId, userId, whole !== undefined, judgeScript) };
   }
 
   /**
@@ -1608,6 +1648,11 @@ export class Dispatcher {
    * The stream reports whether the turn ended on such a block, which is what
    * decides the retry.
    *
+   * When the person writes in Latin script, a line holding a letter of another
+   * script starts the same hold: whether the rest of the message is mostly in
+   * that writing system is known only when it ends. The stream reports whether
+   * the turn ended on such a part, which is what decides its retry.
+   *
    * A tool starting flushes the buffer on every channel, so the text before it
    * reaches the person as a message of its own as the tool starts: a tool can
    * run for minutes, and the person reads what the assistant is doing while it
@@ -1628,7 +1673,13 @@ export class Dispatcher {
    *
    * `push` answers whether the update carried reply text.
    */
-  private replyStream(queue: SendQueue, agentId: string, userId: string, whole: boolean): ReplyStream {
+  private replyStream(
+    queue: SendQueue,
+    agentId: string,
+    userId: string,
+    whole: boolean,
+    judgeScript: boolean,
+  ): ReplyStream {
     // Whether what this message has sent so far leaves a code fence open. A
     // tool-call block inside a fence is quoted, not emitted, so no hold starts
     // there.
@@ -1636,6 +1687,9 @@ export class Dispatcher {
     // True while the last text of the turn is a tool-call block that was held
     // back; anything sent after it answers the person and clears it.
     let endedInMarkup = false;
+    // True while the last text of the turn was held back for its writing
+    // system; anything sent after it answers the person and clears it.
+    let endedInOtherScript = false;
     // On a whole-answer channel, what has been delivered of the answer and not
     // yet sent. Every cut inside one answer falls at the start of a line — the
     // heading or the tool-call block a hold starts at — or at the end of an
@@ -1652,14 +1706,18 @@ export class Dispatcher {
       else queue.enqueue(text);
       fenceOpen = fenceOpenAfter(text, fenceOpen);
       endedInMarkup = false;
+      endedInOtherScript = false;
     };
     const buffer = new StreamBuffer({
       onFlush: deliver,
       wholeMessages: whole,
       holdFrom: (piece) =>
         earliest(
-          withOpeningFence(piece, summaryHeadingStart(piece), fenceOpen),
-          toolCallMarkupHoldStart(piece, fenceOpen),
+          earliest(
+            withOpeningFence(piece, summaryHeadingStart(piece), fenceOpen),
+            toolCallMarkupHoldStart(piece, fenceOpen),
+          ),
+          judgeScript ? otherScriptLineStart(piece) : -1,
         ),
       onHeld: (held) => {
         if (isInternalSummaryBlock(held)) {
@@ -1690,6 +1748,20 @@ export class Dispatcher {
               : "egress: held back text made only of tags",
           );
           endedInMarkup = true;
+          return;
+        }
+        // A held part whose letters are mostly in another writing system is
+        // not words for this person. What comes before it is sent, and the
+        // part is dropped; anything sent after it clears the mark.
+        const otherScript = withheldOtherScriptStart(held);
+        if (otherScript !== null) {
+          const before = held.slice(0, otherScript).trimEnd();
+          if (before.length > 0) deliver(before);
+          logger.warn(
+            { agentId, userId, chars: held.length - otherScript },
+            "egress: held back an answer mostly in another writing system",
+          );
+          endedInOtherScript = true;
           return;
         }
         deliver(held);
@@ -1854,18 +1926,20 @@ export class Dispatcher {
         answer = [];
       },
       endedInMarkup: () => endedInMarkup,
+      endedInOtherScript: () => endedInOtherScript,
     };
   }
 
   /**
    * Whether a prompt's reply reached the person. A part of it delivered does,
    * and so does a part the channel refused, since the person is told; so does
-   * an answer held back as tool-call markup, which has a retry of its own.
-   * Text withheld whole, by the stream's holds or by the send path, reached
-   * nobody, and a reply that was only that has not answered the person.
+   * an answer held back as tool-call markup or for its writing system, which
+   * has a retry of its own. Text withheld whole, by the stream's holds or by
+   * the send path, reached nobody, and a reply that was only that has not
+   * answered the person.
    */
   private spoke(queue: SendQueue, drained: DrainResult, reply: ReplyStream): boolean {
-    return queue.delivered() > 0 || !drained.ok || reply.endedInMarkup();
+    return queue.delivered() > 0 || !drained.ok || reply.endedInMarkup() || reply.endedInOtherScript();
   }
 
   /**

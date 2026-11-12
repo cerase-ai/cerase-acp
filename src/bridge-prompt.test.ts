@@ -9,6 +9,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { otherScriptRetryPrompt } from "./answer-script.js";
 import { type AttachFailure, AttachOutcomeTracker, attachFailurePrompt } from "./attach-outcome.js";
 import { bridgePromptLine, isBridgePrompt } from "./bridge-prompt.js";
 import type { BridgeConfig } from "./config.js";
@@ -16,13 +17,13 @@ import { Dispatcher } from "./dispatcher.js";
 import { emptyTurnRetryPrompt } from "./empty-turn.js";
 import type { SessionManager, SessionUpdateHandler } from "./session-manager.js";
 import { toolCallMarkupRetryPrompt } from "./tool-call-markup.js";
-import { TurnMetaTracker } from "./turn-meta.js";
+import { type SupportedLang, TurnMetaTracker } from "./turn-meta.js";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const FIXTURE = "control-plane/tests/fixtures/bridge-prompts.json";
 
 interface Fixture {
-  bridge: { name: string; made_by: string; text: string; failures?: AttachFailure[] }[];
+  bridge: { name: string; made_by: string; text: string; failures?: AttachFailure[]; lang?: SupportedLang }[];
   person: { name: string; text: string; shown: string }[];
 }
 
@@ -33,6 +34,7 @@ const MAKERS: Record<string, (entry: Fixture["bridge"][number]) => string> = {
   "toolCallMarkupRetryPrompt()": () => toolCallMarkupRetryPrompt(),
   "emptyTurnRetryPrompt()": () => emptyTurnRetryPrompt(),
   "attachFailurePrompt(failures)": (entry) => attachFailurePrompt(entry.failures ?? []),
+  "otherScriptRetryPrompt(lang)": (entry) => otherScriptRetryPrompt(entry.lang ?? "unknown"),
 };
 
 describe("the examples the console is tested on", () => {

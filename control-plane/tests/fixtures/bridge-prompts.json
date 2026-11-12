@@ -30,6 +30,12 @@
         }
       ],
       "text": "[attach_result: failed]\n\nThe file(s) below did NOT reach the person you are writing to. The upload runs after you stop writing, so this is the first you can hear of it.\n\n- preventivo-rossi.pdf: the channel refused the upload: file too large\n- listino.xlsx: no such file in the workspace\n\nCorrect the record now, in one short message in the language of the conversation: say the file did not arrive and withdraw any claim that the work was delivered. Do not claim delivery, and do not emit an attach marker in this message."
+    },
+    {
+      "name": "the follow-up after an answer held back for its writing system",
+      "made_by": "otherScriptRetryPrompt(lang)",
+      "lang": "it",
+      "text": "[reply_result: other script]\n\nYour last message was not sent to the person: most of its letters are in another writing system than the one they write in.\n\nThe person has not seen that message; do not mention it. Write it again in Italian and continue the request from where it stopped. Only if the person asked for text in that other writing system, send that text again, with your words to them in Italian."
     }
   ],
   "person": [
