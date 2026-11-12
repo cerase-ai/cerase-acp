@@ -9,6 +9,7 @@ import {
 import {
   attachmentFailedNotice,
   attachmentUnreadableNotice,
+  compactionNotice,
   deliveryFailureNotice,
   directMessagesOnlyNotice,
   displayFileName,
@@ -139,6 +140,16 @@ describe("the direct-messages-only note", () => {
   it("is in the language of the message it answers, with Italian for an undetermined one", () => {
     expect(directMessagesOnlyNotice("en")).toBe("I only answer in direct messages: write to me there.");
     expect(directMessagesOnlyNotice("unknown")).toBe(directMessagesOnlyNotice("it"));
+  });
+});
+
+describe("the note shown while a conversation is summarised", () => {
+  it("says the assistant is thinking and needs minutes, in every language, with Italian for an undetermined one", () => {
+    expect(compactionNotice("it")).toBe("Ci sto ragionando, mi serve qualche minuto.");
+    expect(compactionNotice("en")).toBe("I'm thinking it over and need a few minutes.");
+    expect(compactionNotice("es")).toBe("Lo estoy pensando, necesito unos minutos.");
+    expect(compactionNotice("fr")).toBe("J'y réfléchis, il me faut quelques minutes.");
+    expect(compactionNotice("unknown")).toBe(compactionNotice("it"));
   });
 });
 

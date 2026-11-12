@@ -548,16 +548,14 @@ describe("the status line of a turn", () => {
   // are the operator's.
   specTest(
     "ACP-TURN-018",
-    "says the assistant is taking stock while the session summarises, in the conversation's language",
+    "says the assistant is thinking, and for minutes, while the session summarises, in the conversation's language",
     async (row) => {
       const c = channel();
       const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
       await promptCount(1);
       prompts[0]!.compacting(true);
       await settle();
-      expect(c.posts).toEqual([
-        { id: 1, text: "Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo." },
-      ]);
+      expect(c.posts).toEqual([{ id: 1, text: "Ci sto ragionando, mi serve qualche minuto." }]);
       // Once the summary is written the line says the assistant is at work
       // again, and the end of the turn takes it down.
       prompts[0]!.compacting(false);
@@ -574,12 +572,7 @@ describe("the status line of a turn", () => {
       await promptCount(2);
       prompts[1]!.compacting(true);
       await settle();
-      expect(en.posts).toEqual([
-        {
-          id: 1,
-          text: "I'm taking stock of what we've said so far: give me a couple of minutes and I'll pick up again.",
-        },
-      ]);
+      expect(en.posts).toEqual([{ id: 1, text: "I'm thinking it over and need a few minutes." }]);
       prompts[1]!.end("Here it is.");
       expect(await turnEn).toEqual({ ok: true });
 

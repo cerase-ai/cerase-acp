@@ -336,16 +336,17 @@ export function workingNotice(lang: SupportedLang): string {
 /**
  * What a turn's status line says while the assistant's session is writing the
  * summary of the conversation so far, which can take minutes before the
- * assistant says anything. The Italian and English sentences are the
- * operator's own words.
+ * assistant says anything. It speaks of the person's request rather than of
+ * the conversation, and says the wait is minutes, so a line that stays up that
+ * long does not read as stuck. The Italian sentence is the operator's own.
  */
 export function compactionNotice(lang: SupportedLang): string {
   return pick(
     {
-      it: "Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo.",
-      en: "I'm taking stock of what we've said so far: give me a couple of minutes and I'll pick up again.",
-      es: "Estoy haciendo balance de lo que nos hemos dicho hasta ahora: un par de minutos y sigo.",
-      fr: "Je fais le point sur ce que nous nous sommes dit jusqu'ici : quelques minutes et je reprends.",
+      it: "Ci sto ragionando, mi serve qualche minuto.",
+      en: "I'm thinking it over and need a few minutes.",
+      es: "Lo estoy pensando, necesito unos minutos.",
+      fr: "J'y réfléchis, il me faut quelques minutes.",
     },
     lang,
   );
