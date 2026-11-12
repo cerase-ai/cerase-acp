@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 // A person can send a voice message instead of typing. The adapter stores it as
 // an upload and the message carries only the `[Uploaded files: …]` marker, so
@@ -204,21 +205,38 @@ describe("a voice message reaches the assistant as words", () => {
     expect(prompt).toContain("lang=it");
   });
 
-  it.each([502, 429])("leaves the turn exactly as it was when the transcript route answers %i", async (status) => {
-    const run = await converse(
-      `voice-transcript-${status}`,
-      VOICE_MESSAGE,
-      { transcripts: { status, body: { error: "not transcribed" } } },
-      (h) => (handle = h),
-    );
-    await ended(run, "succeeded");
+  specTest.each(["ACP-TURN-039", "ACP-TURN-040"])(
+    "%s leaves the turn exactly as it was when the transcript route refuses",
+    async (row) => {
+      const [statusText, error] = row.quoted("when");
+      if (statusText === undefined || error === undefined) {
+        throw new Error("the row does not name a status and an error");
+      }
 
-    expect(run.prompt()).toBe(
-      `[turn_meta: gap=first, lang=unknown; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n${VOICE_MESSAGE}`,
-    );
-    expect(run.prompt()).not.toContain("[Voice message");
-    expect(run.transcripts).toHaveLength(1);
-  });
+      const run = await converse(
+        `voice-transcript-${statusText}`,
+        VOICE_MESSAGE,
+        { transcripts: { status: Number(statusText), body: { error } } },
+        (h) => (handle = h),
+      );
+      await ended(run, "succeeded");
+
+      const expectedPrompt = `[turn_meta: gap=first, lang=unknown; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n${VOICE_MESSAGE}`;
+      expect(run.prompt()).toBe(expectedPrompt);
+      expect(run.prompt()).not.toContain("[Voice message");
+      expect(run.transcripts).toHaveLength(1);
+
+      const prompt = run.prompt();
+      const isMessageAlone = prompt === expectedPrompt;
+      const hasVoiceLine = prompt?.includes("[Voice message") ?? false;
+      const asked = run.transcripts.length;
+      const observed =
+        isMessageAlone && !hasVoiceLine && asked === 1
+          ? "the turn's prompt is the message alone after its turn-meta line, carries no voice line, and the transcript route was asked once"
+          : `the turn's prompt is ${isMessageAlone ? "" : "not "}the message alone after its turn-meta line, ${hasVoiceLine ? "carries a voice line" : "carries no voice line"}, and the transcript route was asked ${asked} ${asked === 1 ? "time" : "times"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("asks nothing when the credit gate says the tenant is exhausted", async () => {
     const run = await converse(
