@@ -30,8 +30,8 @@ ACP-TURN-028	the first message of a new conversation when the control plane give
 ACP-TURN-029	the message "Sì, ho cambiato idea: preparala tu."	it is tagged Italian and not French	src/turn-meta.ts	
 ACP-TURN-030	short replies such as "Ok, la mando io domani." and "Va bene, mandala tu." after an Italian turn	each keeps "lang=it", the conversation's language	src/turn-meta.ts	
 ACP-TURN-031	an English sentence after Italian turns, and a second English one	the first is tagged "lang=unknown" and the second "lang=en"	src/turn-meta.ts	
-ACP-TURN-032	the instant "2026-10-13T22:30:00Z" is formatted for the zone "Europe/Rome", where it is already Wednesday after midnight	the clock reads "mercoledì 2026-10-14 00:30 Europe/Rome", naming the zone's weekday and not the machine's	src/turn-context.ts	
-ACP-TURN-033	the clock is written for each day of a week in "Europe/Rome"	each reads its Italian weekday name, lowercase, before the date, the time and the zone	src/turn-context.ts	
+ACP-TURN-032	the instant "2026-10-13T22:30:00Z" is formatted for the zone "Europe/Rome", where it is already Wednesday after midnight	the clock reads "Wednesday 2026-10-14 00:30 Europe/Rome", naming the zone's weekday and not the machine's	src/turn-context.ts	
+ACP-TURN-033	the clock is written for each day of a week in "Europe/Rome"	each reads its English weekday name, capitalised, before the date, the time and the zone	src/turn-context.ts	
 ACP-TURN-034	the clock is written for the zone "Not/AZone" that no runtime knows	the clock reads the UTC weekday, the UTC date and time, and "UTC" instead of failing the turn	src/turn-context.ts	
 ACP-TURN-035	an agent "agent-1" on the channel "discord", configured with that channel's fictional credentials	the bridge builds an adapter for agent-1 that sends a message, draws a notice, closes it and starts	src/chat-adapter.ts	
 ACP-TURN-036	an agent "agent-1" on the channel "slack", configured with that channel's fictional credentials	the bridge builds an adapter for agent-1 that sends a message, draws a notice, closes it and starts	src/chat-adapter.ts	

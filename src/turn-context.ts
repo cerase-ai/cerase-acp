@@ -126,13 +126,13 @@ export function cachedTimezoneIfFresh(now: number = Date.now()): string | undefi
  *
  * The day of the week is spelled out because an assistant asked to work one out
  * from a date gets it wrong: on 13 October one called Wednesday 14 October
- * «martedì». It is written in Italian, as the control-plane's `OrgClock::say()`
- * writes days, because every sentence the platform writes for a person names
- * them in Italian.
+ * «martedì». It is written in English because this clock is a line only the
+ * model reads, and the model's instructions are in English; what the platform
+ * writes for a person keeps naming days in Italian, as `OrgClock::say()` does.
  */
 export function formatWallClock(at: number, timezone: string): string {
   try {
-    const weekday = new Intl.DateTimeFormat("it-IT", {
+    const weekday = new Intl.DateTimeFormat("en-US", {
       timeZone: timezone,
       weekday: "long",
     }).format(at);
@@ -156,7 +156,7 @@ export function formatWallClock(at: number, timezone: string): string {
     // a worse outcome than a turn stamped in UTC, so the UTC weekday is named
     // the same way.
     const utc = new Date(at);
-    const weekday = new Intl.DateTimeFormat("it-IT", {
+    const weekday = new Intl.DateTimeFormat("en-US", {
       timeZone: "UTC",
       weekday: "long",
     }).format(utc);

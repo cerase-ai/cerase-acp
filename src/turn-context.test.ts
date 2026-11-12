@@ -104,7 +104,7 @@ describe("formatWallClock", () => {
   it("renders the organization's wall clock, not the machine's", () => {
     const at = Date.parse("2026-08-16T22:30:00Z");
 
-    expect(formatWallClock(at, "Europe/Rome")).toBe("lunedì 2026-08-17 00:30 Europe/Rome");
+    expect(formatWallClock(at, "Europe/Rome")).toBe("Monday 2026-08-17 00:30 Europe/Rome");
   });
 
   it("is the case the assistant used to get wrong", () => {
@@ -125,24 +125,25 @@ describe("formatWallClock", () => {
     const at = Date.parse(instant);
     const clock = formatWallClock(at, zone);
 
-    expect(clock).toBe("mercoledì 2026-10-14 00:30 Europe/Rome");
+    expect(clock).toBe("Wednesday 2026-10-14 00:30 Europe/Rome");
 
-    const zoneWeekday = clock.startsWith("mercoledì");
+    const zoneWeekday = clock.startsWith("Wednesday");
     const observed = `the clock reads "${clock}", naming the ${zoneWeekday ? "zone's" : "machine's"} weekday and not the ${zoneWeekday ? "machine's" : "zone's"}`;
     expect(observed).toBe(row.expect);
   });
 
-  specTest("ACP-TURN-033", "names every day of the week in Italian", (row) => {
+  specTest("ACP-TURN-033", "names every day of the week in English", (row) => {
     const zone = row.quoted("when")[0]!;
     const week: Array<[string, string]> = [
-      ["2026-10-12T12:00:00Z", "lunedì 2026-10-12 14:00 Europe/Rome"],
-      ["2026-10-13T12:00:00Z", "martedì 2026-10-13 14:00 Europe/Rome"],
-      ["2026-10-14T12:00:00Z", "mercoledì 2026-10-14 14:00 Europe/Rome"],
-      ["2026-10-15T12:00:00Z", "giovedì 2026-10-15 14:00 Europe/Rome"],
-      ["2026-10-16T12:00:00Z", "venerdì 2026-10-16 14:00 Europe/Rome"],
-      ["2026-10-17T12:00:00Z", "sabato 2026-10-17 14:00 Europe/Rome"],
-      ["2026-10-18T12:00:00Z", "domenica 2026-10-18 14:00 Europe/Rome"],
+      ["2026-10-12T12:00:00Z", "Monday 2026-10-12 14:00 Europe/Rome"],
+      ["2026-10-13T12:00:00Z", "Tuesday 2026-10-13 14:00 Europe/Rome"],
+      ["2026-10-14T12:00:00Z", "Wednesday 2026-10-14 14:00 Europe/Rome"],
+      ["2026-10-15T12:00:00Z", "Thursday 2026-10-15 14:00 Europe/Rome"],
+      ["2026-10-16T12:00:00Z", "Friday 2026-10-16 14:00 Europe/Rome"],
+      ["2026-10-17T12:00:00Z", "Saturday 2026-10-17 14:00 Europe/Rome"],
+      ["2026-10-18T12:00:00Z", "Sunday 2026-10-18 14:00 Europe/Rome"],
     ];
+    const englishWeekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
     const clocks: string[] = [];
     for (const [at, expected] of week) {
@@ -153,12 +154,23 @@ describe("formatWallClock", () => {
 
     const expectedWeekdays = week.map(([, expected]) => expected.split(" ")[0] ?? "");
     const namesEach = clocks.every((clock, index) => clock.split(" ")[0] === expectedWeekdays[index]);
-    const lowercase = clocks.every((clock) => {
+    const capitalised = clocks.every((clock) => {
       const weekday = clock.split(" ")[0] ?? "";
-      return weekday === weekday.toLowerCase();
+      return weekday === weekday.charAt(0).toUpperCase() + weekday.slice(1).toLowerCase();
     });
-    const beforeTheRest = clocks.every((clock) => clock.startsWith(`${clock.split(" ")[0] ?? ""} `));
-    const observed = `each reads its ${namesEach && lowercase && beforeTheRest ? "Italian weekday name, lowercase," : "weekday name,"} before the date, the time and the zone`;
+    const beforeTheRest = clocks.every((clock) => {
+      const [weekday, date, time, zoneLabel] = clock.split(" ");
+      return (
+        weekday !== undefined &&
+        englishWeekdays.includes(weekday) &&
+        date !== undefined &&
+        /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+        time !== undefined &&
+        /^\d{2}:\d{2}$/.test(time) &&
+        zoneLabel === zone
+      );
+    });
+    const observed = `each reads its ${namesEach && capitalised && beforeTheRest ? "English weekday name, capitalised," : "weekday name,"} before the date, the time and the zone`;
     expect(observed).toBe(row.expect);
   });
 
@@ -169,12 +181,32 @@ describe("formatWallClock", () => {
   specTest("ACP-TURN-034", "names the UTC weekday too when it falls back on a bad zone name", (row) => {
     const zone = row.quoted("when")[0]!;
     const clock = formatWallClock(Date.parse("2026-08-16T10:00:00Z"), zone);
-    expect(clock).toBe("domenica 2026-08-16 10:00 UTC");
+    expect(clock).toBe("Sunday 2026-08-16 10:00 UTC");
 
     const zoneLabel = clock.split(" ").at(-1) ?? "";
     const utc = zoneLabel === "UTC";
     const observed = `the clock reads the ${utc ? "UTC" : "wrong"} weekday, the ${utc ? "UTC" : "wrong"} date and time, and "${zoneLabel}" instead of failing the turn`;
     expect(observed).toBe(row.expect);
+  });
+
+  it("never names a weekday in Italian", () => {
+    const italianWeekdays = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"];
+    const clocks = [
+      "2026-10-12T12:00:00Z",
+      "2026-10-13T12:00:00Z",
+      "2026-10-14T12:00:00Z",
+      "2026-10-15T12:00:00Z",
+      "2026-10-16T12:00:00Z",
+      "2026-10-17T12:00:00Z",
+      "2026-10-18T12:00:00Z",
+    ].map((instant) => formatWallClock(Date.parse(instant), "Europe/Rome"));
+    clocks.push(formatWallClock(Date.parse("2026-08-16T10:00:00Z"), "Not/AZone"));
+
+    for (const clock of clocks) {
+      for (const weekday of italianWeekdays) {
+        expect(clock).not.toContain(weekday);
+      }
+    }
   });
 });
 
@@ -247,11 +279,11 @@ describe("TurnMetaTracker.prefixWithContext", () => {
     const tracker = new TurnMetaTracker();
 
     const withClock = await tracker.prefixWithContext("a", "u", "hello", {
-      clock: "lunedì 2026-08-17 00:30 Europe/Rome",
+      clock: "Monday 2026-08-17 00:30 Europe/Rome",
     });
     const withoutClock = await tracker.prefixWithContext("b", "u", "hello", {});
 
-    expect(withClock).toContain("now=lunedì 2026-08-17 00:30 Europe/Rome");
+    expect(withClock).toContain("now=Monday 2026-08-17 00:30 Europe/Rome");
     expect(withoutClock).not.toContain("now=");
   });
 });
