@@ -2,6 +2,7 @@ import { Client, fetchRecommendedShardCount, GatewayIntentBits } from "discord.j
 import { afterEach, describe, expect, it } from "vitest";
 import { startFakeDiscord } from "./__tests__/fake-discord.js";
 import { classifyCredentialRejection } from "./credential-rejection.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 /** A discord.js error as it reaches the supervisor: an Error carrying a `code`. */
 function discordError(code: string, message: string): Error & { code: string } {
@@ -30,22 +31,36 @@ describe("classifyCredentialRejection", () => {
   // The shape discord.js really raises: @discordjs/ws turns gateway close
   // 4014 into a bare Error with this message and no code, and login() rejects
   // with it unwrapped. The test against the installed library below pins it.
-  it("classifies a privileged intent the application was never granted, as the library raises it", () => {
-    const rejection = classifyCredentialRejection(new Error("Used disallowed intents"));
-    expect(rejection).toEqual({
-      code: "DisallowedIntents",
-      credential: "bot_token",
-      detail:
-        "The Discord application behind this bot token is not granted the Message Content intent. Enable it in the developer portal, under Bot and then Privileged Gateway Intents.",
-    });
-  });
+  specTest(
+    "ACP-TURN-014",
+    "classifies a privileged intent the application was never granted, as the library raises it",
+    (row) => {
+      const message = row.quoted("when")[0]!;
+      const rejection = classifyCredentialRejection(new Error(message));
+      expect(rejection).toEqual({
+        code: "DisallowedIntents",
+        credential: "bot_token",
+        detail:
+          "The Discord application behind this bot token is not granted the Message Content intent. Enable it in the developer portal, under Bot and then Privileged Gateway Intents.",
+      });
 
-  it("classifies a token the gateway refused at identify, as the library raises it", () => {
+      const credential = rejection?.credential === "bot_token" ? "bot token" : (rejection?.credential ?? "");
+      const namesIntent = rejection?.detail.includes("Message Content intent") ?? false;
+      const observed = `the bridge classifies it as a refused credential "${rejection?.code ?? ""}" of the ${credential}, ${namesIntent ? "naming the Message Content intent to enable" : "without naming the Message Content intent"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest("ACP-TURN-015", "classifies a token the gateway refused at identify, as the library raises it", (row) => {
+    const message = row.quoted("when")[0]!;
     // Close 4004, raised by @discordjs/ws the same bare way as 4014.
-    const rejection = classifyCredentialRejection(new Error("Authentication failed"));
+    const rejection = classifyCredentialRejection(new Error(message));
     expect(rejection?.code).toBe("AuthenticationFailed");
     expect(rejection?.credential).toBe("bot_token");
     expect(rejection?.detail).toMatch(/bot_token/);
+
+    const observed = `the bridge classifies it as a refused token "${rejection?.code ?? ""}"`;
+    expect(observed).toBe(row.expect);
   });
 
   it("matches the library's sentence exactly, not anything that resembles it", () => {

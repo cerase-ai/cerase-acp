@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isBridgePrompt } from "./bridge-prompt.js";
 import { fetchRecentConversation, recentConversationNote } from "./recent-conversation.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 // A new conversation is told how the person's previous one ended. On radicalhr
 // on 2 October a reply the assistant had written for approval was in one
@@ -57,20 +58,34 @@ describe("the end of the previous conversation", () => {
     await expect(fetchRecentConversation("a", { ...OPTS, fetchImpl: answering({}, 500) })).rejects.toThrow();
   });
 
-  it("is told as a prompt of the bridge's own, with the messages and what to do with them", () => {
-    const note = recentConversationNote({
-      endedAt: "2026-10-10 15:29 Europe/Rome",
-      turns: [
-        { role: "person", text: "Rispondi a Clelia" },
-        { role: "assistant", text: "Ecco la risposta. La mando?" },
-      ],
-    });
+  specTest(
+    "ACP-TURN-028",
+    "is told as a prompt of the bridge's own, with the messages and what to do with them",
+    (row) => {
+      const note = recentConversationNote({
+        endedAt: "2026-10-10 15:29 Europe/Rome",
+        turns: [
+          { role: "person", text: "Rispondi a Clelia" },
+          { role: "assistant", text: "Ecco la risposta. La mando?" },
+        ],
+      });
 
-    expect(isBridgePrompt(note)).toBe(true);
-    expect(note.split("\n")[0]).toBe("[conversation_result: new]");
-    expect(note).toContain("ended at 2026-10-10 15:29 Europe/Rome");
-    expect(note).toContain("The person: Rispondi a Clelia");
-    expect(note).toContain("You: Ecco la risposta. La mando?");
-    expect(note).toContain("nothing in it was sent, saved or approved unless it says so");
-  });
+      expect(isBridgePrompt(note)).toBe(true);
+      expect(note.split("\n")[0]).toBe("[conversation_result: new]");
+      expect(note).toContain("ended at 2026-10-10 15:29 Europe/Rome");
+      expect(note).toContain("The person: Rispondi a Clelia");
+      expect(note).toContain("You: Ecco la risposta. La mando?");
+      expect(note).toContain("nothing in it was sent, saved or approved unless it says so");
+
+      const bridgeOwn = isBridgePrompt(note);
+      const hasMessages =
+        note.includes("The person: Rispondi a Clelia") && note.includes("You: Ecco la risposta. La mando?");
+      const saysWhatToDo = note.includes("nothing in it was sent, saved or approved unless it says so");
+      const observed =
+        bridgeOwn && hasMessages && saysWhatToDo
+          ? "the bridge adds a note of its own with the messages and what to do with them"
+          : "the bridge does not add a note of its own with the messages and what to do with them";
+      expect(observed).toBe(row.expect);
+    },
+  );
 });

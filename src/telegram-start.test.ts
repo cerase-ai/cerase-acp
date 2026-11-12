@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { createTelegramAdapter } from "./telegram-adapter.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const sdk = vi.hoisted(() => ({
   launch: (_onLaunch: () => void): Promise<void> => new Promise<void>(() => {}),
@@ -53,12 +54,22 @@ beforeEach(() => {
 });
 
 describe("the Telegram adapter's start", () => {
-  it("rejects when Telegram refuses the token, so the bridge reports the channel down", async () => {
-    sdk.launch = async () => {
-      throw unauthorized();
-    };
-    await expect(adapter().start()).rejects.toThrow("401: Unauthorized");
-  });
+  specTest(
+    "ACP-TURN-007",
+    "rejects when Telegram refuses the token, so the bridge reports the channel down",
+    async (row) => {
+      sdk.launch = async () => {
+        throw unauthorized();
+      };
+      const start = adapter().start();
+      await expect(start).rejects.toThrow("401: Unauthorized");
+      const refused = await start.catch((error: unknown) => error);
+
+      const rejected = refused instanceof Error;
+      const observed = `start ${rejected ? "rejects" : "resolves"} for the bad token, so the bridge ${rejected ? "reports the channel down" : "does not report the channel down"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("resolves only once Telegram has answered", async () => {
     let connect = () => {};

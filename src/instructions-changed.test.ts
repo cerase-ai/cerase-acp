@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isBridgePrompt } from "./bridge-prompt.js";
 import { instructionsChangedNote, withInstructionsChanged } from "./instructions-changed.js";
+import { specTest } from "./test-support/spec-rows.js";
 import { fetchTurnContext, resetTurnContextCache } from "./turn-context.js";
 
 // On the first turn after an assistant's instructions or skills change, the
@@ -50,15 +51,27 @@ describe("an assistant told that its instructions changed", () => {
     ]);
   });
 
-  it("says they changed after the conversation's last message, to follow them as they are now, and to load a skill again", () => {
-    const note = instructionsChangedNote();
+  specTest(
+    "ACP-TURN-027",
+    "says they changed after the conversation's last message, to follow them as they are now, and to load a skill again",
+    (row) => {
+      const note = instructionsChangedNote();
 
-    expect(isBridgePrompt(note)).toBe(true);
-    expect(note.split("\n")[0]).toBe("[instructions_result: changed]");
-    expect(note).toContain("changed after the last message of this conversation");
-    expect(note).toContain("follow your instructions as they are now");
-    expect(note).toContain("load a skill again before you use it");
-  });
+      expect(isBridgePrompt(note)).toBe(true);
+      expect(note.split("\n")[0]).toBe("[instructions_result: changed]");
+      expect(note).toContain("changed after the last message of this conversation");
+      expect(note).toContain("follow your instructions as they are now");
+      expect(note).toContain("load a skill again before you use it");
+
+      const firstLine = note.split("\n")[0] ?? "";
+      const bridgeOwn = isBridgePrompt(note);
+      const afterLastMessage = note.includes("changed after the last message of this conversation");
+      const asTheyAreNow = note.includes("follow your instructions as they are now");
+      const loadAgain = note.includes("load a skill again before you use it");
+      const observed = `the note is ${bridgeOwn ? "the bridge's own" : "not the bridge's own"}, opens with "${firstLine}", ${afterLastMessage ? "says they changed after the conversation's last message" : "does not say they changed after the conversation's last message"}, ${asTheyAreNow ? "to follow them as they are now" : "not to follow them as they are now"}, and ${loadAgain ? "to load a skill again" : "not to load a skill again"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   // On lt-name-1 on 11 October, two assistants given this note read the
   // opencode log, its database and the gateway token file before doing what

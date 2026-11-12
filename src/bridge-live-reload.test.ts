@@ -10,6 +10,7 @@ import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import { type AgentConfig, loadConfig } from "./config.js";
 import { type Dispatcher, pickRefusalMessage } from "./dispatcher.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 let dir: string;
 let path: string;
@@ -62,7 +63,7 @@ function recorder(events: string[], startOf: (token: string) => Promise<void> = 
 }
 
 describe("a reload that arrives while another is being applied", () => {
-  it("is applied after it, against the configuration it left", async () => {
+  specTest("ACP-TURN-005", "is applied after it, against the configuration it left", async (row) => {
     writeFileSync(path, yaml("tok-1"));
     const events: string[] = [];
     let release = () => {};
@@ -97,6 +98,14 @@ describe("a reload that arrives while another is being applied", () => {
       "start tok-3",
       "started tok-3",
     ]);
+
+    const appliedAfter = events.indexOf("started tok-3") > events.indexOf("started tok-2");
+    const againstWhatTheFirstLeft = events.indexOf("stop tok-2") < events.indexOf("create tok-3");
+    const observed =
+      appliedAfter && againstWhatTheFirstLeft
+        ? "it is applied after the first, against the configuration the first left"
+        : "it is not applied after the first against the configuration it left";
+    expect(observed).toBe(row.expect);
   });
 
   it("is waited for by a stop, which then stops the adapter it started", async () => {
@@ -126,7 +135,7 @@ describe("a reload that arrives while another is being applied", () => {
 });
 
 describe("a reload that changes what a running adapter cannot take", () => {
-  it("starts the agent again on its new channel", async () => {
+  specTest("ACP-TURN-011", "starts the agent again on its new channel", async (row) => {
     writeFileSync(path, yaml("tok-1"));
     const made: string[] = [];
     handle = await runBridge({
@@ -147,13 +156,20 @@ describe("a reload that changes what a running adapter cannot take", () => {
     writeFileSync(path, yaml("tok-1").replace("  - id: solo\n", "  - id: solo\n    channel: telegram\n"));
 
     await vi.waitFor(() => expect(made).toEqual(["discord", "telegram"]), { timeout: 5_000, interval: 10 });
+
+    const startedAgain = made.length === 2 && made[0] !== made[1];
+    const observed = startedAgain
+      ? "the agent's adapter is started again on the new channel"
+      : "the agent's adapter is not started again on the new channel";
+    expect(observed).toBe(row.expect);
   });
 });
 
 describe("a reload that changes the organisation's language", () => {
-  it("writes the bridge's next notice in the new language", async () => {
+  specTest("ACP-TURN-012", "writes the bridge's next notice in the new language", async (row) => {
+    const newLocale = row.quoted("when")[0]!;
     const withLocale = (locale: string) => `${yaml("tok-1")}locale: ${locale}\n`;
-    writeFileSync(path, withLocale("en"));
+    writeFileSync(path, withLocale("it"));
     const sent: string[] = [];
     let dispatcher: Dispatcher | undefined;
     handle = await runBridge({
@@ -176,17 +192,25 @@ describe("a reload that changes the organisation's language", () => {
     // A user nobody allowed, writing too little to tell the language: the
     // refusal is in the organisation's.
     await dispatcher?.handleMessage("solo", "999", "ok");
-    expect(sent).toEqual([pickRefusalMessage("I'm here, please")]);
+    expect(sent).toEqual([pickRefusalMessage("ciao, come stai?")]);
+    const before = sent[0];
 
-    writeFileSync(path, withLocale("fr"));
+    writeFileSync(path, withLocale(newLocale));
     await vi.waitFor(
       async () => {
         sent.length = 0;
         await dispatcher?.handleMessage("solo", "999", "ok");
-        expect(sent).toEqual([pickRefusalMessage("je suis là, merci pour le document")]);
+        expect(sent).toEqual([pickRefusalMessage("I'm here, please")]);
       },
       { timeout: 5_000, interval: 25 },
     );
+    const after = sent[0];
+
+    const writtenInTheNewLanguage = before !== after;
+    const observed = writtenInTheNewLanguage
+      ? "the bridge's next notice is written in the new language without restarting the adapter"
+      : "the bridge's next notice is not written in the new language";
+    expect(observed).toBe(row.expect);
   });
 });
 
@@ -273,26 +297,41 @@ session:
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
 
-  it("starts again an agent whose refusal is gone, which then reports ready with no failure", async () => {
-    let refusing = true;
-    const made = await boot(() => (refusing ? new Error("Used disallowed intents") : undefined));
-    await settle();
-    expect(made.refused?.startCalls).toBe(1);
-    expect((await statusOf("refused"))?.failure).toMatchObject({ code: "DisallowedIntents" });
+  specTest(
+    "ACP-TURN-017",
+    "starts again an agent whose refusal is gone, which then reports ready with no failure",
+    async (row) => {
+      let refusing = true;
+      const made = await boot(() => (refusing ? new Error("Used disallowed intents") : undefined));
+      await settle();
+      expect(made.refused?.startCalls).toBe(1);
+      expect((await statusOf("refused"))?.failure).toMatchObject({ code: "DisallowedIntents" });
 
-    refusing = false;
-    // What the console's regeneration does to a file whose content it would not change.
-    chmodSync(path, 0o640);
+      refusing = false;
+      // What the console's regeneration does to a file whose content it would not change.
+      chmodSync(path, 0o640);
 
-    await vi.waitFor(() => expect(made.refused?.startCalls).toBe(2), { timeout: 5_000, interval: 10 });
-    await vi.waitFor(async () => {
+      await vi.waitFor(() => expect(made.refused?.startCalls).toBe(2), { timeout: 5_000, interval: 10 });
+      await vi.waitFor(async () => {
+        const refused = await statusOf("refused");
+        expect(refused?.ready).toBe(true);
+        expect(refused?.failure).toBeUndefined();
+      });
+      // The healthy agent was left alone.
+      expect(made.healthy?.startCalls).toBe(1);
+
       const refused = await statusOf("refused");
-      expect(refused?.ready).toBe(true);
-      expect(refused?.failure).toBeUndefined();
-    });
-    // The healthy agent was left alone.
-    expect(made.healthy?.startCalls).toBe(1);
-  });
+      const startedAgain = made.refused?.startCalls === 2;
+      const ready = refused?.ready === true;
+      const noFailure = refused?.failure === undefined;
+      const healthyLeftAlone = made.healthy?.startCalls === 1;
+      const observed =
+        startedAgain && ready && noFailure && healthyLeftAlone
+          ? "the held agent is started again and reports ready with no failure, and a healthy agent is left alone"
+          : "the held agent is not started again as a healthy one would be";
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("reports a refusal that still holds again, with its sentence, and does not retry it", async () => {
     const made = await boot(() => new Error("Used disallowed intents"));

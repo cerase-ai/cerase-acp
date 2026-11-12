@@ -30,6 +30,7 @@ import {
   SUMMARY_COMMAND,
   SummaryNotSettledError,
 } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -73,13 +74,25 @@ describe("where a session stands with its summaries", () => {
     ).toEqual({ kind: "settled" });
   });
 
-  it("is stranded when the summary under the newest marker was aborted or killed with its slot", () => {
-    for (const end of ["aborted", "killed"] as const) {
-      expect(
-        summaryStateOf([user("u1", 1), answer("a1", "u1", 2), marker("c1", 3), summary("s1", "c1", 4, end)], false),
-      ).toEqual({ kind: "stranded", markerId: "c1" });
-    }
-  });
+  specTest(
+    "ACP-TURN-020",
+    "is stranded when the summary under the newest marker was aborted or killed with its slot",
+    (row) => {
+      const states: SummaryState[] = [];
+      for (const end of ["aborted", "killed"] as const) {
+        const state = summaryStateOf(
+          [user("u1", 1), answer("a1", "u1", 2), marker("c1", 3), summary("s1", "c1", 4, end)],
+          false,
+        );
+        states.push(state);
+        expect(state).toEqual({ kind: "stranded", markerId: "c1" });
+      }
+
+      const allStranded = states.every((state) => state.kind === "stranded");
+      const observed = `the session is read as ${allStranded ? "stranded" : "something else"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("is still stranded once a message the runtime has not answered follows the unfinished summary", () => {
     const failed = { info: { id: "a2", role: "assistant", parentID: "u2", time: { created: 6 } }, parts: [] };
@@ -165,25 +178,38 @@ describe("a person's message after a summary left unfinished", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("has the session summarise under a marker of its own first, then sends the message, which is answered", async () => {
-    readings = [{ kind: "stranded", markerId: "c1" }, { kind: "settled" }];
-    m = new SessionManager(config([`FAKE_PROMPT_LOG=${log}`, "FAKE_ECHO_PROMPT=1"]), undefined, { summaryState });
-    const summaries: string[] = [];
-    const texts: string[] = [];
-    await m.prompt(
-      "doc-qa",
-      "111",
-      "ok",
-      (u) => {
-        if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text") texts.push(u.content.text);
-      },
-      { opensTurn: true, onSummary: (s) => summaries.push(s) },
-    );
-    expect(sent()).toEqual([SUMMARY_COMMAND, "ok"]);
-    // The message's own turn answers it, and the summary is not that answer.
-    expect(texts.join("")).toBe("ok");
-    expect(summaries).toEqual([SUMMARY_COMMAND]);
-  });
+  specTest(
+    "ACP-TURN-021",
+    "has the session summarise under a marker of its own first, then sends the message, which is answered",
+    async (row) => {
+      readings = [{ kind: "stranded", markerId: "c1" }, { kind: "settled" }];
+      m = new SessionManager(config([`FAKE_PROMPT_LOG=${log}`, "FAKE_ECHO_PROMPT=1"]), undefined, { summaryState });
+      const summaries: string[] = [];
+      const texts: string[] = [];
+      await m.prompt(
+        "doc-qa",
+        "111",
+        "ok",
+        (u) => {
+          if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text") texts.push(u.content.text);
+        },
+        { opensTurn: true, onSummary: (s) => summaries.push(s) },
+      );
+      expect(sent()).toEqual([SUMMARY_COMMAND, "ok"]);
+      // The message's own turn answers it, and the summary is not that answer.
+      expect(texts.join("")).toBe("ok");
+      expect(summaries).toEqual([SUMMARY_COMMAND]);
+
+      const lines = sent();
+      const summarisedFirst = lines[0] === SUMMARY_COMMAND && lines[1] === "ok";
+      const answered = texts.join("") === "ok";
+      const observed =
+        summarisedFirst && answered
+          ? "the session summarises under a marker of its own first, then the message is sent and answered"
+          : "the session does not summarise first or the message is not answered";
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("sends the message as it is when nothing was left unfinished", async () => {
     readings = [{ kind: "settled" }];
@@ -192,30 +218,55 @@ describe("a person's message after a summary left unfinished", () => {
     expect(sent()).toEqual(["ok"]);
   });
 
-  it("waits for a summary being written and says so, then sends the message without summarising again", async () => {
-    readings = [{ kind: "writing", messageId: "s1" }, { kind: "writing", messageId: "s1" }, { kind: "settled" }];
-    m = new SessionManager(config([`FAKE_PROMPT_LOG=${log}`]), undefined, { summaryState });
-    const mm = m;
-    const compacting: boolean[] = [];
-    const turn = mm.prompt("doc-qa", "111", "ok", undefined, {
-      opensTurn: true,
-      onCompaction: (on) => compacting.push(on),
-    });
-    await untilChild(() => expect(compacting).toEqual([true]));
-    await vi.advanceTimersByTimeAsync(2 * COMPACTION_PROBE_EVERY_MS);
-    await turn;
-    expect(compacting).toEqual([true, false]);
-    expect(sent()).toEqual(["ok"]);
-  });
+  specTest(
+    "ACP-TURN-022",
+    "waits for a summary being written and says so, then sends the message without summarising again",
+    async (row) => {
+      readings = [{ kind: "writing", messageId: "s1" }, { kind: "writing", messageId: "s1" }, { kind: "settled" }];
+      m = new SessionManager(config([`FAKE_PROMPT_LOG=${log}`]), undefined, { summaryState });
+      const mm = m;
+      const compacting: boolean[] = [];
+      const turn = mm.prompt("doc-qa", "111", "ok", undefined, {
+        opensTurn: true,
+        onCompaction: (on) => compacting.push(on),
+      });
+      await untilChild(() => expect(compacting).toEqual([true]));
+      await vi.advanceTimersByTimeAsync(2 * COMPACTION_PROBE_EVERY_MS);
+      await turn;
+      expect(compacting).toEqual([true, false]);
+      expect(sent()).toEqual(["ok"]);
 
-  it("does not send the message when the summary is still unfinished after it was asked again", async () => {
-    readings = [{ kind: "stranded", markerId: "c1" }];
-    m = new SessionManager(config([`FAKE_PROMPT_LOG=${log}`]), undefined, { summaryState });
-    await expect(m.prompt("doc-qa", "111", "ok", undefined, { opensTurn: true })).rejects.toBeInstanceOf(
-      SummaryNotSettledError,
-    );
-    expect(sent()).toEqual([SUMMARY_COMMAND]);
-  });
+      const waits = compacting[0] === true;
+      const finished = compacting.at(-1) === false;
+      const messageOnly = sent().length === 1 && sent()[0] === "ok";
+      const observed =
+        waits && finished && messageOnly
+          ? "the bridge says it waits and sends the message once the summary is written, without summarising again"
+          : "the bridge does not wait for the summary or summarises again";
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest(
+    "ACP-TURN-023",
+    "does not send the message when the summary is still unfinished after it was asked again",
+    async (row) => {
+      readings = [{ kind: "stranded", markerId: "c1" }];
+      m = new SessionManager(config([`FAKE_PROMPT_LOG=${log}`]), undefined, { summaryState });
+      const turn = m.prompt("doc-qa", "111", "ok", undefined, { opensTurn: true });
+      await expect(turn).rejects.toBeInstanceOf(SummaryNotSettledError);
+      const failure = await turn.catch((error: unknown) => error);
+      expect(sent()).toEqual([SUMMARY_COMMAND]);
+
+      const messageNotSent = sent().every((line) => line !== "ok");
+      const failedWithItsNotice = failure instanceof SummaryNotSettledError;
+      const observed =
+        messageNotSent && failedWithItsNotice
+          ? "the message is not sent and the turn fails with its notice"
+          : "the message is sent or the turn does not fail with its notice";
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("does not read the session for a prompt that continues a turn already running", async () => {
     readings = [{ kind: "stranded", markerId: "c1" }];

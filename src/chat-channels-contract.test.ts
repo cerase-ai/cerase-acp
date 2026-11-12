@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { createChatAdapter } from "./chat-adapter.js";
 import { type AgentConfig, ChatChannelSchema } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const FIXTURE = "control-plane/tests/fixtures/chat-channels.json";
@@ -37,8 +38,15 @@ describe("the channels an organisation may choose", () => {
     expect(pin).toContain(`${digest}  ${FIXTURE}`);
   });
 
-  it("are every channel the bridge configures, the console's own transport aside", () => {
+  specTest("ACP-TURN-013", "are every channel the bridge configures, the console's own transport aside", (row) => {
     expect([...contract.channels].sort()).toEqual(ChatChannelSchema.options.filter((c) => c !== "web").sort());
+
+    const configured = ChatChannelSchema.options.filter((channel) => channel !== "web").sort();
+    const same = JSON.stringify([...contract.channels].sort()) === JSON.stringify(configured);
+    const observed = same
+      ? "it equals every channel the bridge configures, the console's own transport aside"
+      : "it does not equal every channel the bridge configures";
+    expect(observed).toBe(row.expect);
   });
 
   it.each(contract.channels)(

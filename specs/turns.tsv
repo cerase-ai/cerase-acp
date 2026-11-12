@@ -1,0 +1,35 @@
+id	when	expect	file	dec
+ACP-TURN-001	a turn that ends with reasoning only, no text and no tool call, on all of its first three tries	the same session is asked again at once, up to three times, with a note telling the assistant to answer, and nothing is sent to the person meanwhile	src/dispatcher.ts	
+ACP-TURN-002	a fourth empty answer after three retries	the person receives a message worded as the answer taking longer than expected	src/dispatcher.ts	
+ACP-TURN-003	a turn that fails with a provider error	it is not tried again by the bridge and keeps the runtime's own backoff	src/dispatcher.ts	
+ACP-TURN-004	a turn whose open tool call runs silently for twenty minutes, as a sub-agent revision does	the turn is not killed at the silence budget and ends normally	src/session-manager.ts	
+ACP-TURN-005	a configuration reload that arrives while another reload is being applied	it is applied after the first, against the configuration the first left	src/bridge.ts	
+ACP-TURN-006	a turn queued behind a turn whose session the watchdog ends	the queued turn is refused unsent	src/session-manager.ts	
+ACP-TURN-007	a Telegram adapter started with a bad token	start rejects for the bad token, so the bridge reports the channel down	src/telegram-start.test.ts	
+ACP-TURN-008	a chunk of an answer that the channel refuses	the chunk is tried again after 0.5, 1 and 2 seconds and delivered when one try succeeds	src/send-queue.ts	
+ACP-TURN-009	a chunk lost after its last retry	a delivery-failure marker is sent once and the rest of the answer is tried once each without the backoff	src/send-queue.ts	
+ACP-TURN-010	messages kept across a restart, one sent 31 minutes ago and one sent 29 minutes ago	only the recent one is answered and the person is told once about the older one	src/pending-messages.ts	
+ACP-TURN-011	a live reload that changes an agent's channel	the agent's adapter is started again on the new channel	src/bridge.ts	
+ACP-TURN-012	a live reload that changes the locale to "en"	the bridge's next notice is written in the new language without restarting the adapter	src/bridge.ts	
+ACP-TURN-013	the bridge's copy of chat-channels.json	it equals every channel the bridge configures, the console's own transport aside	src/chat-channels-contract.test.ts	
+ACP-TURN-014	the Discord library rejects a login with the error "Used disallowed intents"	the bridge classifies it as a refused credential "DisallowedIntents" of the bot token, naming the Message Content intent to enable	src/credential-rejection.ts	
+ACP-TURN-015	the Discord library rejects a login with the error "Authentication failed"	the bridge classifies it as a refused token "AuthenticationFailed"	src/credential-rejection.ts	
+ACP-TURN-016	the assistant's Discord bot start is refused with "Used disallowed intents" and the supervisor schedules a retry	the supervisor stops retrying, starts the bot once and records one terminal failure "DisallowedIntents"	src/adapter-supervisor.ts	
+ACP-TURN-017	the switch is turned on and the console's regeneration touches the agent file without changing its content	the held agent is started again and reports ready with no failure, and a healthy agent is left alone	src/bridge.ts	
+ACP-TURN-018	a person's turn is running and the session starts summarising its history for more than the usual silence limit	the turn is not killed for silence and the chat says «Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo.»	src/platform-notices.ts	
+ACP-TURN-019	a session writes its summary and stays silent past 15 minutes	the turn is ended by the watchdog as silent	src/session-manager.ts	
+ACP-TURN-020	a session's newest summary marker was aborted or killed with its slot and no answer followed	the session is read as stranded	src/opencode-rest.ts	
+ACP-TURN-021	a person's message arrives for a session holding a stranded summary marker	the session summarises under a marker of its own first, then the message is sent and answered	src/session-manager.ts	
+ACP-TURN-022	a person's message arrives while the slot's server is writing a summary	the bridge says it waits and sends the message once the summary is written, without summarising again	src/session-manager.ts	
+ACP-TURN-023	a person's message arrives and the summary is still unfinished after it was asked again	the message is not sent and the turn fails with its notice	src/session-manager.ts	
+ACP-TURN-024	a voice message whose only text is "[Uploaded files: uploads/2026-10-10/voice-message.ogg]"	the block of uploaded files is not read as the person's words and the language is "unknown"	src/turn-meta.ts	
+ACP-TURN-025	the voice message arrives after an Italian turn of the same conversation	the turn is tagged "lang=it", the conversation's previous language	src/turn-meta.ts	
+ACP-TURN-026	a voice message arrives as the first turn after a bridge restart, with "it" as the organisation's language	the turn is tagged "lang=it", the organisation's	src/turn-meta.ts	
+ACP-TURN-027	the control plane answers that the instructions changed	the note is the bridge's own, opens with "[instructions_result: changed]", says they changed after the conversation's last message, to follow them as they are now, and to load a skill again	src/instructions-changed.ts	
+ACP-TURN-028	the first message of a new conversation when the control plane gives the previous conversation's last turns	the bridge adds a note of its own with the messages and what to do with them	src/recent-conversation.ts	
+ACP-TURN-029	the message "Sì, ho cambiato idea: preparala tu."	it is tagged Italian and not French	src/turn-meta.ts	
+ACP-TURN-030	short replies such as "Ok, la mando io domani." and "Va bene, mandala tu." after an Italian turn	each keeps "lang=it", the conversation's language	src/turn-meta.ts	
+ACP-TURN-031	an English sentence after Italian turns, and a second English one	the first is tagged "lang=unknown" and the second "lang=en"	src/turn-meta.ts	
+ACP-TURN-032	the instant "2026-10-13T22:30:00Z" is formatted for the zone "Europe/Rome", where it is already Wednesday after midnight	the clock reads "mercoledì 2026-10-14 00:30 Europe/Rome", naming the zone's weekday and not the machine's	src/turn-context.ts	
+ACP-TURN-033	the clock is written for each day of a week in "Europe/Rome"	each reads its Italian weekday name, lowercase, before the date, the time and the zone	src/turn-context.ts	
+ACP-TURN-034	the clock is written for the zone "Not/AZone" that no runtime knows	the clock reads the UTC weekday, the UTC date and time, and "UTC" instead of failing the turn	src/turn-context.ts	

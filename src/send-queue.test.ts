@@ -231,21 +231,31 @@ describe("SendQueue delivery retry", () => {
     return { send, tried, received };
   }
 
-  it("tries a refused chunk again after each backoff delay, longer each time, and delivers it", async () => {
-    expect(SEND_RETRY_DELAYS_MS.length).toBeGreaterThan(1);
-    for (let i = 1; i < SEND_RETRY_DELAYS_MS.length; i++) {
-      expect(SEND_RETRY_DELAYS_MS[i]!).toBeGreaterThan(SEND_RETRY_DELAYS_MS[i - 1]!);
-    }
-    const target = refusing(SEND_RETRY_DELAYS_MS.length);
-    const q = new SendQueue({ send: target.send });
-    q.enqueue("hello");
-    await vi.advanceTimersByTimeAsync(30_000);
+  specTest(
+    "ACP-TURN-008",
+    "tries a refused chunk again after each backoff delay, longer each time, and delivers it",
+    async (row) => {
+      expect(SEND_RETRY_DELAYS_MS.length).toBeGreaterThan(1);
+      for (let i = 1; i < SEND_RETRY_DELAYS_MS.length; i++) {
+        expect(SEND_RETRY_DELAYS_MS[i]!).toBeGreaterThan(SEND_RETRY_DELAYS_MS[i - 1]!);
+      }
+      const target = refusing(SEND_RETRY_DELAYS_MS.length);
+      const q = new SendQueue({ send: target.send });
+      q.enqueue("hello");
+      await vi.advanceTimersByTimeAsync(30_000);
 
-    await expect(q.drain()).resolves.toEqual({ ok: true });
-    expect(target.received).toEqual(["hello"]);
-    const waits = target.tried.slice(1).map((t, i) => t - target.tried[i]!);
-    expect(waits).toEqual(SEND_RETRY_DELAYS_MS);
-  });
+      await expect(q.drain()).resolves.toEqual({ ok: true });
+      expect(target.received).toEqual(["hello"]);
+      const waits = target.tried.slice(1).map((t, i) => t - target.tried[i]!);
+      expect(waits).toEqual(SEND_RETRY_DELAYS_MS);
+
+      const seconds = SEND_RETRY_DELAYS_MS.map((ms) => ms / 1_000);
+      const delayList = `${seconds.slice(0, -1).join(", ")} and ${seconds.at(-1)}`;
+      const delivered = target.received.length === 1 && target.received[0] === "hello";
+      const observed = `the chunk is tried again after ${delayList} seconds and ${delivered ? "delivered" : "not delivered"} when one try succeeds`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("gives the chunk up after the last retry and sends the marker once", async () => {
     const target = refusing(SEND_RETRY_DELAYS_MS.length + 1);
@@ -263,23 +273,36 @@ describe("SendQueue delivery retry", () => {
     }
   });
 
-  it("tries the rest of the reply once each after a chunk was lost, without the backoff again", async () => {
-    // A channel that has refused a chunk through the whole backoff is down:
-    // waiting the backoff again for every later chunk would hold the end of
-    // the turn for the length of the answer.
-    const target = refusing(Number.POSITIVE_INFINITY);
-    const q = new SendQueue({ send: target.send });
-    q.enqueue("first");
-    q.enqueue("second");
-    q.enqueue("third");
-    await vi.advanceTimersByTimeAsync(30_000);
-    const result = await q.drain();
+  specTest(
+    "ACP-TURN-009",
+    "tries the rest of the reply once each after a chunk was lost, without the backoff again",
+    async (row) => {
+      // A channel that has refused a chunk through the whole backoff is down:
+      // waiting the backoff again for every later chunk would hold the end of
+      // the turn for the length of the answer.
+      const target = refusing(Number.POSITIVE_INFINITY);
+      const q = new SendQueue({ send: target.send });
+      q.enqueue("first");
+      q.enqueue("second");
+      q.enqueue("third");
+      await vi.advanceTimersByTimeAsync(30_000);
+      const result = await q.drain();
 
-    // Every try of the first chunk, then the marker, the second and the third once each.
-    expect(target.tried).toHaveLength(SEND_RETRY_DELAYS_MS.length + 1 + 3);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.failures.map((f) => f.chunk)).toEqual(["first", DELIVERY_FAILURE_MARKER, "second", "third"]);
-    }
-  });
+      // Every try of the first chunk, then the marker, the second and the third once each.
+      expect(target.tried).toHaveLength(SEND_RETRY_DELAYS_MS.length + 1 + 3);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.failures.map((f) => f.chunk)).toEqual(["first", DELIVERY_FAILURE_MARKER, "second", "third"]);
+      }
+
+      const failedChunks = result.ok ? [] : result.failures.map((f) => f.chunk);
+      const markerOnce = failedChunks.filter((chunk) => chunk === DELIVERY_FAILURE_MARKER).length === 1;
+      const restTriedOnce =
+        target.tried.length === SEND_RETRY_DELAYS_MS.length + 1 + 3 &&
+        failedChunks.filter((chunk) => chunk === "second").length === 1 &&
+        failedChunks.filter((chunk) => chunk === "third").length === 1;
+      const observed = `a delivery-failure marker is sent ${markerOnce ? "once" : "more than once"} and the rest of the answer is tried once each ${restTriedOnce ? "without the backoff" : "with the backoff"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 });

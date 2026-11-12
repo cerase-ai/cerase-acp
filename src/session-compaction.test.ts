@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { untilChild, useBridgeClock } from "./__tests__/fake-clock.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
 import { COMPACTION_SILENCE_MS, SessionManager, type SessionUpdateHandler } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 const SILENCE_MS = 180_000;
@@ -147,17 +148,30 @@ describe("a turn whose session is summarising its history", () => {
     expect(compacting).toEqual([true, false]);
   });
 
-  it("is ended when the summary stays silent past the longest a summary is allowed", async () => {
-    writing = { messageId: "msg_summary", summary: true };
-    m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { openCallProbe: probe });
-    const mm = m;
-    const turn = watch(mm.prompt("doc-qa", "111", "ciao"));
-    await untilChild(() => expect(mm.activeSessionCount()).toBe(1));
+  specTest(
+    "ACP-TURN-019",
+    "is ended when the summary stays silent past the longest a summary is allowed",
+    async (row) => {
+      writing = { messageId: "msg_summary", summary: true };
+      m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, { openCallProbe: probe });
+      const mm = m;
+      const turn = watch(mm.prompt("doc-qa", "111", "ciao"));
+      await untilChild(() => expect(mm.activeSessionCount()).toBe(1));
 
-    await vi.advanceTimersByTimeAsync(COMPACTION_SILENCE_MS - 30_000);
-    expect(turn.state.settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(40_000);
-    await turn.done;
-    expect(turn.state.error).toMatchObject({ name: "TurnWatchdogError", reason: "silent", ms: COMPACTION_SILENCE_MS });
-  });
+      await vi.advanceTimersByTimeAsync(COMPACTION_SILENCE_MS - 30_000);
+      expect(turn.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(40_000);
+      await turn.done;
+      expect(turn.state.error).toMatchObject({
+        name: "TurnWatchdogError",
+        reason: "silent",
+        ms: COMPACTION_SILENCE_MS,
+      });
+
+      const error = turn.state.error as { name?: string; reason?: string } | undefined;
+      const endedAsSilent = error?.name === "TurnWatchdogError" && error?.reason === "silent";
+      const observed = `the turn is ${endedAsSilent ? "ended by the watchdog as" : "not ended by the watchdog as"} ${error?.reason ?? "unknown"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 });

@@ -546,40 +546,49 @@ describe("the status line of a turn", () => {
   // While opencode summarises a long conversation it sends nothing for minutes,
   // and the person would otherwise read a chat that has gone quiet. The words
   // are the operator's.
-  it("says the assistant is taking stock while the session summarises, in the conversation's language", async () => {
-    const c = channel();
-    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
-    await promptCount(1);
-    prompts[0]!.compacting(true);
-    await settle();
-    expect(c.posts).toEqual([
-      { id: 1, text: "Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo." },
-    ]);
-    // Once the summary is written the line says the assistant is at work
-    // again, and the end of the turn takes it down.
-    prompts[0]!.compacting(false);
-    await elapse(1_500);
-    expect(c.edits).toEqual([{ id: 1, text: "Sto lavorando…" }]);
-    prompts[0]!.end("Ecco il riepilogo.");
-    expect(await turn).toEqual({ ok: true });
-    await settle();
-    expect(c.removed).toEqual([1]);
-    expect(sent).toEqual(["Ecco il riepilogo."]);
+  specTest(
+    "ACP-TURN-018",
+    "says the assistant is taking stock while the session summarises, in the conversation's language",
+    async (row) => {
+      const c = channel();
+      const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+      await promptCount(1);
+      prompts[0]!.compacting(true);
+      await settle();
+      expect(c.posts).toEqual([
+        { id: 1, text: "Sto facendo il punto su quello che ci siamo detti finora: un paio di minuti e riprendo." },
+      ]);
+      // Once the summary is written the line says the assistant is at work
+      // again, and the end of the turn takes it down.
+      prompts[0]!.compacting(false);
+      await elapse(1_500);
+      expect(c.edits).toEqual([{ id: 1, text: "Sto lavorando…" }]);
+      prompts[0]!.end("Ecco il riepilogo.");
+      expect(await turn).toEqual({ ok: true });
+      await settle();
+      expect(c.removed).toEqual([1]);
+      expect(sent).toEqual(["Ecco il riepilogo."]);
 
-    const en = channel();
-    const turnEn = dispatcher(en.line).handleMessage("agent-1", "111", EN);
-    await promptCount(2);
-    prompts[1]!.compacting(true);
-    await settle();
-    expect(en.posts).toEqual([
-      {
-        id: 1,
-        text: "I'm taking stock of what we've said so far: give me a couple of minutes and I'll pick up again.",
-      },
-    ]);
-    prompts[1]!.end("Here it is.");
-    expect(await turnEn).toEqual({ ok: true });
-  });
+      const en = channel();
+      const turnEn = dispatcher(en.line).handleMessage("agent-1", "111", EN);
+      await promptCount(2);
+      prompts[1]!.compacting(true);
+      await settle();
+      expect(en.posts).toEqual([
+        {
+          id: 1,
+          text: "I'm taking stock of what we've said so far: give me a couple of minutes and I'll pick up again.",
+        },
+      ]);
+      prompts[1]!.end("Here it is.");
+      expect(await turnEn).toEqual({ ok: true });
+
+      const summaryNotice = c.posts[0]?.text ?? "";
+      const notKilled = (await turn).ok === true;
+      const observed = `the turn is ${notKilled ? "not killed for silence" : "killed"} and the chat says «${summaryNotice}»`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("gives the line back to the step that follows the summary", async () => {
     const c = channel();

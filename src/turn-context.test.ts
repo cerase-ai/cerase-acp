@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { specTest } from "./test-support/spec-rows.js";
 import { cachedTimezoneIfFresh, fetchTurnContext, formatWallClock, resetTurnContextCache } from "./turn-context.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
@@ -115,16 +116,24 @@ describe("formatWallClock", () => {
     expect(formatWallClock(at, "Europe/Rome")).toContain("2026-08-17");
   });
 
-  it("names the zone's day of the week, not the machine's", () => {
+  specTest("ACP-TURN-032", "names the zone's day of the week, not the machine's", (row) => {
     // In Europe/Rome it is already Wednesday just after midnight; UTC, and the
     // machine the bridge runs on, is still on Tuesday. The weekday has to come
     // from the organization's zone, the same as the date and the time.
-    const at = Date.parse("2026-10-13T22:30:00Z");
+    const instant = row.quoted("when")[0]!;
+    const zone = row.quoted("when")[1]!;
+    const at = Date.parse(instant);
+    const clock = formatWallClock(at, zone);
 
-    expect(formatWallClock(at, "Europe/Rome")).toBe("mercoledì 2026-10-14 00:30 Europe/Rome");
+    expect(clock).toBe("mercoledì 2026-10-14 00:30 Europe/Rome");
+
+    const zoneWeekday = clock.startsWith("mercoledì");
+    const observed = `the clock reads "${clock}", naming the ${zoneWeekday ? "zone's" : "machine's"} weekday and not the ${zoneWeekday ? "machine's" : "zone's"}`;
+    expect(observed).toBe(row.expect);
   });
 
-  it("names every day of the week in Italian", () => {
+  specTest("ACP-TURN-033", "names every day of the week in Italian", (row) => {
+    const zone = row.quoted("when")[0]!;
     const week: Array<[string, string]> = [
       ["2026-10-12T12:00:00Z", "lunedì 2026-10-12 14:00 Europe/Rome"],
       ["2026-10-13T12:00:00Z", "martedì 2026-10-13 14:00 Europe/Rome"],
@@ -135,17 +144,37 @@ describe("formatWallClock", () => {
       ["2026-10-18T12:00:00Z", "domenica 2026-10-18 14:00 Europe/Rome"],
     ];
 
+    const clocks: string[] = [];
     for (const [at, expected] of week) {
-      expect(formatWallClock(Date.parse(at), "Europe/Rome")).toBe(expected);
+      const clock = formatWallClock(Date.parse(at), zone);
+      clocks.push(clock);
+      expect(clock).toBe(expected);
     }
+
+    const expectedWeekdays = week.map(([, expected]) => expected.split(" ")[0] ?? "");
+    const namesEach = clocks.every((clock, index) => clock.split(" ")[0] === expectedWeekdays[index]);
+    const lowercase = clocks.every((clock) => {
+      const weekday = clock.split(" ")[0] ?? "";
+      return weekday === weekday.toLowerCase();
+    });
+    const beforeTheRest = clocks.every((clock) => clock.startsWith(`${clock.split(" ")[0] ?? ""} `));
+    const observed = `each reads its ${namesEach && lowercase && beforeTheRest ? "Italian weekday name, lowercase," : "weekday name,"} before the date, the time and the zone`;
+    expect(observed).toBe(row.expect);
   });
 
   it("falls back to UTC rather than failing a turn on a bad zone name", () => {
     expect(formatWallClock(Date.parse("2026-08-16T10:00:00Z"), "Not/AZone")).toContain("UTC");
   });
 
-  it("names the UTC weekday too when it falls back on a bad zone name", () => {
-    expect(formatWallClock(Date.parse("2026-08-16T10:00:00Z"), "Not/AZone")).toBe("domenica 2026-08-16 10:00 UTC");
+  specTest("ACP-TURN-034", "names the UTC weekday too when it falls back on a bad zone name", (row) => {
+    const zone = row.quoted("when")[0]!;
+    const clock = formatWallClock(Date.parse("2026-08-16T10:00:00Z"), zone);
+    expect(clock).toBe("domenica 2026-08-16 10:00 UTC");
+
+    const zoneLabel = clock.split(" ").at(-1) ?? "";
+    const utc = zoneLabel === "UTC";
+    const observed = `the clock reads the ${utc ? "UTC" : "wrong"} weekday, the ${utc ? "UTC" : "wrong"} date and time, and "${zoneLabel}" instead of failing the turn`;
+    expect(observed).toBe(row.expect);
   });
 });
 

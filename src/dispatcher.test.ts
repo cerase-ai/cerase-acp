@@ -15,6 +15,7 @@ import { isInternalSummaryBlock } from "./egress-redaction.js";
 import { emptyTurnRetryPrompt } from "./empty-turn.js";
 import { SessionManager, type SessionUpdateHandler } from "./session-manager.js";
 import { StreamBuffer } from "./stream-buffer.js";
+import { specTest } from "./test-support/spec-rows.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -256,45 +257,77 @@ describe("a turn that ends with nothing to say", () => {
     expect(sent.join("").replace(/ ⏎$/u, "")).toBe("Ecco il riepilogo.");
   });
 
-  it("is tried again up to three times, sending nothing to the person until the last try ends", async () => {
-    const { d, sent, calls } = harness(4);
-    await d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?");
-    expect(calls.map((c) => c.text.startsWith("[reply_result: empty]"))).toEqual([false, true, true, true]);
-    expect(calls.map((c) => c.sentBefore)).toEqual([0, 0, 0, 0]);
-    expect(sent.join("")).toBe("Ecco il riepilogo.");
-  });
+  specTest(
+    "ACP-TURN-001",
+    "is tried again up to three times, sending nothing to the person until the last try ends",
+    async (row) => {
+      const { d, sent, calls } = harness(4);
+      await d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?");
+      expect(calls.map((c) => c.text.startsWith("[reply_result: empty]"))).toEqual([false, true, true, true]);
+      expect(calls.map((c) => c.sentBefore)).toEqual([0, 0, 0, 0]);
+      expect(sent.join("")).toBe("Ecco il riepilogo.");
 
-  it("reaches the person only on a fourth empty answer, worded as taking longer than expected", async () => {
-    const { d, sent, calls } = harness(null);
-    await expect(d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?")).resolves.toEqual({
-      ok: true,
-    });
-    expect(calls).toHaveLength(4);
-    expect(sent).toEqual([pickSlowMessage("mi fai il riepilogo della riunione?")]);
-    expect(sent[0]).not.toBe(pickEmptyMessage("mi fai il riepilogo della riunione?"));
-    expect(sent[0]).toMatch(/più del previsto/);
-    expect(sent[0]).not.toMatch(/errore|riformula/i);
-  });
+      const retries = calls.length - 1;
+      const retriedWithNote = calls.slice(1).every((c) => c.text.startsWith("[reply_result: empty]"));
+      const sentMeanwhile = calls.some((c) => c.sentBefore > 0);
+      const observed = `the same session is asked again at once, ${retries === 3 ? "up to three times" : `${retries} times`}, ${retriedWithNote ? "with a note telling the assistant to answer" : "without a note telling the assistant to answer"}, and ${sentMeanwhile ? "something is sent to the person meanwhile" : "nothing is sent to the person meanwhile"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
-  it("is not tried again when it failed: a provider error keeps the runtime's own backoff", async () => {
-    const sent: string[] = [];
-    let prompts = 0;
-    const d = new Dispatcher({
-      config: makeConfig("x"),
-      sessionManager: makeStubMgr(async () => {
-        prompts += 1;
-        throw new Error("429 rate limited by the provider");
-      }),
-      turnMeta: new TurnMetaTracker(),
-      resolveSendTarget: () => async (text) => {
-        sent.push(text);
-        return { ok: true };
-      },
-    });
-    await d.handleMessage("doc-qa", "111", "ciao, come va?");
-    expect(prompts).toBe(1);
-    expect(sent).toEqual([pickErrorMessage("ciao, come va?")]);
-  });
+  specTest(
+    "ACP-TURN-002",
+    "reaches the person only on a fourth empty answer, worded as taking longer than expected",
+    async (row) => {
+      const { d, sent, calls } = harness(null);
+      await expect(d.handleMessage("doc-qa", "111", "mi fai il riepilogo della riunione?")).resolves.toEqual({
+        ok: true,
+      });
+      expect(calls).toHaveLength(4);
+      expect(sent).toEqual([pickSlowMessage("mi fai il riepilogo della riunione?")]);
+      expect(sent[0]).not.toBe(pickEmptyMessage("mi fai il riepilogo della riunione?"));
+      expect(sent[0]).toMatch(/più del previsto/);
+      expect(sent[0]).not.toMatch(/errore|riformula/i);
+
+      const slow = sent[0] === pickSlowMessage("mi fai il riepilogo della riunione?");
+      const longer = /più del previsto/.test(sent[0] ?? "");
+      const observed =
+        slow && longer
+          ? "the person receives a message worded as the answer taking longer than expected"
+          : "the person receives a different message";
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest(
+    "ACP-TURN-003",
+    "is not tried again when it failed: a provider error keeps the runtime's own backoff",
+    async (row) => {
+      const sent: string[] = [];
+      let prompts = 0;
+      const d = new Dispatcher({
+        config: makeConfig("x"),
+        sessionManager: makeStubMgr(async () => {
+          prompts += 1;
+          throw new Error("429 rate limited by the provider");
+        }),
+        turnMeta: new TurnMetaTracker(),
+        resolveSendTarget: () => async (text) => {
+          sent.push(text);
+          return { ok: true };
+        },
+      });
+      await d.handleMessage("doc-qa", "111", "ciao, come va?");
+      expect(prompts).toBe(1);
+      expect(sent).toEqual([pickErrorMessage("ciao, come va?")]);
+
+      const notRetried = prompts === 1;
+      const observed = notRetried
+        ? "it is not tried again by the bridge and keeps the runtime's own backoff"
+        : "it is tried again by the bridge";
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("ends as a failed turn when a try fails, with the error notice and nothing else", async () => {
     const sent: string[] = [];

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AdapterSupervisor, type SupervisedAdapter } from "./adapter-supervisor.js";
 import type { CredentialRejection } from "./credential-rejection.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 /** A discord.js error as it reaches the supervisor: an Error carrying a `code`. */
 function discordError(code: string, message: string): Error & { code: string } {
@@ -195,24 +196,35 @@ describe("AdapterSupervisor", () => {
 
   // discord.js raises this refusal as a bare Error with no code, which is how
   // it reached this loop and was retried every backoff with nobody told.
-  it("treats a privileged intent the application lacks as terminal, in the shape discord.js raises it", async () => {
-    const terminal: CredentialRejection[] = [];
-    const sup = new AdapterSupervisor({
-      baseDelayMs: 1000,
-      random: () => 1,
-      onRecovered: () => {},
-      onTerminal: (_agentId, rejection) => terminal.push(rejection),
-    });
-    const adapter = makeAlwaysFailing("agent-11", new Error("Used disallowed intents"));
+  specTest(
+    "ACP-TURN-016",
+    "treats a privileged intent the application lacks as terminal, in the shape discord.js raises it",
+    async (row) => {
+      const message = row.quoted("when")[0]!;
+      const terminal: CredentialRejection[] = [];
+      const sup = new AdapterSupervisor({
+        baseDelayMs: 1000,
+        random: () => 1,
+        onRecovered: () => {},
+        onTerminal: (_agentId, rejection) => terminal.push(rejection),
+      });
+      const adapter = makeAlwaysFailing("agent-11", new Error(message));
 
-    sup.scheduleRetry(adapter);
-    await vi.advanceTimersByTimeAsync(1000); // retry 1 reaches the gateway and is refused
-    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
-    expect(adapter.startCalls).toBe(1);
-    expect(sup.isScheduled("agent-11")).toBe(false);
-    expect(terminal.map((r) => r.code)).toEqual(["DisallowedIntents"]);
-    expect(sup.terminalFailure("agent-11")?.credential).toBe("bot_token");
-  });
+      sup.scheduleRetry(adapter);
+      await vi.advanceTimersByTimeAsync(1000); // retry 1 reaches the gateway and is refused
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(adapter.startCalls).toBe(1);
+      expect(sup.isScheduled("agent-11")).toBe(false);
+      expect(terminal.map((r) => r.code)).toEqual(["DisallowedIntents"]);
+      expect(sup.terminalFailure("agent-11")?.credential).toBe("bot_token");
+
+      const stopped = !sup.isScheduled("agent-11");
+      const startsOnce = adapter.startCalls === 1;
+      const oneFailure = terminal.length === 1;
+      const observed = `the supervisor ${stopped ? "stops" : "keeps"} retrying, starts the bot ${startsOnce ? "once" : `${adapter.startCalls} times`} and records ${oneFailure ? "one" : String(terminal.length)} terminal failure${oneFailure ? "" : "s"} "${terminal[0]?.code ?? ""}"`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("keeps retrying a transport failure, which can stop being true on its own", async () => {
     const terminal: string[] = [];

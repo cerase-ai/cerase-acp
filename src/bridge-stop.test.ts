@@ -27,6 +27,7 @@ import {
 } from "./pending-messages.js";
 import { keptMessagesExpiredNotice, restartOutlastedNotice, updateInterruptedNotice } from "./platform-notices.js";
 import { SessionManager } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -397,37 +398,53 @@ describe("the messages a stopping bridge keeps", () => {
   // instruction left while the box was down for hours can be one the person
   // no longer wants carried out. An older one is taken out of the file without
   // reaching the assistant, and its person is told, once for all of theirs.
-  it("are answered only within the age limit, and the person is told once about the older ones", async () => {
-    const store = new PendingMessages(dir);
-    const old = Date.now() - KEPT_MESSAGE_MAX_AGE_MS - 60_000;
-    message(store, "111", MESSAGE, old);
-    message(store, "111", SECOND, old + 1_000);
-    message(store, "111", THIRD, Date.now() - KEPT_MESSAGE_MAX_AGE_MS + 60_000);
-    message(store, "222", MESSAGE, old);
-    const events: string[] = [];
-    const count = await replayPending(
-      store,
-      "doc-qa",
-      async (m) => {
-        events.push(`answer ${m.userId} ${m.text}`);
-        return { ok: true };
-      },
-      () => false,
-      async (userId, expired) => {
-        events.push(`tell ${userId} ${expired.map((m) => m.text).join(" | ")}`);
-      },
-    );
+  specTest(
+    "ACP-TURN-010",
+    "are answered only within the age limit, and the person is told once about the older ones",
+    async (row) => {
+      const store = new PendingMessages(dir);
+      const old = Date.now() - KEPT_MESSAGE_MAX_AGE_MS - 60_000;
+      message(store, "111", MESSAGE, old);
+      message(store, "111", SECOND, old + 1_000);
+      message(store, "111", THIRD, Date.now() - KEPT_MESSAGE_MAX_AGE_MS + 60_000);
+      message(store, "222", MESSAGE, old);
+      const events: string[] = [];
+      const count = await replayPending(
+        store,
+        "doc-qa",
+        async (m) => {
+          events.push(`answer ${m.userId} ${m.text}`);
+          return { ok: true };
+        },
+        () => false,
+        async (userId, expired) => {
+          events.push(`tell ${userId} ${expired.map((m) => m.text).join(" | ")}`);
+        },
+      );
 
-    expect(count).toBe(1);
-    expect(events.filter((e) => e.startsWith("answer"))).toEqual([`answer 111 ${THIRD}`]);
-    // Told before the recent message is answered, so the chat reads in order.
-    expect(events.filter((e) => e.includes(" 111 "))).toEqual([
-      `tell 111 ${MESSAGE} | ${SECOND}`,
-      `answer 111 ${THIRD}`,
-    ]);
-    expect(events).toContain(`tell 222 ${MESSAGE}`);
-    expect(store.list()).toEqual([]);
-  });
+      expect(count).toBe(1);
+      expect(events.filter((e) => e.startsWith("answer"))).toEqual([`answer 111 ${THIRD}`]);
+      // Told before the recent message is answered, so the chat reads in order.
+      expect(events.filter((e) => e.includes(" 111 "))).toEqual([
+        `tell 111 ${MESSAGE} | ${SECOND}`,
+        `answer 111 ${THIRD}`,
+      ]);
+      expect(events).toContain(`tell 222 ${MESSAGE}`);
+      expect(store.list()).toEqual([]);
+
+      const answered = events.filter((e) => e.startsWith("answer"));
+      const told = events.filter((e) => e.startsWith("tell"));
+      const onlyRecentAnswered = count === 1 && answered.length === 1 && answered[0] === `answer 111 ${THIRD}`;
+      const toldOnceAboutOlder =
+        told.filter((e) => e === `tell 111 ${MESSAGE} | ${SECOND}`).length === 1 &&
+        told.filter((e) => e === `tell 222 ${MESSAGE}`).length === 1;
+      const observed =
+        onlyRecentAnswered && toldOnceAboutOlder
+          ? "only the recent one is answered and the person is told once about the older one"
+          : "the older and the recent ones are not handled as the age limit says";
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("are not told about twice when an old one cannot be taken out of the file", async () => {
     const store = new PendingMessages(dir);

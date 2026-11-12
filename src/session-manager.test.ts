@@ -18,6 +18,7 @@ import {
   TurnWatchdogError,
 } from "./session-manager.js";
 import { CERASE_SESSION_MODE } from "./session-mode.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -925,14 +926,24 @@ describe("per-turn watchdog", () => {
   // and at 180 s of silence the watchdog killed it twice in a row and the person
   // was told the turn had failed. While a tool call is open only the ceiling
   // ends the turn; once it closes, silence counts again.
-  it("does not kill a turn whose open tool call runs silently past the silence budget", async () => {
-    m = new SessionManager(makeConfig({ toolCallMs: 50, reply: "done" }));
-    const result = await m.prompt("doc-qa", "111", "ciao", (update) => {
-      // Twenty minutes of silence while the tool call is open.
-      if (update.sessionUpdate === "tool_call") vi.advanceTimersByTime(20 * 60_000);
-    });
-    expect(result).toMatchObject({ stopReason: "end_turn" });
-  });
+  specTest(
+    "ACP-TURN-004",
+    "does not kill a turn whose open tool call runs silently past the silence budget",
+    async (row) => {
+      m = new SessionManager(makeConfig({ toolCallMs: 50, reply: "done" }));
+      const result = await m.prompt("doc-qa", "111", "ciao", (update) => {
+        // Twenty minutes of silence while the tool call is open.
+        if (update.sessionUpdate === "tool_call") vi.advanceTimersByTime(20 * 60_000);
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+
+      const endedNormally = result.stopReason === "end_turn";
+      const observed = endedNormally
+        ? "the turn is not killed at the silence budget and ends normally"
+        : "the turn is killed at the silence budget";
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("still ends a turn whose tool call never closes, at the ceiling", async () => {
     m = new SessionManager(makeConfig({ toolCallNeverEnds: true }));
@@ -1024,7 +1035,7 @@ describe("the turns queued behind a session the bridge ends", () => {
       (err: unknown) => err,
     );
 
-  it("are refused unsent when the watchdog ends the turn ahead of them", async () => {
+  specTest("ACP-TURN-006", "are refused unsent when the watchdog ends the turn ahead of them", async (row) => {
     const { cfg, sent } = hungChild(500);
     m = new SessionManager(cfg);
     const first = settle(m.prompt("doc-qa", "111", "one"));
@@ -1033,9 +1044,16 @@ describe("the turns queued behind a session the bridge ends", () => {
     // Past the silence limit, so the watchdog ends the first turn.
     await vi.advanceTimersByTimeAsync(190_000);
 
-    expect(await first).toBeInstanceOf(TurnWatchdogError);
-    expect(await second).toBeInstanceOf(SessionRestartError);
+    const firstResult = await first;
+    const secondResult = await second;
+    expect(firstResult).toBeInstanceOf(TurnWatchdogError);
+    expect(secondResult).toBeInstanceOf(SessionRestartError);
     expect(sent()).toEqual(["one"]);
+
+    const refused = secondResult instanceof SessionRestartError;
+    const unsent = sent().length === 1 && sent()[0] === "one";
+    const observed = refused && unsent ? "the queued turn is refused unsent" : "the queued turn is sent";
+    expect(observed).toBe(row.expect);
   });
 
   it("are refused unsent when a reload ends the session", async () => {
