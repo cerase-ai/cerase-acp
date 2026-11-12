@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chunkForDiscord, DELIVERY_FAILURE_MARKER, SEND_RETRY_DELAYS_MS, SendQueue } from "./send-queue.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 describe("chunkForDiscord", () => {
   it("returns one chunk when text fits", () => {
@@ -57,12 +58,20 @@ describe("chunkForDiscord", () => {
       expect(chunks.some((c) => c.includes(marker))).toBe(true);
     };
 
-    it("moves a cut that would fall inside the marker to before it", () => {
-      const marker = "[[attach: outputs/riepilogo-ottobre.pdf]]";
+    specTest("ACP-REPLY-018", "moves a cut that would fall inside the marker to before it", (row) => {
+      const marker = row.quoted("when")[0]!;
+      const tail = row.quoted("when")[1]!;
       const words = "parola ".repeat(283);
-      const chunks = chunkForDiscord(`${words}${marker} e altro.`);
+      const chunks = chunkForDiscord(`${words}${marker}${tail}`);
       whole(chunks, marker);
-      expect(chunks).toEqual([`${words.trimEnd()} ⏎`, `${marker} e altro.`]);
+      expect(chunks).toEqual([`${words.trimEnd()} ⏎`, `${marker}${tail}`]);
+
+      const firstContinues = chunks[0]?.endsWith(" ⏎") ?? false;
+      const cutBefore =
+        chunks[0] !== undefined && !chunks[0].includes("[[") && chunks.findIndex((c) => c.includes(marker)) > 0;
+      const markerInSecond = chunks[1]?.includes(marker) ?? false;
+      const observed = `the cut falls ${cutBefore ? "before" : "after"} the marker, the first chunk ${firstContinues ? "ends with the continuation mark" : "does not end with the continuation mark"} and the marker ${markerInSecond ? "stays whole in the second" : "is split across chunks"}`;
+      expect(observed).toBe(row.expect);
     });
 
     it("does not take a sentence end inside the marker's path for a place to cut", () => {

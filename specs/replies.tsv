@@ -1,0 +1,26 @@
+id	when	expect	file	dec
+ACP-REPLY-001	the assistant writes the text "<cerase-ok>" alone before a tool call and the person is on a chat channel	the text never reaches the chat and the final answer does	src/tool-call-markup.ts	
+ACP-REPLY-002	the assistant's whole answer is the tag "<cerase-ok>"	the answer is held back and the assistant is prompted again in the same turn, so the person receives only the later answer	src/dispatcher.ts	
+ACP-REPLY-003	an answer is held back and the person sends the message "??" while the turn runs	the retry of the held-back answer runs before the message "??"	src/dispatcher.ts	
+ACP-REPLY-004	the assistant writes DeepSeek's call markers, or a call spelled as elements named after the tool, after a sentence	the rule catches the call and keeps the sentence before it	src/tool-call-markup.ts	
+ACP-REPLY-005	a person's message links to a Google Sheet "https://docs.google.com/spreadsheets/d/1Qx7Fv2LmN9pRtS4uWyZ0aBcDeFgHiJkLmNoPqRsTuVw/edit"	the assistant gets a note for it alone naming the kind spreadsheet, the id "1Qx7Fv2LmN9pRtS4uWyZ0aBcDeFgHiJkLmNoPqRsTuVw" outside any URL, and the recipe that opens it with its arguments	src/google-links.ts	
+ACP-REPLY-006	a person's message links to a Drive folder	the note names the recipe that lists it, the one that uploads into it by its bare id, and says no tool takes the link	src/google-links.ts	
+ACP-REPLY-007	a message with a Google link is sent to the assistant, and another message has none	the note goes ahead of the person's words for the first and no note is added for the second	src/google-links.ts	
+ACP-REPLY-008	a turn started by a note through the internal server ends while the chat provider refuses the assistant's bot, and the connection is then restored	the reply that was kept is sent once, after the heads-up, when the connection is back	src/kept-replies.ts	
+ACP-REPLY-009	a turn ends while the chat client reports itself disconnected and later reports connected, with no restart	the kept reply is sent once, as soon as the client is connected	src/kept-replies.ts	
+ACP-REPLY-010	the bridge stops with a reply kept and a new bridge starts when the channel works again	the new bridge sends the kept reply once	src/kept-replies.ts	
+ACP-REPLY-011	a reply is refused by a channel that is up	the reply is not kept and is not tried again	src/kept-replies.ts	
+ACP-REPLY-012	two replies are kept for one person while the channel is down and the channel returns	they are sent once each, oldest first	src/kept-replies.ts	
+ACP-REPLY-013	the channel goes down again while a kept reply is being sent	the reply goes back first in line and the delivery stops	src/kept-replies.ts	
+ACP-REPLY-014	the assistant behind a kept reply is removed	its kept replies are forgotten	src/kept-replies.ts	
+ACP-REPLY-015	a streamed reply of more than 200 characters ends with "[[attach: outputs/riepilogo-ottobre." and "pdf]]" arriving in the next push	the stream buffer is not cut at the dot of the extension and sends the sentence and its marker as one piece	src/stream-buffer.ts	
+ACP-REPLY-016	a streamed reply ends in "Eccolo: [[attach: outputs/riepilogo-otto" and the buffer is idle for 600 ms before "bre.pdf]]" arrives	nothing is sent while the marker is open and the words and the whole marker leave as one piece once it closes	src/stream-buffer.ts	
+ACP-REPLY-017	a reply of 200 characters or more ends on "[[attach: outputs/riepilogo-ottobre.pdf]]" through the bridge	the person receives the file riepilogo-ottobre.pdf and the text of the reply, and no text shows a marker	src/bridge.ts	
+ACP-REPLY-018	Discord splits a reply of 283 words followed by "[[attach: outputs/riepilogo-ottobre.pdf]]" and " e altro."	the cut falls before the marker, the first chunk ends with the continuation mark and the marker stays whole in the second	src/send-queue.ts	
+ACP-REPLY-019	Google Chat splits an answer of over 30,000 bytes that holds "[[attach: outputs/riepilogo-ottobre.pdf]]"	every part holds as many "[[" as "]]" and one part holds the whole marker	src/workspace-chat-format.ts	
+ACP-REPLY-020	a marker names a path outside the workspace, "/etc/passwd"	the marker is removed, the person is told in Italian that passwd could not be retrieved, no file is read, and the turn does not close as delivered	src/bridge.ts	
+ACP-REPLY-021	a reply ends with a marker left open, "[[attach: outputs/report."	the marker is removed, the person is told in Italian the file could not be retrieved, and the turn does not close as delivered	src/bridge.ts	
+ACP-REPLY-022	a reply is one paragraph of prose that ends on "[[attach: outputs/prova-cerase-allegato.pdf]]" on the default streaming	the person receives one message carrying prova-cerase-allegato.pdf with the paragraph as its caption, and no text message before it	src/bridge.ts	
+ACP-REPLY-023	a reply is one sentence followed by a marker for a file "foto.png"	the sentence travels as the caption of the single upload and no text message is sent	src/bridge.ts	
+ACP-REPLY-024	a reply's text is longer than the channel's caption limit and ends on its marker	the text is sent first and the file is sent bare	src/bridge.ts	
+ACP-REPLY-025	a reply ends on its marker while the channel is down	the reply is kept with its file and is sent captioned when the channel returns	src/bridge.ts	

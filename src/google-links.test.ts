@@ -9,6 +9,7 @@ import type { BridgeConfig } from "./config.js";
 import { Dispatcher } from "./dispatcher.js";
 import { googleFileLinks, googleLinksNote } from "./google-links.js";
 import { SessionManager } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
@@ -75,19 +76,39 @@ describe("the Google files a message links to", () => {
 });
 
 describe("what the assistant is told", () => {
-  it("for the Sheet of 6 October: the kind, the id outside any URL, and the recipe with its arguments", () => {
-    const note = googleLinksNote(`Ciao Matilde, mi dai un'occhiata a questo foglio? ${SHEET_LINK}`);
-    expect(note).toBe(
-      [
-        "[links_result: google files]",
-        "The message below links to a Google file, and a link can reach you masked as a <url_…> placeholder, so here is what it names. Open it with the gateway's call_recipe, and never fetch a Google address as a web page, which Google refuses.",
-        `1. a Google Sheets spreadsheet, id ${SHEET_ID}: call_recipe with recipe_name "google-workspace.getGoogleSheetContent" and args {"spreadsheetId":"${SHEET_ID}","range":"A1:Z200"}, which reads the first sheet; call_recipe with recipe_name "google-workspace.getSpreadsheetInfo" and args {"spreadsheetId":"${SHEET_ID}"} names its sheets, for a range such as "<sheet name>!A1:Z200".`,
-        "These recipes are the Google Workspace connector's. If you have no such connector, say so to the person and ask them to send the file in the chat.",
-      ].join("\n\n"),
-    );
-    // Nowhere is the id inside a URL, which the masking would hide whole.
-    expect(note).not.toMatch(/https?:\/\//);
-  });
+  specTest(
+    "ACP-REPLY-005",
+    "for the Sheet of 6 October: the kind, the id outside any URL, and the recipe with its arguments",
+    (row) => {
+      const link = row.quoted("when")[0]!;
+      const note = googleLinksNote(link);
+
+      // The Sheet of 6 October, whose id is long enough to be a real Drive id.
+      const sheetNote = googleLinksNote(`Ciao Matilde, mi dai un'occhiata a questo foglio? ${SHEET_LINK}`);
+      expect(sheetNote).toBe(
+        [
+          "[links_result: google files]",
+          "The message below links to a Google file, and a link can reach you masked as a <url_…> placeholder, so here is what it names. Open it with the gateway's call_recipe, and never fetch a Google address as a web page, which Google refuses.",
+          `1. a Google Sheets spreadsheet, id ${SHEET_ID}: call_recipe with recipe_name "google-workspace.getGoogleSheetContent" and args {"spreadsheetId":"${SHEET_ID}","range":"A1:Z200"}, which reads the first sheet; call_recipe with recipe_name "google-workspace.getSpreadsheetInfo" and args {"spreadsheetId":"${SHEET_ID}"} names its sheets, for a range such as "<sheet name>!A1:Z200".`,
+          "These recipes are the Google Workspace connector's. If you have no such connector, say so to the person and ask them to send the file in the chat.",
+        ].join("\n\n"),
+      );
+      // Nowhere is the id inside a URL, which the masking would hide whole.
+      expect(sheetNote).not.toMatch(/https?:\/\//);
+
+      const [file] = googleFileLinks(link);
+      const noteText = note ?? "";
+      const idOutside = noteText.includes(file?.id ?? "") && !/https?:\/\//.test(noteText);
+      const recipe =
+        noteText.includes('recipe_name "google-workspace.getGoogleSheetContent"') &&
+        noteText.includes(`"spreadsheetId":"${file?.id ?? ""}"`);
+      const observed =
+        note === undefined
+          ? "the assistant gets no note"
+          : `the assistant gets a note for it alone naming the kind ${file?.kind ?? "unknown"}, the id "${file?.id ?? ""}" ${idOutside ? "outside any URL" : "inside a URL"}, and the recipe that opens it ${recipe ? "with its arguments" : "without its arguments"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("for several files: each one numbered, with the recipe and the argument that takes its id", () => {
     const note = googleLinksNote(
@@ -115,16 +136,27 @@ describe("what the assistant is told", () => {
 
   // A link passed where a tool takes the folder's id names no folder Drive
   // knows, so the upload into it fails.
-  it("for a Drive folder: the recipe that lists it, the one that uploads into it by its bare id, and that no tool takes the link", () => {
-    const folderId = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
-    const note = googleLinksNote(
-      `Mi carichi il verbale in questa cartella? https://drive.google.com/drive/folders/${folderId}?usp=sharing`,
-    )!;
-    expect(note).toContain(
-      `1. a Google Drive folder, id ${folderId}: call_recipe with recipe_name "google-workspace.listFolder" and args {"folderId":"${folderId}"}, which lists what it holds; call_recipe with recipe_name "google-workspace.uploadFile" and args {"localPath":"<the path of the file in your workspace>","parentFolderId":"${folderId}"} puts that file into it. Every Google Workspace tool takes the bare id, never the link.`,
-    );
-    expect(note).not.toMatch(/https?:\/\/|usp=sharing/);
-  });
+  specTest(
+    "ACP-REPLY-006",
+    "for a Drive folder: the recipe that lists it, the one that uploads into it by its bare id, and that no tool takes the link",
+    (row) => {
+      const folderId = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+      const note = googleLinksNote(
+        `Mi carichi il verbale in questa cartella? https://drive.google.com/drive/folders/${folderId}?usp=sharing`,
+      )!;
+      expect(note).toContain(
+        `1. a Google Drive folder, id ${folderId}: call_recipe with recipe_name "google-workspace.listFolder" and args {"folderId":"${folderId}"}, which lists what it holds; call_recipe with recipe_name "google-workspace.uploadFile" and args {"localPath":"<the path of the file in your workspace>","parentFolderId":"${folderId}"} puts that file into it. Every Google Workspace tool takes the bare id, never the link.`,
+      );
+      expect(note).not.toMatch(/https?:\/\/|usp=sharing/);
+
+      const lists = note.includes('recipe_name "google-workspace.listFolder"');
+      const uploads =
+        note.includes('recipe_name "google-workspace.uploadFile"') && note.includes(`"parentFolderId":"${folderId}"`);
+      const noToolTakesTheLink = note.includes("Every Google Workspace tool takes the bare id, never the link");
+      const observed = `the note ${lists ? "names the recipe that lists it" : "does not name the recipe that lists it"}, ${uploads ? "the one that uploads into it by its bare id" : "not the one that uploads into it by its bare id"}, and ${noToolTakesTheLink ? "says no tool takes the link" : "does not say no tool takes the link"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 });
 
 // Through the real dispatcher and session manager to the ACP child, which
@@ -167,19 +199,29 @@ describe("a message with a Google link, sent to the assistant", () => {
     return { d, echoed: () => sent.map((s) => s.replace(/ ⏎$/u, "")).join("") };
   }
 
-  it("carries the note for the assistant alone, ahead of the person's words, and none without a link", async () => {
-    const { d, echoed } = bridge();
-    const message = `Ciao Matilde, mi dai un'occhiata a questo foglio? ${SHEET_LINK}`;
-    expect(await d.handleMessage("doc-qa", "111", message)).toEqual({ ok: true });
-    const blocks = echoed().split("\n\neveryone: ");
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0]).toBe(`assistant: ${googleLinksNote(message)}`);
-    expect(blocks[1]).toMatch(/^\[turn_meta: /);
-    expect(blocks[1]!.endsWith(message)).toBe(true);
+  specTest(
+    "ACP-REPLY-007",
+    "carries the note for the assistant alone, ahead of the person's words, and none without a link",
+    async (row) => {
+      const { d, echoed } = bridge();
+      const message = `Ciao Matilde, mi dai un'occhiata a questo foglio? ${SHEET_LINK}`;
+      expect(await d.handleMessage("doc-qa", "111", message)).toEqual({ ok: true });
+      const blocks = echoed().split("\n\neveryone: ");
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]).toBe(`assistant: ${googleLinksNote(message)}`);
+      expect(blocks[1]).toMatch(/^\[turn_meta: /);
+      expect(blocks[1]!.endsWith(message)).toBe(true);
 
-    const plain = bridge();
-    expect(await plain.d.handleMessage("doc-qa", "111", "ciao, come stai?")).toEqual({ ok: true });
-    expect(plain.echoed()).toMatch(/^everyone: \[turn_meta: /);
-    expect(plain.echoed()).not.toContain("assistant:");
-  });
+      const plain = bridge();
+      expect(await plain.d.handleMessage("doc-qa", "111", "ciao, come stai?")).toEqual({ ok: true });
+      expect(plain.echoed()).toMatch(/^everyone: \[turn_meta: /);
+      expect(plain.echoed()).not.toContain("assistant:");
+
+      const noteAhead =
+        blocks[0] === `assistant: ${googleLinksNote(message)}` && (blocks[1]?.endsWith(message) ?? false);
+      const noNoteWithoutALink = !plain.echoed().includes("assistant:");
+      const observed = `the note goes ${noteAhead ? "ahead of" : "after"} the person's words for the first and ${noNoteWithoutALink ? "no note is added" : "a note is added"} for the second`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 });

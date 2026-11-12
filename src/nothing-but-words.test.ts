@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BridgeConfig } from "./config.js";
 import { Dispatcher } from "./dispatcher.js";
 import type { SessionManager, SessionUpdateHandler } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
 import {
   endsInToolCallMarkup,
   isElementCall,
@@ -59,12 +60,21 @@ describe("the rule: text that is not words for a person", () => {
     expect(withheldMarkupStart(OCTOBER_6.dsml)).toEqual({ at: 0, kind: "call" });
   });
 
-  it("catches a call spelled as elements named after the tool, and keeps the sentence before it", () => {
-    const found = withheldMarkupStart(OCTOBER_6.apologyWithACall);
-    expect(found?.kind).toBe("call");
-    expect(OCTOBER_6.apologyWithACall.slice(0, found!.at).trim()).toBe(APOLOGY);
-    expect(isElementCall(OCTOBER_6.apologyWithACall.slice(found!.at))).toBe(true);
-  });
+  specTest(
+    "ACP-REPLY-004",
+    "catches a call spelled as elements named after the tool, and keeps the sentence before it",
+    (row) => {
+      const found = withheldMarkupStart(OCTOBER_6.apologyWithACall);
+      expect(found?.kind).toBe("call");
+      expect(OCTOBER_6.apologyWithACall.slice(0, found!.at).trim()).toBe(APOLOGY);
+      expect(isElementCall(OCTOBER_6.apologyWithACall.slice(found!.at))).toBe(true);
+
+      const catches = found?.kind === "call";
+      const keeps = OCTOBER_6.apologyWithACall.slice(0, found!.at).trim() === APOLOGY;
+      const observed = `the rule ${catches ? "catches" : "does not catch"} the call and ${keeps ? "keeps" : "does not keep"} the sentence before it`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("holds from a line that opens with a tag of any name", () => {
     expect(toolCallMarkupHoldStart(OCTOBER_6.tagAlone)).toBe(0);
@@ -164,64 +174,94 @@ function dispatcher(mgr: SessionManager, sent: string[]) {
 const VOICE = "[Uploaded files: uploads/1791321425110-0/voice-message.ogg]";
 
 describe("the chat of 6 October, replayed", () => {
-  it("a tag written alone before a tool call never reaches the chat", async () => {
+  specTest("ACP-REPLY-001", "a tag written alone before a tool call never reaches the chat", async (row) => {
+    const tag = row.quoted("when")[0]!;
     const { mgr } = session(() => [
-      { text: OCTOBER_6.tagAlone, tool: "cerase-gateway_call_recipe" },
-      { text: OCTOBER_6.tagAlone, tool: "cerase-gateway_call_recipe" },
+      { text: tag, tool: "cerase-gateway_call_recipe" },
+      { text: tag, tool: "cerase-gateway_call_recipe" },
       { text: ANSWER },
     ]);
     const sent: string[] = [];
     const result = await dispatcher(mgr, sent).handleMessage("a", "u", VOICE);
-    expect(sent.join("\n")).not.toContain("cerase-ok");
+    expect(sent.join("\n")).not.toContain(tag);
     expect(sent.join("\n")).toContain(ANSWER);
     expect(result).toEqual({ ok: true });
+
+    const chat = sent.join("\n");
+    const tagReached = chat.includes(tag);
+    const answerReached = chat.includes(ANSWER);
+    const observed = `the text ${tagReached ? "reaches" : "never reaches"} the chat and the final answer ${answerReached ? "does" : "does not"}`;
+    expect(observed).toBe(row.expect);
   });
 
-  it("an answer that is only a tag is held back and the assistant answers again in the same turn", async () => {
-    const { mgr, prompts } = session((_p, n) => (n === 0 ? [{ text: OCTOBER_6.tagAlone }] : [{ text: ANSWER }]));
-    const sent: string[] = [];
-    await dispatcher(mgr, sent).handleMessage("a", "u", VOICE);
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]!.split("\n")[0]).toBe(MARKUP_RETRY_MARKER);
-    expect(sent).toEqual([ANSWER]);
-  });
+  specTest(
+    "ACP-REPLY-002",
+    "an answer that is only a tag is held back and the assistant answers again in the same turn",
+    async (row) => {
+      const tag = row.quoted("when")[0]!;
+      const { mgr, prompts } = session((_p, n) => (n === 0 ? [{ text: tag }] : [{ text: ANSWER }]));
+      const sent: string[] = [];
+      await dispatcher(mgr, sent).handleMessage("a", "u", VOICE);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]!.split("\n")[0]).toBe(MARKUP_RETRY_MARKER);
+      expect(sent).toEqual([ANSWER]);
 
-  it("an answer held back is answered again before the message the person sent while waiting", async () => {
-    // The turn ran for two and a half minutes; the person wrote «??» while it
-    // did. The try that answers them must come before «??», not after it.
-    let open: () => void = () => {};
-    const gate = new Promise<void>((r) => {
-      open = r;
-    });
-    const { mgr, prompts } = session(
-      (p, n) =>
-        n === 0
-          ? [
-              { text: OCTOBER_6.tagAlone, tool: "cerase-gateway_call_recipe" },
-              { tool: "edit" },
-              { text: OCTOBER_6.dsml },
-            ]
-          : p.startsWith(MARKUP_RETRY_MARKER)
-            ? [{ tool: "cerase-gateway_call_recipe" }, { text: ANSWER }]
-            : [{ text: "Sì, ci sono: il preventivo è pronto qui sopra." }],
-      gate,
-    );
-    const sent: string[] = [];
-    const d = dispatcher(mgr, sent);
-    const first = d.handleMessage("a", "u", VOICE);
-    await new Promise((r) => setImmediate(r));
-    const second = d.handleMessage("a", "u", "??");
-    await new Promise((r) => setImmediate(r));
-    open();
-    await Promise.all([first, second]);
-    expect(prompts.map((p) => (p.startsWith(MARKUP_RETRY_MARKER) ? "retry" : p.split("\n\n").pop()))).toEqual([
-      VOICE,
-      "retry",
-      "??",
-    ]);
-    expect(sent[0]).toBe(ANSWER);
-    expect(sent.join("\n")).not.toMatch(/DSML|cerase-ok|recipe_name/);
-  });
+      const heldBack = prompts.length === 2 && !sent.includes(tag);
+      const promptedAgain = prompts.length === 2 && prompts[1]!.startsWith(MARKUP_RETRY_MARKER);
+      const onlyLater = sent.length === 1 && sent[0] === ANSWER;
+      const observed = `the answer is ${heldBack ? "held back" : "not held back"} and the assistant is ${promptedAgain ? "prompted again in the same turn" : "not prompted again in the same turn"}, so the person receives ${onlyLater ? "only the later answer" : "more than the later answer"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest(
+    "ACP-REPLY-003",
+    "an answer held back is answered again before the message the person sent while waiting",
+    async (row) => {
+      const message = row.quoted("when")[0]!;
+      // The turn ran for two and a half minutes; the person wrote «??» while it
+      // did. The try that answers them must come before «??», not after it.
+      let open: () => void = () => {};
+      const gate = new Promise<void>((r) => {
+        open = r;
+      });
+      const { mgr, prompts } = session(
+        (p, n) =>
+          n === 0
+            ? [
+                { text: OCTOBER_6.tagAlone, tool: "cerase-gateway_call_recipe" },
+                { tool: "edit" },
+                { text: OCTOBER_6.dsml },
+              ]
+            : p.startsWith(MARKUP_RETRY_MARKER)
+              ? [{ tool: "cerase-gateway_call_recipe" }, { text: ANSWER }]
+              : [{ text: "Sì, ci sono: il preventivo è pronto qui sopra." }],
+        gate,
+      );
+      const sent: string[] = [];
+      const d = dispatcher(mgr, sent);
+      const first = d.handleMessage("a", "u", VOICE);
+      await new Promise((r) => setImmediate(r));
+      const second = d.handleMessage("a", "u", message);
+      await new Promise((r) => setImmediate(r));
+      open();
+      await Promise.all([first, second]);
+      expect(prompts.map((p) => (p.startsWith(MARKUP_RETRY_MARKER) ? "retry" : p.split("\n\n").pop()))).toEqual([
+        VOICE,
+        "retry",
+        message,
+      ]);
+      expect(sent[0]).toBe(ANSWER);
+      expect(sent.join("\n")).not.toMatch(/DSML|cerase-ok|recipe_name/);
+
+      const retryAt = prompts.findIndex((p) => p.startsWith(MARKUP_RETRY_MARKER));
+      const messageAt = prompts.findIndex((p) => p.split("\n\n").pop() === message);
+      const retryBefore = retryAt >= 0 && messageAt >= 0 && retryAt < messageAt;
+      const observedMessage = prompts[messageAt]?.split("\n\n").pop() ?? message;
+      const observed = `the retry of the held-back answer runs ${retryBefore ? "before" : "after"} the message "${observedMessage}"`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("an apology carrying the call again reaches the chat without the call, and the assistant tries again", async () => {
     const { mgr, prompts } = session((_p, n) =>

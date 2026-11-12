@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter, DeliveryResult } from "./chat-adapter.js";
 import { loadConfig } from "./config.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 const SECRET = "kept-reply-secret";
@@ -137,57 +138,85 @@ const turnEnded = () =>
 const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("a reply the channel cannot carry", { timeout: 40_000 }, () => {
-  it("is kept while the provider refuses the bot, and sent once, after the heads-up, when the connection is restored", async () => {
-    const channel: Channel = { delivered: [], refused: 0, loginWorks: false, up: false, refuseWhileUp: false };
-    await boot(channel);
-    await inject(true);
-    await turnEnded();
-    await settle();
-    expect(channel.delivered).toEqual([]);
+  specTest(
+    "ACP-REPLY-008",
+    "is kept while the provider refuses the bot, and sent once, after the heads-up, when the connection is restored",
+    async (row) => {
+      const channel: Channel = { delivered: [], refused: 0, loginWorks: false, up: false, refuseWhileUp: false };
+      await boot(channel);
+      await inject(true);
+      await turnEnded();
+      await settle();
+      expect(channel.delivered).toEqual([]);
 
-    // «Ripristina connessione» once the switch is on in the provider's portal:
-    // the console regenerates agents.yaml with the same content.
-    channel.loginWorks = true;
-    chmodSync(path, 0o640);
+      // «Ripristina connessione» once the switch is on in the provider's portal:
+      // the console regenerates agents.yaml with the same content.
+      channel.loginWorks = true;
+      chmodSync(path, 0o640);
 
-    await vi.waitFor(() => expect(channel.delivered).toEqual([HEADS_UP, REPLY]), { timeout: 10_000, interval: 25 });
-    await settle();
-    expect(channel.delivered).toEqual([HEADS_UP, REPLY]);
-  });
+      await vi.waitFor(() => expect(channel.delivered).toEqual([HEADS_UP, REPLY]), { timeout: 10_000, interval: 25 });
+      await settle();
+      expect(channel.delivered).toEqual([HEADS_UP, REPLY]);
 
-  it("is kept while the client reports itself disconnected, and sent once it reports connected, with no restart", async () => {
-    const channel: Channel = { delivered: [], refused: 0, loginWorks: true, up: false, refuseWhileUp: false };
-    await boot(channel);
-    channel.up = false;
-    await inject(false);
-    await turnEnded();
-    await settle();
-    expect(channel.delivered).toEqual([]);
+      const sent = channel.delivered;
+      const kept = sent.includes(REPLY);
+      const count = sent.filter((text) => text === REPLY).length;
+      const afterHeadsUp = sent.indexOf(HEADS_UP) >= 0 && sent.indexOf(HEADS_UP) < sent.indexOf(REPLY);
+      const observed = `the reply ${kept ? "that was kept is sent" : "was not kept"} ${count === 1 ? "once" : `${count} times`}, ${afterHeadsUp ? "after" : "before"} the heads-up, when the connection is back`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
-    channel.up = true;
-    await vi.waitFor(() => expect(channel.delivered).toEqual([REPLY]), { timeout: 10_000, interval: 25 });
-    await settle();
-    expect(channel.delivered).toEqual([REPLY]);
-  });
+  specTest(
+    "ACP-REPLY-009",
+    "is kept while the client reports itself disconnected, and sent once it reports connected, with no restart",
+    async (row) => {
+      const channel: Channel = { delivered: [], refused: 0, loginWorks: true, up: false, refuseWhileUp: false };
+      await boot(channel);
+      channel.up = false;
+      await inject(false);
+      await turnEnded();
+      await settle();
+      expect(channel.delivered).toEqual([]);
 
-  it("is sent by the next bridge when this one stops before the channel is back", async () => {
-    vi.stubEnv("CERASE_ACP_STATE_DIR", join(dir, "state"));
-    const before: Channel = { delivered: [], refused: 0, loginWorks: false, up: false, refuseWhileUp: false };
-    await boot(before);
-    await inject(false);
-    await turnEnded();
-    await handle?.shutdown();
-    handle = undefined;
-    expect(before.delivered).toEqual([]);
+      channel.up = true;
+      await vi.waitFor(() => expect(channel.delivered).toEqual([REPLY]), { timeout: 10_000, interval: 25 });
+      await settle();
+      expect(channel.delivered).toEqual([REPLY]);
 
-    const after: Channel = { delivered: [], refused: 0, loginWorks: true, up: false, refuseWhileUp: false };
-    await boot(after);
-    await vi.waitFor(() => expect(after.delivered).toEqual([REPLY]), { timeout: 10_000, interval: 25 });
-    await settle();
-    expect(after.delivered).toEqual([REPLY]);
-  });
+      const count = channel.delivered.filter((text) => text === REPLY).length;
+      const connected = channel.up;
+      const observed = `the kept reply is sent ${count === 1 ? "once" : `${count} times`}, ${connected ? "as soon as" : "before"} the client is connected`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
-  it("is not kept when the channel is up and refuses the message itself", async () => {
+  specTest(
+    "ACP-REPLY-010",
+    "is sent by the next bridge when this one stops before the channel is back",
+    async (row) => {
+      vi.stubEnv("CERASE_ACP_STATE_DIR", join(dir, "state"));
+      const before: Channel = { delivered: [], refused: 0, loginWorks: false, up: false, refuseWhileUp: false };
+      await boot(before);
+      await inject(false);
+      await turnEnded();
+      await handle?.shutdown();
+      handle = undefined;
+      expect(before.delivered).toEqual([]);
+
+      const after: Channel = { delivered: [], refused: 0, loginWorks: true, up: false, refuseWhileUp: false };
+      await boot(after);
+      await vi.waitFor(() => expect(after.delivered).toEqual([REPLY]), { timeout: 10_000, interval: 25 });
+      await settle();
+      expect(after.delivered).toEqual([REPLY]);
+
+      const count = after.delivered.filter((text) => text === REPLY).length;
+      const observed = `the new bridge sends the kept reply ${count === 1 ? "once" : `${count} times`}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest("ACP-REPLY-011", "is not kept when the channel is up and refuses the message itself", async (row) => {
     const channel: Channel = { delivered: [], refused: 0, loginWorks: true, up: false, refuseWhileUp: true };
     await boot(channel);
     await inject(false);
@@ -197,6 +226,11 @@ describe("a reply the channel cannot carry", { timeout: 40_000 }, () => {
     await settle();
     expect(channel.delivered).toEqual([]);
     expect(channel.refused).toBe(refused);
+
+    const notKept = channel.delivered.length === 0;
+    const notTriedAgain = channel.refused === refused;
+    const observed = `the reply is ${notKept ? "not kept" : "kept"} and is ${notTriedAgain ? "not tried again" : "tried again"}`;
+    expect(observed).toBe(row.expect);
   });
 });
 

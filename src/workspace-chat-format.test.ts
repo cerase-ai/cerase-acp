@@ -3,6 +3,7 @@
 // — and the assistant writes Markdown, so the reply is translated on the way out.
 
 import { describe, expect, it } from "vitest";
+import { specTest } from "./test-support/spec-rows.js";
 import { CHAT_MESSAGE_MAX_BYTES, splitForGoogleChat, toChatText } from "./workspace-chat-format.js";
 
 describe("toChatText", () => {
@@ -101,8 +102,8 @@ describe("splitForGoogleChat", () => {
     expect(splitForGoogleChat("")).toEqual([]);
   });
 
-  it("never cuts inside an attach marker, which neither half would be recognised as", () => {
-    const marker = "[[attach: outputs/riepilogo-ottobre.pdf]]";
+  specTest("ACP-REPLY-019", "never cuts inside an attach marker, which neither half would be recognised as", (row) => {
+    const marker = row.quoted("when")[0]!;
     const words = "parola ".repeat(4284);
     const answer = `${words}${marker} e altro.`;
     expect(bytes(answer)).toBeGreaterThan(30_000);
@@ -110,5 +111,10 @@ describe("splitForGoogleChat", () => {
     expect(parts.length).toBeGreaterThan(1);
     for (const part of parts) expect(part.split("[[").length).toBe(part.split("]]").length);
     expect(parts.some((p) => p.includes(marker))).toBe(true);
+
+    const balanced = parts.every((p) => p.split("[[").length === p.split("]]").length);
+    const oneWhole = parts.some((p) => p.includes(marker));
+    const observed = `every part holds ${balanced ? 'as many "[[" as "]]"' : 'a different number of "[[" and "]]"'} and ${oneWhole ? "one part holds the whole marker" : "no part holds the whole marker"}`;
+    expect(observed).toBe(row.expect);
   });
 });

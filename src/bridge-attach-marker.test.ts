@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, vi } from "vitest";
 
 // Every path the send path asks for is answered with a file, so what decides
 // whether one is sent is the marker alone. Mocked in this file, as in the
@@ -16,6 +16,7 @@ vi.mock("./workspace-files.js", () => ({
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
 import type { ChatAdapter } from "./chat-adapter.js";
 import type { BridgeConfig } from "./config.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
 
@@ -109,38 +110,77 @@ describe("a file arrives wherever its marker falls", () => {
     "Ho preparato il riepilogo di ottobre, con le ore per progetto, le note del cliente e le scadenze del mese, ";
   const HEAD = `${SENTENCE}${SENTENCE}come mi avevi chiesto per la riunione di lunedì.`;
 
-  it("sends the file of a reply of 200 characters or more that ends on its marker, and no marker as text", async () => {
-    // The buffer reaches 200 characters with the marker open, its last sentence
-    // end the dot before the extension: the shape of the replies that showed
-    // the marker as text.
-    expect(HEAD.length).toBeGreaterThan(200);
-    const run = await converse(
-      "marker-long",
-      [`${HEAD} [[attach: outputs/riepilogo-ottobre.`, "pdf]]"],
-      (h) => (handle = h),
-    );
-    await ended(run, "succeeded");
-    expect(files(run)).toEqual(["riepilogo-ottobre.pdf"]);
-    expect(texts(run)).toEqual([HEAD]);
-    for (const t of texts(run)) expect(t).not.toMatch(/\[\[|\]\]/);
-  });
+  specTest(
+    "ACP-REPLY-017",
+    "sends the file of a reply of 200 characters or more that ends on its marker, and no marker as text",
+    async (row) => {
+      const marker = row.quoted("when")[0]!;
+      const dot = marker.lastIndexOf(".");
+      const name = marker.slice(marker.lastIndexOf("/") + 1, -2);
+      // The buffer reaches 200 characters with the marker open, its last sentence
+      // end the dot before the extension: the shape of the replies that showed
+      // the marker as text.
+      expect(HEAD.length).toBeGreaterThan(200);
+      const run = await converse(
+        "marker-long",
+        [`${HEAD} ${marker.slice(0, dot + 1)}`, marker.slice(dot + 1)],
+        (h) => (handle = h),
+      );
+      await ended(run, "succeeded");
+      expect(files(run)).toEqual([name]);
+      expect(texts(run)).toEqual([HEAD]);
+      for (const t of texts(run)) expect(t).not.toMatch(/\[\[|\]\]/);
 
-  it("removes a marker naming a path outside the workspace, tells the person, and does not close the turn as delivered", async () => {
-    const run = await converse("marker-unsafe", ["Ecco il file. [[attach: /etc/passwd]]"], (h) => (handle = h));
-    await ended(run, "failed");
-    expect(reads).toEqual([]);
-    expect(files(run)).toEqual([]);
-    const chat = texts(run).join("\n");
-    expect(chat).toMatch(/Non sono riuscita a recuperare passwd/);
-    expect(chat).not.toMatch(/\[\[|\]\]|\/etc/);
-  });
+      const received = files(run)[0] ?? "";
+      const textArrived = texts(run).join("\n").includes(HEAD);
+      const noMarker = texts(run).every((t) => !/\[\[|\]\]/.test(t));
+      const observed = `the person receives the file ${received}${textArrived ? " and the text of the reply" : ""}, and ${noMarker ? "no text shows a marker" : "a text shows a marker"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
-  it("removes a marker left open, tells the person, and does not close the turn as delivered", async () => {
-    const run = await converse("marker-open", ["Ecco il report. [[attach: outputs/report."], (h) => (handle = h));
-    await ended(run, "failed");
-    expect(files(run)).toEqual([]);
-    const chat = texts(run).join("\n");
-    expect(chat).toMatch(/Non sono riuscita a recuperare report /);
-    expect(chat).not.toMatch(/\[\[|\]\]|outputs/);
-  });
+  specTest(
+    "ACP-REPLY-020",
+    "removes a marker naming a path outside the workspace, tells the person, and does not close the turn as delivered",
+    async (row) => {
+      const path = row.quoted("when")[0]!;
+      const run = await converse("marker-unsafe", [`Ecco il file. [[attach: ${path}]]`], (h) => (handle = h));
+      await ended(run, "failed");
+      expect(reads).toEqual([]);
+      expect(files(run)).toEqual([]);
+      const chat = texts(run).join("\n");
+      expect(chat).toMatch(/Non sono riuscita a recuperare passwd/);
+      expect(chat).not.toMatch(/\[\[|\]\]|\/etc/);
+
+      const status = await run.status();
+      const markerRemoved = !/\[\[|\]\]/.test(chat) && !chat.includes(path);
+      const toldName = /Non sono riuscita a recuperare (\S+)/.exec(chat)?.[1] ?? "";
+      const told = toldName !== "";
+      const noFileRead = reads.length === 0;
+      const notDelivered = status.failed === 1 && status.succeeded === 0;
+      const observed = `the marker is ${markerRemoved ? "removed" : "kept"}, the person is ${told ? `told in Italian that ${toldName} could not be retrieved` : "not told the file could not be retrieved"}, ${noFileRead ? "no file is read" : "a file is read"}, and the turn ${notDelivered ? "does not close as delivered" : "closes as delivered"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest(
+    "ACP-REPLY-021",
+    "removes a marker left open, tells the person, and does not close the turn as delivered",
+    async (row) => {
+      const marker = row.quoted("when")[0]!;
+      const run = await converse("marker-open", [`Ecco il report. ${marker}`], (h) => (handle = h));
+      await ended(run, "failed");
+      expect(files(run)).toEqual([]);
+      const chat = texts(run).join("\n");
+      expect(chat).toMatch(/Non sono riuscita a recuperare report /);
+      expect(chat).not.toMatch(/\[\[|\]\]|outputs/);
+
+      const status = await run.status();
+      const markerRemoved = !/\[\[|\]\]|outputs/.test(chat);
+      const told = /Non sono riuscita a recuperare/.test(chat);
+      const notDelivered = status.failed === 1 && status.succeeded === 0;
+      const observed = `the marker is ${markerRemoved ? "removed" : "kept"}, the person is ${told ? "told in Italian the file could not be retrieved" : "not told the file could not be retrieved"}, and the turn ${notDelivered ? "does not close as delivered" : "closes as delivered"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 });

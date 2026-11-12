@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MARKER_HOLD_MS, StreamBuffer } from "./stream-buffer.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 describe("StreamBuffer", () => {
   beforeEach(() => {
@@ -295,17 +296,26 @@ describe("StreamBuffer and the attach marker", () => {
     for (const p of pieces) expect(p.split("[[").length).toBe(p.split("]]").length);
   };
 
-  it("cuts before a marker that arrives open, not at the dot of its extension", () => {
+  specTest("ACP-REPLY-015", "cuts before a marker that arrives open, not at the dot of its extension", (row) => {
+    const markerStart = row.quoted("when")[0]!;
+    const markerEnd = row.quoted("when")[1]!;
+    const marker = `${markerStart}${markerEnd}`;
     expect(HEAD.length).toBeGreaterThan(200);
     const out: string[] = [];
     const buf = new StreamBuffer({ onFlush: (s) => out.push(s) });
-    buf.push(`${HEAD} [[attach: outputs/riepilogo-ottobre.`);
-    buf.push("pdf]]");
+    buf.push(`${HEAD} ${markerStart}`);
+    buf.push(markerEnd);
     buf.end();
     whole(out);
     // The sentence and the marker are one piece: no cut, and no split between
     // the words and the file they introduce.
-    expect(out).toEqual([`${HEAD} ${MARKER}`]);
+    expect(out).toEqual([`${HEAD} ${marker}`]);
+
+    const balanced = out.every((p) => p.split("[[").length === p.split("]]").length);
+    const notCut = balanced && out.length === 1;
+    const onePiece = out.length === 1 && out[0] === `${HEAD} ${marker}`;
+    const observed = `the stream buffer is ${notCut ? "not cut at the dot of the extension" : "cut at the dot of the extension"} and sends the sentence and its marker ${onePiece ? "as one piece" : "as separate pieces"}`;
+    expect(observed).toBe(row.expect);
   });
 
   it("does not cut at a dot inside a marker that is already closed", () => {
@@ -317,19 +327,30 @@ describe("StreamBuffer and the attach marker", () => {
     expect(out).toEqual([`${HEAD} ${MARKER} e la versione modificabile`]);
   });
 
-  it("keeps a marker still being written out of the idle flush, and sends it whole once it closes", () => {
-    const out: string[] = [];
-    const buf = new StreamBuffer({ onFlush: (s) => out.push(s), idleMs: 500 });
-    buf.push("Eccolo: [[attach: outputs/riepilogo-otto");
-    vi.advanceTimersByTime(600);
-    // The words before the open marker wait for the marker's tail, so the two
-    // can leave as one piece.
-    expect(out).toEqual([]);
-    buf.push("bre.pdf]]");
-    buf.end();
-    whole(out);
-    expect(out).toEqual([`Eccolo: ${MARKER}`]);
-  });
+  specTest(
+    "ACP-REPLY-016",
+    "keeps a marker still being written out of the idle flush, and sends it whole once it closes",
+    (row) => {
+      const opening = row.quoted("when")[0]!;
+      const closing = row.quoted("when")[1]!;
+      const out: string[] = [];
+      const buf = new StreamBuffer({ onFlush: (s) => out.push(s), idleMs: 500 });
+      buf.push(opening);
+      vi.advanceTimersByTime(600);
+      // The words before the open marker wait for the marker's tail, so the two
+      // can leave as one piece.
+      expect(out).toEqual([]);
+      const nothingWhileOpen = out.length === 0;
+      buf.push(closing);
+      buf.end();
+      whole(out);
+      expect(out).toEqual([`${opening}${closing}`]);
+
+      const onePiece = out.length === 1 && out[0] === `${opening}${closing}`;
+      const observed = `${nothingWhileOpen ? "nothing is sent while the marker is open" : "something is sent while the marker is open"} and the words and the whole marker ${onePiece ? "leave as one piece" : "leave in pieces"} once it closes`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("keeps a marker still being written out of the size cap", () => {
     const out: string[] = [];
