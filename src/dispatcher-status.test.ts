@@ -11,8 +11,10 @@ import type { BridgeConfig } from "./config.js";
 import { Dispatcher, type DispatcherDeps } from "./dispatcher.js";
 import type { PromptOptions, SessionManager, SessionUpdateHandler } from "./session-manager.js";
 import { messageStatusLine } from "./status-line.js";
+import { specTest } from "./test-support/spec-rows.js";
 import type { ToolStep } from "./tool-step.js";
 import { TurnMetaTracker } from "./turn-meta.js";
+import { STATUS_EDIT_EVERY_MS } from "./turn-status.js";
 
 type Update = Parameters<SessionUpdateHandler>[0];
 
@@ -265,29 +267,39 @@ describe("the status line of a turn", () => {
     vi.useRealTimers();
   });
 
-  it("is posted once a tool has run four seconds, with the catalogue's sentence for that step", async () => {
-    const c = channel();
-    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
-    await promptCount(1);
-    prompts[0]!.update(toolCall("c1", "cerase-gateway_call_recipe"));
-    prompts[0]!.update(running("c1", SHEET));
-    await elapse(3_999);
-    expect(c.posts).toEqual([]);
-    expect(asked).toEqual([]);
+  specTest(
+    "ACP-NOTICE-006",
+    "is posted once a tool has run four seconds, with the catalogue's sentence for that step",
+    async (row) => {
+      const seconds = Number(row.quoted("when")[0]!);
+      const c = channel();
+      const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+      await promptCount(1);
+      prompts[0]!.update(toolCall("c1", "cerase-gateway_call_recipe"));
+      prompts[0]!.update(running("c1", SHEET));
+      await elapse(seconds * 1000 - 1);
+      expect(c.posts).toEqual([]);
+      expect(asked).toEqual([]);
 
-    await elapse(1);
-    expect(c.posts).toEqual([{ id: 1, text: "Sto leggendo un foglio Google…" }]);
-    // The name the tool started with and the input it was given, in the
-    // conversation's language.
-    expect(asked).toEqual([{ tool: "cerase-gateway_call_recipe", input: SHEET, lang: "it" }]);
+      await elapse(1);
+      expect(c.posts).toEqual([{ id: 1, text: "Sto leggendo un foglio Google…" }]);
+      // The name the tool started with and the input it was given, in the
+      // conversation's language.
+      expect(asked).toEqual([{ tool: "cerase-gateway_call_recipe", input: SHEET, lang: "it" }]);
 
-    prompts[0]!.update(done("c1"));
-    prompts[0]!.end("Ecco il riepilogo del foglio.");
-    expect(await turn).toEqual({ ok: true });
-    await settle();
-    expect(c.posts).toHaveLength(1);
-    expect(sent).toEqual(["Ecco il riepilogo del foglio."]);
-  });
+      prompts[0]!.update(done("c1"));
+      prompts[0]!.end("Ecco il riepilogo del foglio.");
+      expect(await turn).toEqual({ ok: true });
+      await settle();
+      expect(c.posts).toHaveLength(1);
+      expect(sent).toEqual(["Ecco il riepilogo del foglio."]);
+
+      const oneStatus = c.posts.length === 1;
+      const catalogueSentence = c.posts[0]?.text === SENTENCES["google-workspace.getGoogleSheetContent"];
+      const observed = `${oneStatus ? "one" : String(c.posts.length)} status ${oneStatus ? "message appears" : "messages appear"} with ${catalogueSentence ? "the catalogue's sentence for that step" : "a different sentence"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("is edited in place by each tool started after it, and deleted when the turn ends", async () => {
     const c = channel();
@@ -331,40 +343,54 @@ describe("the status line of a turn", () => {
     expect(c.removed).toEqual([1]);
   });
 
-  it("is edited at most once every 1.5 seconds, and shows the latest step when steps come faster", async () => {
-    const c = channel();
-    const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
-    await promptCount(1);
-    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
-    await elapse(4_000);
-    expect(c.posts).toHaveLength(1);
+  specTest(
+    "ACP-NOTICE-008",
+    "is edited at most once every 1.5 seconds, and shows the latest step when steps come faster",
+    async (row) => {
+      const c = channel();
+      const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
+      await promptCount(1);
+      prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+      await elapse(4_000);
+      expect(c.posts).toHaveLength(1);
 
-    prompts[0]!.update(done("c1"));
-    prompts[0]!.update(toolCall("c2", "edit", { filePath: "a.md" }));
-    prompts[0]!.update(done("c2"));
-    prompts[0]!.update(toolCall("c3", "cerase-gateway_call_recipe", SHEET));
-    prompts[0]!.update(done("c3"));
-    prompts[0]!.update(toolCall("c4", "cerase-gateway_call_recipe", { recipe_name: "google-workspace.readGoogleDoc" }));
-    await elapse(1_499);
-    expect(c.edits).toEqual([]);
-    await elapse(1);
-    expect(c.edits).toEqual([{ id: 1, text: "Sto leggendo un documento Google…" }]);
+      prompts[0]!.update(done("c1"));
+      prompts[0]!.update(toolCall("c2", "edit", { filePath: "a.md" }));
+      prompts[0]!.update(done("c2"));
+      prompts[0]!.update(toolCall("c3", "cerase-gateway_call_recipe", SHEET));
+      prompts[0]!.update(done("c3"));
+      prompts[0]!.update(
+        toolCall("c4", "cerase-gateway_call_recipe", { recipe_name: "google-workspace.readGoogleDoc" }),
+      );
+      await elapse(STATUS_EDIT_EVERY_MS - 1);
+      expect(c.edits).toEqual([]);
+      await elapse(1);
+      expect(c.edits).toEqual([{ id: 1, text: "Sto leggendo un documento Google…" }]);
 
-    prompts[0]!.update(done("c4"));
-    prompts[0]!.end("Ecco.");
-    await turn;
-    await settle();
-    expect(c.edits).toHaveLength(1);
-    expect(c.removed).toEqual([1]);
-  });
+      prompts[0]!.update(done("c4"));
+      prompts[0]!.end("Ecco.");
+      await turn;
+      await settle();
+      expect(c.edits).toHaveLength(1);
+      expect(c.removed).toEqual([1]);
 
-  it("is never posted for a turn whose tools all finish within four seconds", async () => {
+      const [edit] = c.edits;
+      const sameMessage = edit?.id === c.posts[0]?.id;
+      const latest = edit?.text === SENTENCES["google-workspace.readGoogleDoc"];
+      const deleted = c.removed.includes(1);
+      const observed = `${sameMessage ? "the same message" : "a different message"} is edited in place ${c.edits.length <= 1 ? "at most once" : "more than once"} every ${STATUS_EDIT_EVERY_MS / 1000} seconds and ${latest ? "shows the latest step" : "does not show the latest step"}, and it is ${deleted ? "deleted" : "not deleted"} when the turn ends`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest("ACP-NOTICE-007", "is never posted for a turn whose tools all finish within four seconds", async (row) => {
+    const seconds = Number(row.quoted("when")[0]!);
     const c = channel();
     const turn = dispatcher(c.line).handleMessage("agent-1", "111", IT);
     await promptCount(1);
     for (const id of ["c1", "c2", "c3"]) {
       prompts[0]!.update(toolCall(id, "webfetch", { url: "https://example.com" }));
-      await elapse(3_900);
+      await elapse(seconds * 1000 - 100);
       prompts[0]!.update(done(id));
     }
     await elapse(10_000);
@@ -382,15 +408,19 @@ describe("the status line of a turn", () => {
     const second = dispatcher(next.line).handleMessage("agent-1", "111", IT);
     await promptCount(2);
     prompts[1]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
-    await elapse(3_900);
+    await elapse(seconds * 1000 - 100);
     prompts[1]!.update(done("c1"));
     prompts[1]!.update(toolCall("c2", "edit", { filePath: "a.md" }));
-    await elapse(4_000);
+    await elapse(seconds * 1000);
     expect(next.attempts).toEqual(["Sto modificando un file…"]);
     expect(asked.map((s) => s.tool)).toEqual(["edit"]);
     prompts[1]!.update(done("c2"));
     prompts[1]!.end("Ecco.");
     await second;
+
+    const noStatus = c.attempts.length === 0 && c.posts.length === 0;
+    const observed = noStatus ? "no status message is posted for the turn" : "a status message is posted for the turn";
+    expect(observed).toBe(row.expect);
   });
 
   it("carries no word the assistant writes, and the assistant's text neither puts it up nor takes it down", async () => {
@@ -431,29 +461,37 @@ describe("the status line of a turn", () => {
     }
   });
 
-  it("says the bridge's plain sentence, in the conversation's language, when the catalogue cannot answer", async () => {
-    catalogue = async () => {
-      throw new Error("tool-step: HTTP 500");
-    };
-    const it1 = channel();
-    const d1 = dispatcher(it1.line);
-    const turnIt = d1.handleMessage("agent-1", "111", IT);
-    await promptCount(1);
-    prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
-    await elapse(4_000);
-    expect(it1.posts).toEqual([{ id: 1, text: "Sto lavorando…" }]);
-    prompts[0]!.end("Ecco.");
-    expect(await turnIt).toEqual({ ok: true });
+  specTest(
+    "ACP-NOTICE-011",
+    "says the bridge's plain sentence, in the conversation's language, when the catalogue cannot answer",
+    async (row) => {
+      catalogue = async () => {
+        throw new Error("tool-step: HTTP 500");
+      };
+      const it1 = channel();
+      const d1 = dispatcher(it1.line);
+      const turnIt = d1.handleMessage("agent-1", "111", IT);
+      await promptCount(1);
+      prompts[0]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+      await elapse(4_000);
+      expect(it1.posts).toEqual([{ id: 1, text: "Sto lavorando…" }]);
+      prompts[0]!.end("Ecco.");
+      expect(await turnIt).toEqual({ ok: true });
 
-    const en = channel();
-    const turnEn = dispatcher(en.line, { toolStep: undefined }).handleMessage("agent-1", "111", EN);
-    await promptCount(2);
-    prompts[1]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
-    await elapse(4_000);
-    expect(en.posts).toEqual([{ id: 1, text: "Working on it…" }]);
-    prompts[1]!.end("Here it is.");
-    expect(await turnEn).toEqual({ ok: true });
-  });
+      const en = channel();
+      const turnEn = dispatcher(en.line, { toolStep: undefined }).handleMessage("agent-1", "111", EN);
+      await promptCount(2);
+      prompts[1]!.update(toolCall("c1", "webfetch", { url: "https://example.com" }));
+      await elapse(4_000);
+      expect(en.posts).toEqual([{ id: 1, text: "Working on it…" }]);
+      prompts[1]!.end("Here it is.");
+      expect(await turnEn).toEqual({ ok: true });
+
+      const plain = it1.posts[0]?.text === "Sto lavorando…" && en.posts[0]?.text === "Working on it…";
+      const observed = `the line carries ${plain ? "the bridge's plain sentence" : "something else"} in the conversation's language`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("is asked of the channel at every turn, and a channel that keeps none gets nothing but the answer", async () => {
     const askedOf: string[][] = [];

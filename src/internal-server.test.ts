@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { headsUpText, type InternalServer, startInternalServer } from "./internal-server.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 // A turn result the fake may carry beyond DeliveryResult: `retryable` is the
 // dispatcher's signal that the turn is worth one more try, which the endpoint
@@ -920,8 +921,8 @@ describe("internal-server /internal/notice/close", () => {
     });
     return fake.calls;
   };
-  const close = (body: unknown, auth = `Bearer ${SECRET}`) =>
-    fetch(`http://127.0.0.1:${server.port()}/internal/notice/close`, {
+  const close = (body: unknown, auth = `Bearer ${SECRET}`, path = "/internal/notice/close") =>
+    fetch(`http://127.0.0.1:${server.port()}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: auth },
       body: JSON.stringify(body),
@@ -931,45 +932,76 @@ describe("internal-server /internal/notice/close", () => {
     await server.close();
   });
 
-  it("closes the notice through the agent's channel", async () => {
+  specTest("ACP-NOTICE-013", "closes the notice through the agent's channel", async (row) => {
+    const path = row.quoted("when")[0]!;
+    const words = row.quoted("when")[1]!;
     const calls = await start();
-    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "✓ Approvata" });
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: words }, undefined, path);
     expect(resp.status).toBe(200);
-    expect(await resp.json()).toEqual({ status: "closed" });
-    expect(calls.closed).toEqual([["a1", REF, NOTICE, "✓ Approvata"]]);
+    const answer = (await resp.json()) as { status?: string };
+    expect(answer).toEqual({ status: "closed" });
+    expect(calls.closed).toEqual([["a1", REF, NOTICE, words]]);
+
+    const closed = answer.status === "closed";
+    const askedWithWords = calls.closed[0]?.[3] === words;
+    const observed = `the answer is ${resp.status} ${closed ? "closed" : "not closed"} and the assistant's channel is ${askedWithWords ? "asked to close that notice with those words" : "not asked to close that notice with those words"}`;
+    expect(observed).toBe(row.expect);
   });
 
-  it("401s without the shared secret", async () => {
+  specTest("ACP-NOTICE-014", "401s without the shared secret", async (row) => {
+    const path = row.quoted("when")[0]!;
+    const auth = row.quoted("when")[1]!;
     const calls = await start();
-    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "✓ Approvata" }, "Bearer wrong");
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "✓ Approvata" }, auth, path);
     expect(resp.status).toBe(401);
     expect(calls.closed).toHaveLength(0);
+
+    const observed = `the answer is ${resp.status} and ${calls.closed.length === 0 ? "nothing is closed" : "a notice is closed"}`;
+    expect(observed).toBe(row.expect);
   });
 
-  it("400s a reference, a notice or words that are not one", async () => {
+  specTest("ACP-NOTICE-015", "400s a reference, a notice or words that are not one", async (row) => {
+    const path = row.quoted("when")[0]!;
     const calls = await start();
+    const statuses: number[] = [];
     for (const body of [
       { agent_id: "a1", ref: { channel: "telegram", chatId: "42" }, notice: NOTICE, closed: "Scaduta" },
       { agent_id: "a1", ref: REF, notice: { body: "x" }, closed: "Scaduta" },
       { agent_id: "a1", ref: REF, notice: NOTICE, closed: "" },
       { ref: REF, notice: NOTICE, closed: "Scaduta" },
     ]) {
-      expect((await close(body)).status).toBe(400);
+      const status = (await close(body, undefined, path)).status;
+      statuses.push(status);
+      expect(status).toBe(400);
     }
     expect(calls.closed).toHaveLength(0);
+
+    const all400 = statuses.every((status) => status === 400);
+    const observed = `the answer is ${all400 ? statuses[0] : "not only 400"} and ${calls.closed.length === 0 ? "nothing is closed" : "a notice is closed"}`;
+    expect(observed).toBe(row.expect);
   });
 
-  it("409s when the agent's channel cannot close a notice", async () => {
+  specTest("ACP-NOTICE-016", "409s when the agent's channel cannot close a notice", async (row) => {
+    const path = row.quoted("when")[0]!;
     await start(null);
-    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "Scaduta" });
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "Scaduta" }, undefined, path);
     expect(resp.status).toBe(409);
+
+    const observed = `the answer is ${resp.status}`;
+    expect(observed).toBe(row.expect);
   });
 
-  it("502s with the channel's reason when the edit is refused", async () => {
-    await start({ ok: false, error: new Error("Bad Request: message to edit not found") });
-    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "Scaduta" });
+  specTest("ACP-NOTICE-017", "502s with the channel's reason when the edit is refused", async (row) => {
+    const path = row.quoted("when")[0]!;
+    const reason = row.quoted("when")[1]!;
+    await start({ ok: false, error: new Error(reason) });
+    const resp = await close({ agent_id: "a1", ref: REF, notice: NOTICE, closed: "Scaduta" }, undefined, path);
     expect(resp.status).toBe(502);
-    expect(((await resp.json()) as { error: string }).error).toContain("message to edit not found");
+    const body = (await resp.json()) as { error: string };
+    expect(body.error).toContain(reason);
+
+    const observed = `the answer is ${resp.status} ${body.error.includes(reason) ? "carrying the channel's reason" : "without the channel's reason"}`;
+    expect(observed).toBe(row.expect);
   });
 });
 

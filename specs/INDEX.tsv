@@ -1,2 +1,3 @@
 path	scope	rows
 specs/fixtures.tsv	src/test-support/spec-rows.test.ts	1
+specs/notices.tsv	src/platform-notice.ts;src/dispatcher.ts;src/discord-adapter.ts;src/telegram-adapter.ts;src/tool-step.ts;src/internal-server.ts;src/workspace-chat-adapter.ts	22

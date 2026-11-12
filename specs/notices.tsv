@@ -1,0 +1,23 @@
+id	when	expect	file	dec
+ACP-NOTICE-001	a platform notice titled "Approval requested" with a body and an approval link, sent to a Discord chat	the bridge sends one embed signed by the platform with the link as a button	src/platform-notice.ts	DEC-39
+ACP-NOTICE-002	the same notice sent to a Slack channel	the bridge sends blocks naming the platform, the title, the body in plain text and a link button	src/platform-notice.ts	DEC-39
+ACP-NOTICE-003	the same notice sent to a Telegram chat	the bridge sends a bold heading naming the platform and the title, the body quoted, and the link in a button	src/platform-notice.ts	DEC-39
+ACP-NOTICE-004	the same notice sent to a Google Chat space	the bridge sends a card with the title in the header, the platform as sender and a link button	src/platform-notice.ts	DEC-39
+ACP-NOTICE-005	a notice whose link Discord would refuse as a button	the address is spelled out in the body	src/platform-notice.ts	DEC-39
+ACP-NOTICE-006	a tool of the assistant has run for "4" seconds in a chat conversation	one status message appears with the catalogue's sentence for that step	src/dispatcher.ts	
+ACP-NOTICE-007	every tool of a turn finishes within "4" seconds	no status message is posted for the turn	src/dispatcher.ts	
+ACP-NOTICE-008	a status line is up and tools start after it in quick succession	the same message is edited in place at most once every 1.5 seconds and shows the latest step, and it is deleted when the turn ends	src/dispatcher.ts	
+ACP-NOTICE-009	the status line of a Discord direct message is put up	it is one silent message, edited in place and deleted at the end	src/discord-adapter.ts	
+ACP-NOTICE-010	the status line of a Telegram conversation is put up	it is one message sent without a notification, edited in place and deleted	src/telegram-adapter.ts	
+ACP-NOTICE-011	the catalogue cannot answer for a tool	the line carries the bridge's plain sentence in the conversation's language	src/tool-step.ts	
+ACP-NOTICE-012	a Discord notice quotes a sender as "Erin <erin@example.com>" in its text	the address reaches the chat with its closing bracket and no escape character, and only a quote sign opening a line is escaped	src/platform-notice.ts	
+ACP-NOTICE-013	a caller with the shared secret posts "/internal/notice/close" with an assistant, a notice reference, the notice and "✓ Approvata"	the answer is 200 closed and the assistant's channel is asked to close that notice with those words	src/internal-server.ts	
+ACP-NOTICE-014	"/internal/notice/close" is posted with "Bearer wrong"	the answer is 401 and nothing is closed	src/internal-server.ts	
+ACP-NOTICE-015	"/internal/notice/close" is posted with a reference lacking its message, a notice without a link or title, empty closing words, or no assistant	the answer is 400 and nothing is closed	src/internal-server.ts	
+ACP-NOTICE-016	"/internal/notice/close" is posted for an assistant whose channel cannot close a notice	the answer is 409	src/internal-server.ts	
+ACP-NOTICE-017	"/internal/notice/close" is posted and the channel refuses the edit with "Bad Request: message to edit not found"	the answer is 502 carrying the channel's reason	src/internal-server.ts	
+ACP-NOTICE-018	the bridge closes a Discord approval notice sent as several messages	the reference it returns names the last message, which carries the button	src/discord-adapter.ts	
+ACP-NOTICE-019	a Discord approval notice is closed with "✓ Approvata"	the edit sends only the components, with a button labelled "✓ Approvata" that carries the approval's link and is not disabled	src/platform-notice.ts	
+ACP-NOTICE-020	a Slack approval notice is closed with "✕ Rifiutata"	the message is updated in the direct message Slack named, and its button reads "✕ Rifiutata" and still opens the approval's link	src/platform-notice.ts	
+ACP-NOTICE-021	a Telegram approval notice is closed with "Scaduta"	the message is edited with an inline button labelled "Scaduta" that still opens the approval's link	src/platform-notice.ts	
+ACP-NOTICE-022	a Google Chat approval notice is closed with "✓ Approvata"	the card is replaced in place with its button reading "✓ Approvata", not disabled, and carrying the approval's link	src/workspace-chat-adapter.ts	

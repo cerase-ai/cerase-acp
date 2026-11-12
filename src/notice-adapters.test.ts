@@ -19,6 +19,7 @@ import {
   telegramClosedNoticeMessage,
   telegramNoticeMessages,
 } from "./platform-notice.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const sdk = vi.hoisted(() => ({
   discordSends: [] as unknown[],
@@ -304,45 +305,77 @@ describe("Telegram adapter: a notice is a quoted block under a bold heading, wit
 // is the one sendNotice answered, handed back by the control-plane, which may
 // be after a restart of the bridge.
 describe("closing a notice, on every channel", () => {
-  it("Discord: the last message of a long notice is the one named, since it carries the button", async () => {
-    const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
-    await adapter.start();
-    try {
-      const long = {
-        ...NOTICE,
-        body: Array.from({ length: 12 }, (_, i) => `- riga ${i}: ${"x".repeat(3000)}`).join("\n"),
-      };
-      const result = await adapter.sendNotice!("u1", long);
-      const sent = discordNoticeMessages(long).length;
-      expect(sent).toBeGreaterThan(1);
-      expect(result).toEqual({ ok: true, ref: { channel: "discord", channelId: "dm-1", messageId: `m-${sent}` } });
-    } finally {
-      await adapter.stop();
-    }
-  });
+  specTest(
+    "ACP-NOTICE-018",
+    "Discord: the last message of a long notice is the one named, since it carries the button",
+    async (row) => {
+      const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
+      await adapter.start();
+      try {
+        const long = {
+          ...NOTICE,
+          body: Array.from({ length: 12 }, (_, i) => `- riga ${i}: ${"x".repeat(3000)}`).join("\n"),
+        };
+        const result = await adapter.sendNotice!("u1", long);
+        const sent = discordNoticeMessages(long).length;
+        expect(sent).toBeGreaterThan(1);
+        expect(result).toEqual({ ok: true, ref: { channel: "discord", channelId: "dm-1", messageId: `m-${sent}` } });
 
-  it("Discord: the button reads how it ended and still opens the page, and only the components are edited", async () => {
-    const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
-    await adapter.start();
-    try {
-      expect(adapter.closeNotice).toBeTypeOf("function");
-      const ref: NoticeRef = { channel: "discord", channelId: "dm-9", messageId: "m-4" };
-      const result = await adapter.closeNotice!(ref, NOTICE, "✓ Approvata");
-      expect(result).toEqual({ ok: true });
-      expect(sdk.discordEdits).toEqual([
-        {
-          channelId: "dm-9",
-          messageId: "m-4",
-          payload: { components: discordClosedComponents(NOTICE, "✓ Approvata") },
-        },
-      ]);
-      const [button] = discordClosedComponents(NOTICE, "✓ Approvata")[0]!.components;
-      expect(button).toMatchObject({ label: "✓ Approvata", url: NOTICE.link!.url });
-      expect(button).not.toHaveProperty("disabled");
-    } finally {
-      await adapter.stop();
-    }
-  });
+        const messages = discordNoticeMessages(long);
+        const last = messages[messages.length - 1]!;
+        const namesLast =
+          result.ok && result.ref?.channel === "discord" && result.ref.messageId === `m-${messages.length}`;
+        const carriesButton = last.components.length > 0;
+        const observed = `the reference it returns ${namesLast ? "names the last message" : "does not name the last message"}, which ${carriesButton ? "carries the button" : "carries no button"}`;
+        expect(observed).toBe(row.expect);
+      } finally {
+        await adapter.stop();
+      }
+    },
+  );
+
+  specTest(
+    "ACP-NOTICE-019",
+    "Discord: the button reads how it ended and still opens the page, and only the components are edited",
+    async (row) => {
+      const closed = row.quoted("when")[0]!;
+      const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
+      await adapter.start();
+      try {
+        expect(adapter.closeNotice).toBeTypeOf("function");
+        const ref: NoticeRef = { channel: "discord", channelId: "dm-9", messageId: "m-4" };
+        const result = await adapter.closeNotice!(ref, NOTICE, closed);
+        expect(result).toEqual({ ok: true });
+        expect(sdk.discordEdits).toEqual([
+          {
+            channelId: "dm-9",
+            messageId: "m-4",
+            payload: { components: discordClosedComponents(NOTICE, closed) },
+          },
+        ]);
+        const [button] = discordClosedComponents(NOTICE, closed)[0]!.components;
+        expect(button).toMatchObject({ label: closed, url: NOTICE.link!.url });
+        expect(button).not.toHaveProperty("disabled");
+
+        const [edit] = sdk.discordEdits;
+        const payload = edit?.payload as {
+          components?: Array<{ components?: Array<{ label?: string; url?: string; disabled?: boolean }> }>;
+        };
+        const onlyComponents =
+          edit !== undefined &&
+          Object.keys(edit.payload as object).length === 1 &&
+          "components" in (edit.payload as object);
+        const drawnButton = payload.components?.[0]?.components?.[0];
+        const label = drawnButton?.label;
+        const opens = drawnButton?.url === NOTICE.link!.url;
+        const enabled = drawnButton?.disabled !== true;
+        const observed = `the edit sends ${onlyComponents ? "only the components" : "more than the components"}, with a button labelled ${label === closed ? `"${label}"` : "something else"} that ${opens ? "carries the approval's link" : "carries no link"} and is ${enabled ? "not disabled" : "disabled"}`;
+        expect(observed).toBe(row.expect);
+      } finally {
+        await adapter.stop();
+      }
+    },
+  );
 
   it("Discord: an edit Discord refuses, a deleted message, is returned and never thrown", async () => {
     const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), DISPATCHER);
@@ -360,46 +393,72 @@ describe("closing a notice, on every channel", () => {
     }
   });
 
-  it("Slack: the button reads how it ended and still opens the page, in the direct message Slack named", async () => {
-    const adapter = await createChatAdapter(
-      agent("slack", { bot_token: "xoxb-1", slack_app_token: "xapp-1" }),
-      DISPATCHER,
-    );
-    await adapter.start();
-    try {
-      expect(adapter.closeNotice).toBeTypeOf("function");
-      const ref: NoticeRef = { channel: "slack", channelId: "D0SLACKDM", ts: "1760000000.000001" };
-      const result = await adapter.closeNotice!(ref, NOTICE, "✕ Rifiutata");
-      expect(result).toEqual({ ok: true });
-      const { text, blocks } = slackNoticeMessage(NOTICE, "✕ Rifiutata");
-      expect(sdk.slackUpdates).toEqual([{ channel: "D0SLACKDM", ts: "1760000000.000001", text, blocks }]);
-      const actions = blocks.find((b) => b.type === "actions") as { elements: Array<Record<string, unknown>> };
-      expect(actions.elements[0]).toMatchObject({ text: { text: "✕ Rifiutata" }, url: NOTICE.link!.url });
-    } finally {
-      await adapter.stop();
-    }
-  });
+  specTest(
+    "ACP-NOTICE-020",
+    "Slack: the button reads how it ended and still opens the page, in the direct message Slack named",
+    async (row) => {
+      const closed = row.quoted("when")[0]!;
+      const adapter = await createChatAdapter(
+        agent("slack", { bot_token: "xoxb-1", slack_app_token: "xapp-1" }),
+        DISPATCHER,
+      );
+      await adapter.start();
+      try {
+        expect(adapter.closeNotice).toBeTypeOf("function");
+        const ref: NoticeRef = { channel: "slack", channelId: "D0SLACKDM", ts: "1760000000.000001" };
+        const result = await adapter.closeNotice!(ref, NOTICE, closed);
+        expect(result).toEqual({ ok: true });
+        const { text, blocks } = slackNoticeMessage(NOTICE, closed);
+        expect(sdk.slackUpdates).toEqual([{ channel: "D0SLACKDM", ts: "1760000000.000001", text, blocks }]);
+        const actions = blocks.find((b) => b.type === "actions") as { elements: Array<Record<string, unknown>> };
+        expect(actions.elements[0]).toMatchObject({ text: { text: closed }, url: NOTICE.link!.url });
 
-  it("Telegram: the button reads how it ended and still opens the page", async () => {
+        const update = sdk.slackUpdates[0];
+        const button = actions.elements[0] as { text?: { text?: string }; url?: string };
+        const inNamedDm = update?.channel === ref.channelId && update?.ts === ref.ts;
+        const reads = button.text?.text === closed;
+        const opens = button.url === NOTICE.link!.url;
+        const observed = `the message is ${inNamedDm ? "updated in the direct message Slack named" : "not updated in the direct message Slack named"}, and its button ${reads ? `reads "${button.text?.text}"` : "reads something else"} and ${opens ? "still opens the approval's link" : "opens no link"}`;
+        expect(observed).toBe(row.expect);
+      } finally {
+        await adapter.stop();
+      }
+    },
+  );
+
+  specTest("ACP-NOTICE-021", "Telegram: the button reads how it ended and still opens the page", async (row) => {
+    const closed = row.quoted("when")[0]!;
     const adapter = await createChatAdapter(agent("telegram", { bot_token: "123:abc" }), DISPATCHER);
     await adapter.start();
     try {
       expect(adapter.closeNotice).toBeTypeOf("function");
       const ref: NoticeRef = { channel: "telegram", chatId: "42", messageId: 701 };
-      const result = await adapter.closeNotice!(ref, NOTICE, "Scaduta");
+      const result = await adapter.closeNotice!(ref, NOTICE, closed);
       expect(result).toEqual({ ok: true });
       expect(sdk.telegramEdits).toEqual([
         {
           chatId: "42",
           messageId: 701,
-          text: telegramClosedNoticeMessage(NOTICE, "Scaduta"),
+          text: telegramClosedNoticeMessage(NOTICE, closed),
           extra: {
             parse_mode: "HTML",
             link_preview_options: { is_disabled: true },
-            reply_markup: { inline_keyboard: [[{ text: "Scaduta", url: NOTICE.link!.url }]] },
+            reply_markup: { inline_keyboard: [[{ text: closed, url: NOTICE.link!.url }]] },
           },
         },
       ]);
+
+      const [edit] = sdk.telegramEdits;
+      const button = (
+        edit?.extra as
+          | { reply_markup?: { inline_keyboard?: Array<Array<{ text?: string; url?: string }>> } }
+          | undefined
+      )?.reply_markup?.inline_keyboard?.[0]?.[0];
+      const inline = button !== undefined;
+      const labelled = button?.text === closed;
+      const opens = button?.url === NOTICE.link!.url;
+      const observed = `the message is edited with an ${inline ? "inline button" : "no inline button"} labelled ${labelled ? `"${button?.text}"` : "something else"} that ${opens ? "still opens the approval's link" : "opens no link"}`;
+      expect(observed).toBe(row.expect);
     } finally {
       await adapter.stop();
     }

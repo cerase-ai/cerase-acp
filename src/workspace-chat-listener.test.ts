@@ -53,6 +53,7 @@ import { Dispatcher, pickErrorMessage, pickRefusalMessage, pickSlowMessage, pick
 import { googleChatNoticeMessage } from "./platform-notice.js";
 import { directMessagesOnlyNotice } from "./platform-notices.js";
 import { type SessionManager, TurnWatchdogError } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
 import { detectLanguage, TurnMetaTracker } from "./turn-meta.js";
 import { WORKSPACE_CHAT_EVENT_PATH, workspaceChatListenerPort } from "./workspace-chat-adapter.js";
 import { EMITTENTE, svuotaCache, URL_CERTIFICATI } from "./workspace-chat-verify.js";
@@ -524,29 +525,51 @@ describe("workspace-chat: one Chat app per assistant", () => {
   // Once what it asked for is decided, the card is edited where it is: its
   // button reads how the notice ended and still opens the approval's page, and
   // only the card is replaced, which Google does only for a message this app posted.
-  it("a platform notice is closed in place: its button reads how it ended and still opens the page", async () => {
-    const notice = {
-      title: "Richiesta di approvazione",
-      body: "«Guido» chiede la tua approvazione per: invia una mail",
-      link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
-    };
-    const adapter = adapters.get("agent-2")!;
-    const sent = await adapter.sendNotice!("Anna.Bianchi@example.com", notice);
-    expect(adapter.closeNotice).toBeTypeOf("function");
-    const ref = sent.ok ? sent.ref : undefined;
-    expect(ref).toBeDefined();
-    const result = await adapter.closeNotice!(ref!, notice, "✓ Approvata");
-    expect(result).toEqual({ ok: true });
-    expect(google.edits).toEqual([
-      expect.objectContaining({
-        name: "spaces/dm-Anna-Bianchi-example-com/messages/1",
-        updateMask: "cardsV2",
-        cardsV2: googleChatNoticeMessage(notice, "✓ Approvata").cardsV2,
-      }),
-    ]);
-    expect(JSON.stringify(google.edits[0]!.cardsV2)).not.toContain('"disabled":true');
-    expect(JSON.stringify(google.edits[0]!.cardsV2)).toContain(notice.link.url);
-  });
+  specTest(
+    "ACP-NOTICE-022",
+    "a platform notice is closed in place: its button reads how it ended and still opens the page",
+    async (row) => {
+      const closed = row.quoted("when")[0]!;
+      const notice = {
+        title: "Richiesta di approvazione",
+        body: "«Guido» chiede la tua approvazione per: invia una mail",
+        link: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+      };
+      const adapter = adapters.get("agent-2")!;
+      const sent = await adapter.sendNotice!("Anna.Bianchi@example.com", notice);
+      expect(adapter.closeNotice).toBeTypeOf("function");
+      const ref = sent.ok ? sent.ref : undefined;
+      expect(ref).toBeDefined();
+      const result = await adapter.closeNotice!(ref!, notice, closed);
+      expect(result).toEqual({ ok: true });
+      expect(google.edits).toEqual([
+        expect.objectContaining({
+          name: "spaces/dm-Anna-Bianchi-example-com/messages/1",
+          updateMask: "cardsV2",
+          cardsV2: googleChatNoticeMessage(notice, closed).cardsV2,
+        }),
+      ]);
+      expect(JSON.stringify(google.edits[0]!.cardsV2)).not.toContain('"disabled":true');
+      expect(JSON.stringify(google.edits[0]!.cardsV2)).toContain(notice.link.url);
+
+      const edit = google.edits[0]!;
+      const cards = edit.cardsV2 as Array<{
+        card: { sections?: Array<{ widgets?: Array<Record<string, unknown>> }> };
+      }>;
+      const widgets = cards[0]?.card.sections?.[0]?.widgets ?? [];
+      const buttonList = widgets.find((widget) => "buttonList" in widget) as
+        | { buttonList: { buttons: Array<{ text?: string; onClick?: { openLink?: { url?: string } } }> } }
+        | undefined;
+      const button = buttonList?.buttonList.buttons[0];
+      const refName = ref?.channel === "workspace_chat" ? ref.name : undefined;
+      const inPlace = edit.name === refName && edit.updateMask === "cardsV2";
+      const reads = button?.text === closed;
+      const enabled = !JSON.stringify(edit.cardsV2).includes('"disabled":true');
+      const opens = button?.onClick?.openLink?.url === notice.link.url;
+      const observed = `the card is ${inPlace ? "replaced in place" : "not replaced in place"} with its button ${reads ? `reading "${button?.text}"` : "reading something else"}, ${enabled ? "not disabled" : "disabled"}, and ${opens ? "carrying the approval's link" : "carrying no link"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("a notice Google no longer has is returned as a failure, not thrown", async () => {
     const notice = {

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChatAdapter } from "./chat-adapter.js";
 import type { AgentConfig } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 const sdk = vi.hoisted(() => ({
   // Discord: what the bot did in the DM, in order.
@@ -165,57 +166,70 @@ describe("which channels keep a status line", () => {
 });
 
 describe("Discord: the status line", () => {
-  it("is one silent message in the DM, edited in place and deleted, and it leaves the typing indicator to the turn", async () => {
-    vi.useFakeTimers();
-    let endTurn: () => void = () => {};
-    const dispatcher = {
-      handleMessage: () =>
-        new Promise((resolve) => {
-          endTurn = () => resolve({ ok: true });
-        }),
-    } as unknown as Dispatcher;
-    const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), dispatcher);
-    await adapter.start();
-    const { __dm: dm } = (await import("discord.js")) as unknown as { __dm: object };
-    const handled = sdk.discordHandlers.get("messageCreate")!({
-      author: { bot: false, id: "u1" },
-      guildId: null,
-      content: "mi riassumi il foglio?",
-      attachments: new Map(),
-      channel: dm,
-      react: async () => {},
-    });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(sdk.discord).toEqual(["typing"]);
+  specTest(
+    "ACP-NOTICE-009",
+    "is one silent message in the DM, edited in place and deleted, and it leaves the typing indicator to the turn",
+    async (row) => {
+      vi.useFakeTimers();
+      let endTurn: () => void = () => {};
+      const dispatcher = {
+        handleMessage: () =>
+          new Promise((resolve) => {
+            endTurn = () => resolve({ ok: true });
+          }),
+      } as unknown as Dispatcher;
+      const adapter = await createChatAdapter(agent("discord", { bot_token: "x" }), dispatcher);
+      await adapter.start();
+      const { __dm: dm } = (await import("discord.js")) as unknown as { __dm: object };
+      const handled = sdk.discordHandlers.get("messageCreate")!({
+        author: { bot: false, id: "u1" },
+        guildId: null,
+        content: "mi riassumi il foglio?",
+        attachments: new Map(),
+        channel: dm,
+        react: async () => {},
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sdk.discord).toEqual(["typing"]);
 
-    const line = adapter.statusLine!("u1")!;
-    await line.show("Sto leggendo un foglio Google…");
-    await line.show("Sto modificando un file…");
-    expect(sdk.discord.slice(1)).toEqual([
-      `send#1 ${JSON.stringify({ content: "Sto leggendo un foglio Google…", flags: "SuppressNotifications" })}`,
-      "edit#1 Sto modificando un file…",
-    ]);
+      const line = adapter.statusLine!("u1")!;
+      await line.show("Sto leggendo un foglio Google…");
+      await line.show("Sto modificando un file…");
+      expect(sdk.discord.slice(1)).toEqual([
+        `send#1 ${JSON.stringify({ content: "Sto leggendo un foglio Google…", flags: "SuppressNotifications" })}`,
+        "edit#1 Sto modificando un file…",
+      ]);
 
-    // The keepalive goes on refreshing under the status message.
-    await vi.advanceTimersByTimeAsync(7_000);
-    expect(sdk.discord.at(-1)).toBe("typing");
+      // The keepalive goes on refreshing under the status message.
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(sdk.discord.at(-1)).toBe("typing");
 
-    // The answer is what takes the indicator down, as before.
-    expect(await adapter.makeSendTarget("u1")("Ecco il riepilogo.")).toEqual({ ok: true });
-    const answered = sdk.discord.length;
-    await vi.advanceTimersByTimeAsync(21_000);
-    expect(sdk.discord.length).toBe(answered);
+      // The answer is what takes the indicator down, as before.
+      expect(await adapter.makeSendTarget("u1")("Ecco il riepilogo.")).toEqual({ ok: true });
+      const answered = sdk.discord.length;
+      await vi.advanceTimersByTimeAsync(21_000);
+      expect(sdk.discord.length).toBe(answered);
 
-    await line.close();
-    expect(sdk.discord.slice(answered - 1)).toEqual(['send#2 "Ecco il riepilogo."', "delete#1"]);
-    endTurn();
-    await handled;
-    await adapter.stop();
-  });
+      await line.close();
+      expect(sdk.discord.slice(answered - 1)).toEqual(['send#2 "Ecco il riepilogo."', "delete#1"]);
+
+      const silentSends = sdk.discord.filter(
+        (entry) => entry.startsWith("send#") && entry.includes("SuppressNotifications"),
+      );
+      const editedInPlace = sdk.discord.some((entry) => entry.startsWith("edit#1 "));
+      const deletedAtEnd = sdk.discord.at(-1) === "delete#1";
+      const observed = `it is ${silentSends.length === 1 ? "one silent message" : "not one silent message"}, ${editedInPlace ? "edited in place" : "not edited in place"} and ${deletedAtEnd ? "deleted at the end" : "not deleted at the end"}`;
+      expect(observed).toBe(row.expect);
+
+      endTurn();
+      await handled;
+      await adapter.stop();
+    },
+  );
 });
 
 describe("Telegram: the status line", () => {
-  it("is one message sent without a notification, edited in place and deleted", async () => {
+  specTest("ACP-NOTICE-010", "is one message sent without a notification, edited in place and deleted", async (row) => {
     const adapter = await createChatAdapter(agent("telegram", { bot_token: "123:abc" }), NO_DISPATCHER);
     await adapter.start();
     const line = adapter.statusLine!("42")!;
@@ -227,6 +241,15 @@ describe("Telegram: the status line", () => {
       ["editMessageText", "42", 101, undefined, "Sto modificando un file…"],
       ["deleteMessage", "42", 101],
     ]);
+
+    const sends = sdk.telegram.filter((call) => call[0] === "sendMessage");
+    const sentWithoutNotification =
+      sends.length === 1 &&
+      (sends[0]![3] as { disable_notification?: boolean } | undefined)?.disable_notification === true;
+    const editedInPlace = sdk.telegram.some((call) => call[0] === "editMessageText");
+    const deleted = sdk.telegram.at(-1)?.[0] === "deleteMessage";
+    const observed = `it is ${sentWithoutNotification ? "one message sent without a notification" : "not one message sent without a notification"}, ${editedInPlace ? "edited in place" : "not edited in place"} and ${deleted ? "deleted" : "not deleted"}`;
+    expect(observed).toBe(row.expect);
     await adapter.stop();
   });
 

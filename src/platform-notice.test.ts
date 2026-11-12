@@ -14,6 +14,7 @@ import {
   telegramClosedNoticeMessage,
   telegramNoticeMessages,
 } from "./platform-notice.js";
+import { specTest } from "./test-support/spec-rows.js";
 
 // What a platform notice looks like on each channel. The adapters hand these
 // payloads to their SDKs unchanged, and their own tests check that they do.
@@ -76,50 +77,81 @@ describe("splitAtLines", () => {
 });
 
 describe("Discord: an embed signed by the platform, with a link button", () => {
-  it("draws the notice as one embed in the console's colour and the link as a button", () => {
-    const [message, ...more] = discordNoticeMessages(APPROVAL);
-    expect(more).toEqual([]);
-    expect(message!.embeds).toEqual([
-      {
-        author: { name: PLATFORM_SENDER },
-        title: "Richiesta di approvazione",
-        description:
-          "«Matilde» chiede la tua approvazione per: invia una mail\n- A: anna@example.com\nLa richiesta scade oggi alle 18:00.",
-        color: PLATFORM_COLOUR,
-      },
-    ]);
-    expect(message!.components).toEqual([
-      {
-        type: 1,
-        components: [{ type: 2, style: 5, label: "Approva o rifiuta", url: "https://acme.cerase.ai/a/Xy7Kq2" }],
-      },
-    ]);
-    expect(message!.allowedMentions).toEqual({ parse: [] });
-    // The address is in the button, not spelled out in the text.
-    expect(JSON.stringify(message!.embeds)).not.toContain("https://");
-  });
+  specTest(
+    "ACP-NOTICE-001",
+    "draws the notice as one embed in the console's colour and the link as a button",
+    (row) => {
+      const title = row.quoted("when")[0]!;
+      const notice: PlatformNotice = { ...APPROVAL, title };
+      const [message, ...more] = discordNoticeMessages(notice);
+      expect(more).toEqual([]);
+      expect(message!.embeds).toEqual([
+        {
+          author: { name: PLATFORM_SENDER },
+          title,
+          description:
+            "«Matilde» chiede la tua approvazione per: invia una mail\n- A: anna@example.com\nLa richiesta scade oggi alle 18:00.",
+          color: PLATFORM_COLOUR,
+        },
+      ]);
+      expect(message!.components).toEqual([
+        {
+          type: 1,
+          components: [{ type: 2, style: 5, label: "Approva o rifiuta", url: "https://acme.cerase.ai/a/Xy7Kq2" }],
+        },
+      ]);
+      expect(message!.allowedMentions).toEqual({ parse: [] });
+      // The address is in the button, not spelled out in the text.
+      expect(JSON.stringify(message!.embeds)).not.toContain("https://");
+
+      const button = message!.components[0]?.components[0];
+      const signedByPlatform = message!.embeds[0]?.author?.name === PLATFORM_SENDER;
+      const linkAsButton = button !== undefined && "url" in button && button.url === notice.link!.url;
+      const count = [message, ...more].length;
+      const observed = `the bridge sends ${count === 1 ? "one" : String(count)} embed ${signedByPlatform ? "signed by the platform" : "not signed by the platform"} with ${linkAsButton ? "the link as a button" : "no link button"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("makes a stranger's markdown literal, so a meeting's title cannot hide a link", () => {
     const [message] = discordNoticeMessages({ title: "T", body: "[premi](https://evil.example) **ora**\n# titolo" });
     expect(message!.embeds[0]!.description).toBe("\\[premi\\](https://evil.example) \\*\\*ora\\*\\*\n\\# titolo");
   });
 
-  it("leaves an address in angle brackets as written, and escapes a quote only where it starts a line", () => {
-    // A forwarded mail quotes its sender as «Erin <erin@example.com>». An
-    // escaped closing bracket made Discord draw «erin@example.com\» as a
-    // link with a stray backslash; only a «>» that opens a line is markdown.
-    const [message] = discordNoticeMessages({
-      title: "T",
-      body: "- Testo: Da: Erin <erin@example.com>\n> citazione",
-    });
-    expect(message!.embeds[0]!.description).toBe("- Testo: Da: Erin <erin@example.com>\n\\> citazione");
-  });
+  specTest(
+    "ACP-NOTICE-012",
+    "leaves an address in angle brackets as written, and escapes a quote only where it starts a line",
+    (row) => {
+      // A forwarded mail quotes its sender as «Erin <erin@example.com>». An
+      // escaped closing bracket made Discord draw «erin@example.com\» as a
+      // link with a stray backslash; only a «>» that opens a line is markdown.
+      const address = row.quoted("when")[0]!;
+      const [message] = discordNoticeMessages({
+        title: "T",
+        body: `- Testo: Da: ${address}\n> citazione`,
+      });
+      const description = message!.embeds[0]!.description ?? "";
+      expect(description).toBe(`- Testo: Da: ${address}\n\\> citazione`);
 
-  it("spells the address out when Discord would refuse it as a button", () => {
+      const closingBracket = description.includes(address);
+      const noEscape = !description.includes(address.replace(">", "\\>"));
+      const quoteEscaped = description.includes("\n\\> citazione");
+      const observed = `the address reaches the chat with ${closingBracket ? "its closing bracket" : "no closing bracket"} and ${noEscape ? "no escape character" : "an escape character"}, and ${quoteEscaped ? "only a quote sign opening a line is escaped" : "a quote sign is not escaped"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest("ACP-NOTICE-005", "spells the address out when Discord would refuse it as a button", (row) => {
     const long = `https://acme.cerase.ai/${"x".repeat(600)}`;
     const [message] = discordNoticeMessages({ title: "T", body: "testo", link: { url: long, label: "Apri" } });
     expect(message!.components).toEqual([]);
     expect(message!.embeds[0]!.description).toBe(`testo\nApri: ${long}`);
+
+    const spelledOut = message!.embeds[0]!.description?.includes(long) ?? false;
+    const observed = spelledOut
+      ? "the address is spelled out in the body"
+      : "the address is not spelled out in the body";
+    expect(observed).toBe(row.expect);
   });
 
   it("continues a body past one embed in further embeds, every character kept, the button on the last message", () => {
@@ -141,25 +173,42 @@ describe("Discord: an embed signed by the platform, with a link button", () => {
 });
 
 describe("Slack: blocks naming the platform, with a link button", () => {
-  it("names the platform, heads with the title, says the body in plain text and links in a button", () => {
-    const message = slackNoticeMessage(APPROVAL);
-    expect(message.blocks).toEqual([
-      { type: "context", elements: [{ type: "plain_text", text: "Cerase", emoji: false }] },
-      { type: "header", text: { type: "plain_text", text: "Richiesta di approvazione", emoji: false } },
-      { type: "section", text: { type: "plain_text", text: APPROVAL.body, emoji: false } },
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            action_id: SLACK_NOTICE_ACTION_ID,
-            text: { type: "plain_text", text: "Approva o rifiuta", emoji: false },
-            url: "https://acme.cerase.ai/a/Xy7Kq2",
-          },
-        ],
-      },
-    ]);
-  });
+  specTest(
+    "ACP-NOTICE-002",
+    "names the platform, heads with the title, says the body in plain text and links in a button",
+    (row) => {
+      const message = slackNoticeMessage(APPROVAL);
+      expect(message.blocks).toEqual([
+        { type: "context", elements: [{ type: "plain_text", text: "Cerase", emoji: false }] },
+        { type: "header", text: { type: "plain_text", text: "Richiesta di approvazione", emoji: false } },
+        { type: "section", text: { type: "plain_text", text: APPROVAL.body, emoji: false } },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              action_id: SLACK_NOTICE_ACTION_ID,
+              text: { type: "plain_text", text: "Approva o rifiuta", emoji: false },
+              url: "https://acme.cerase.ai/a/Xy7Kq2",
+            },
+          ],
+        },
+      ]);
+
+      const [context, header, section, actions] = message.blocks as unknown as [
+        { elements?: Array<{ text?: string }> },
+        { text?: { text?: string } },
+        { text?: { type?: string; text?: string } },
+        { elements?: Array<{ url?: string }> },
+      ];
+      const namesPlatform = context.elements?.[0]?.text === PLATFORM_SENDER;
+      const headsTitle = header.text?.text === APPROVAL.title;
+      const bodyPlain = section.text?.type === "plain_text" && section.text?.text === APPROVAL.body;
+      const linkButton = actions.elements?.[0]?.url === APPROVAL.link!.url;
+      const observed = `the bridge sends blocks ${namesPlatform ? "naming the platform" : "not naming the platform"}, ${headsTitle ? "the title" : "no title"}, ${bodyPlain ? "the body in plain text" : "the body not in plain text"} and ${linkButton ? "a link button" : "no link button"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("carries the notice spelled out, address included, as the text a notification shows", () => {
     expect(slackNoticeMessage(APPROVAL).text).toBe(noticeText(APPROVAL));
@@ -167,7 +216,7 @@ describe("Slack: blocks naming the platform, with a link button", () => {
 });
 
 describe("Google Chat: a card with the platform under its title, and a link button", () => {
-  it("draws the title, the platform, the body and the button", () => {
+  specTest("ACP-NOTICE-004", "draws the title, the platform, the body and the button", (row) => {
     const message = googleChatNoticeMessage({ ...APPROVAL, body: "Riunione <Weekly> & co\nseconda riga" });
     expect(message.cardsV2).toEqual([
       {
@@ -191,6 +240,19 @@ describe("Google Chat: a card with the platform under its title, and a link butt
         },
       },
     ]);
+
+    const card = message.cardsV2[0]!.card as {
+      header?: { title?: string; subtitle?: string };
+      sections?: Array<{ widgets?: Array<Record<string, unknown>> }>;
+    };
+    const titleInHeader = card.header?.title === APPROVAL.title;
+    const platformAsSender = card.header?.subtitle === PLATFORM_SENDER;
+    const buttonList = card.sections?.[0]?.widgets?.find((widget) => "buttonList" in widget) as
+      | { buttonList: { buttons: Array<{ onClick?: { openLink?: { url?: string } } }> } }
+      | undefined;
+    const linkButton = buttonList?.buttonList.buttons[0]?.onClick?.openLink?.url === APPROVAL.link!.url;
+    const observed = `the bridge sends a card with ${titleInHeader ? "the title in the header" : "no title in the header"}, ${platformAsSender ? "the platform as sender" : "no platform as sender"} and ${linkButton ? "a link button" : "no link button"}`;
+    expect(observed).toBe(row.expect);
   });
 
   it("gives the phone's notification the notice spelled out, address included", () => {
@@ -199,14 +261,27 @@ describe("Google Chat: a card with the platform under its title, and a link butt
 });
 
 describe("Telegram: a quoted block under a bold heading, with a link button", () => {
-  it("heads with the platform and the title in bold, quotes the body and puts the link in a button", () => {
-    expect(telegramNoticeMessages(APPROVAL)).toEqual([
-      {
-        html: "<b>Cerase · Richiesta di approvazione</b>\n<blockquote>«Matilde» chiede la tua approvazione per: invia una mail\n- A: anna@example.com\nLa richiesta scade oggi alle 18:00.</blockquote>",
-        button: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
-      },
-    ]);
-  });
+  specTest(
+    "ACP-NOTICE-003",
+    "heads with the platform and the title in bold, quotes the body and puts the link in a button",
+    (row) => {
+      const messages = telegramNoticeMessages(APPROVAL);
+      expect(messages).toEqual([
+        {
+          html: "<b>Cerase · Richiesta di approvazione</b>\n<blockquote>«Matilde» chiede la tua approvazione per: invia una mail\n- A: anna@example.com\nLa richiesta scade oggi alle 18:00.</blockquote>",
+          button: { url: "https://acme.cerase.ai/a/Xy7Kq2", label: "Approva o rifiuta" },
+        },
+      ]);
+
+      const [message] = messages;
+      const html = message!.html;
+      const boldHeading = html.startsWith("<b>") && html.includes(PLATFORM_SENDER) && html.includes(APPROVAL.title);
+      const bodyQuoted = html.includes("<blockquote>") && html.includes("</blockquote>");
+      const linkInButton = message!.button?.url === APPROVAL.link!.url;
+      const observed = `the bridge sends a ${boldHeading ? "bold heading naming the platform and the title" : "heading"}, ${bodyQuoted ? "the body quoted" : "the body unquoted"}, and ${linkInButton ? "the link in a button" : "no button"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 
   it("makes the body literal for Telegram's HTML", () => {
     const [m] = telegramNoticeMessages({ title: "A <b>", body: "x < y & <i>z</i>" });
