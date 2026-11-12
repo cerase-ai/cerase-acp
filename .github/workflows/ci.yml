@@ -114,6 +114,9 @@ jobs:
       - name: Run vitest suite
         run: npm test
 
+      - name: Spec rows (conformance)
+        run: npm run conformance
+
       # Which of the merged checks refused. `always()` is what keeps a red
       # vitest from hiding a secret finding.
       - name: Which check refused

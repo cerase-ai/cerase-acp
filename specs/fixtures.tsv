@@ -1,0 +1,2 @@
+id	when	expect	file	dec
+ACP-FIXTURE-001	a row whose when quotes "alpha" and "beta"	the reader hands back alpha and beta	src/test-support/spec-rows.ts	

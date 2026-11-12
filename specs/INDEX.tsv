@@ -1,0 +1,2 @@
+path	scope	rows
+specs/fixtures.tsv	src/test-support/spec-rows.test.ts	1
