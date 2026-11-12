@@ -120,9 +120,9 @@ export function recordSpecOutcome(row: SpecRow, outcome: SpecOutcome, testId: st
   appendFileSync(ledger, `${row.id}\t${outcome}\t${testId}\t${fingerprint}\n`, "utf8");
 }
 
-export function specTest(id: string, name: string, body: (row: SpecRow) => void | Promise<void>): void {
-  const title = `${name} [spec]`;
+type SpecBody = (row: SpecRow) => void | Promise<void>;
 
+function runSpecTest(id: string, title: string, body: SpecBody): void {
   it(title, async () => {
     const row = specRow(id);
     let outcome: SpecOutcome = "fail";
@@ -134,3 +134,23 @@ export function specTest(id: string, name: string, body: (row: SpecRow) => void 
     }
   });
 }
+
+function eachTitle(name: string, id: string): string {
+  const rendered = name.includes("%s") ? name.replaceAll("%s", id) : `${name} ${id}`;
+  return `${rendered} [spec]`;
+}
+
+function each(ids: readonly string[]): (name: string, body: SpecBody) => void {
+  return (name, body) => {
+    for (const id of ids) {
+      runSpecTest(id, eachTitle(name, id), body);
+    }
+  };
+}
+
+export const specTest = Object.assign(
+  function specTest(id: string, name: string, body: SpecBody): void {
+    runSpecTest(id, `${name} [spec]`, body);
+  },
+  { each },
+);

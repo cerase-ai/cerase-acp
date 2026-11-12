@@ -1,7 +1,9 @@
-import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recordSpecOutcome, specRow, specTest } from "./spec-rows.js";
 
@@ -99,4 +101,243 @@ describe("spec ledger", () => {
       `${FIXTURE_ID}\tfail\ta failing body\t${expectedFingerprint}`,
     ]);
   });
+});
+
+const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const INNER_RUN_TIMEOUT = 60_000;
+
+interface InnerAssertionResult {
+  title: string;
+  status: string;
+}
+
+interface InnerTestResult {
+  assertionResults: InnerAssertionResult[];
+}
+
+interface InnerReport {
+  numTotalTests: number;
+  testResults: InnerTestResult[];
+}
+
+interface InnerRun {
+  status: number | null;
+  output: string;
+}
+
+interface LedgerLine {
+  id: string;
+  outcome: string;
+  testName: string;
+  fingerprint: string;
+}
+
+function fixtureSpecRoot(): string {
+  const root = temporaryDir();
+  mkdirSync(join(root, "specs"), { recursive: true });
+  writeFileSync(join(root, "specs", "INDEX.tsv"), "path\tscope\trows\nspecs/fixtures.tsv\tfixtures\t2\n", "utf8");
+  writeFileSync(
+    join(root, "specs", "fixtures.tsv"),
+    [
+      "id\twhen\texpect\tfile\tdec",
+      'ACP-FIXTURE-901\ta row that quotes "one"\tthe case reads one\tsrc/test-support/spec-rows.ts\t',
+      'ACP-FIXTURE-902\ta row that quotes "two"\tthe case reads two\tsrc/test-support/spec-rows.ts\t',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return root;
+}
+
+function runInnerSpecTests(source: string, root: string, ledger: string): InnerRun {
+  const testFile = join(REPOSITORY_ROOT, "src", `__spec-each-${randomUUID()}.test.ts`);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith("VITEST")) {
+      delete env[name];
+    }
+  }
+  env.CERASE_SPEC_ROOT = root;
+  env.CERASE_SPEC_LEDGER = ledger;
+
+  try {
+    writeFileSync(testFile, source, "utf8");
+    const result = spawnSync(
+      join(REPOSITORY_ROOT, "node_modules", ".bin", "vitest"),
+      ["run", testFile, "--reporter=json"],
+      {
+        cwd: REPOSITORY_ROOT,
+        env,
+        encoding: "utf8",
+        timeout: INNER_RUN_TIMEOUT - 5_000,
+      },
+    );
+    return {
+      status: result.status,
+      output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+    };
+  } finally {
+    rmSync(testFile, { force: true });
+  }
+}
+
+function parseInnerReport(output: string): InnerReport {
+  return JSON.parse(output) as InnerReport;
+}
+
+function readLedger(path: string): LedgerLine[] {
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+
+  return content
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => {
+      const [id = "", outcome = "", testName = "", lineFingerprint = ""] = line.split("\t");
+      return { id, outcome, testName, fingerprint: lineFingerprint };
+    });
+}
+
+function ledgerById(lines: LedgerLine[]): Map<string, LedgerLine> {
+  return new Map(lines.map((line) => [line.id, line]));
+}
+
+function assertionResults(report: InnerReport): InnerAssertionResult[] {
+  return report.testResults.flatMap((result) => result.assertionResults);
+}
+
+function assertionTitles(report: InnerReport): string[] {
+  return assertionResults(report).map((assertion) => assertion.title);
+}
+
+describe("specTest.each", () => {
+  it(
+    "registers one test per ID and records one passing ledger line per row",
+    () => {
+      const root = fixtureSpecRoot();
+      const ledger = join(temporaryDir(), "ledger.tsv");
+      const source = [
+        'import { expect } from "vitest";',
+        'import { specTest } from "./test-support/spec-rows.js";',
+        "",
+        'specTest.each(["ACP-FIXTURE-901", "ACP-FIXTURE-902"])("reads the case %s", (row) => {',
+        '  expect(`the case reads ${row.quoted("when")[0]}`).toBe(row.expect);',
+        "});",
+      ].join("\n");
+
+      const run = runInnerSpecTests(source, root, ledger);
+
+      expect(run.status).toBe(0);
+      const report = parseInnerReport(run.output);
+      expect(report.numTotalTests).toBe(2);
+      const titles = assertionTitles(report);
+      expect(titles).toHaveLength(2);
+      for (const id of ["ACP-FIXTURE-901", "ACP-FIXTURE-902"]) {
+        expect(titles.some((title) => title.includes(id) && title.trimEnd().endsWith("[spec]"))).toBe(true);
+      }
+
+      const lines = readLedger(ledger);
+      expect(lines).toHaveLength(2);
+      const byId = ledgerById(lines);
+      expect(byId.get("ACP-FIXTURE-901")?.outcome).toBe("pass");
+      expect(byId.get("ACP-FIXTURE-901")?.fingerprint).toBe(
+        fingerprint('a row that quotes "one"', "the case reads one"),
+      );
+      expect(byId.get("ACP-FIXTURE-902")?.outcome).toBe("pass");
+      expect(byId.get("ACP-FIXTURE-902")?.fingerprint).toBe(
+        fingerprint('a row that quotes "two"', "the case reads two"),
+      );
+    },
+    INNER_RUN_TIMEOUT,
+  );
+
+  it(
+    "records a passing line for the row that passes and a failing line for the row that fails",
+    () => {
+      const root = fixtureSpecRoot();
+      const ledger = join(temporaryDir(), "ledger.tsv");
+      const source = [
+        'import { expect } from "vitest";',
+        'import { specTest } from "./test-support/spec-rows.js";',
+        "",
+        'specTest.each(["ACP-FIXTURE-901", "ACP-FIXTURE-902"])("reads the case %s", (row) => {',
+        '  expect(row.id).not.toBe("ACP-FIXTURE-902");',
+        "});",
+      ].join("\n");
+
+      const run = runInnerSpecTests(source, root, ledger);
+
+      expect(run.status).not.toBe(0);
+      const results = assertionResults(parseInnerReport(run.output));
+      expect(results.find((result) => result.title.includes("ACP-FIXTURE-901"))?.status).toBe("passed");
+      expect(results.find((result) => result.title.includes("ACP-FIXTURE-902"))?.status).toBe("failed");
+
+      const lines = readLedger(ledger);
+      expect(lines).toHaveLength(2);
+      const byId = ledgerById(lines);
+      expect(byId.get("ACP-FIXTURE-901")?.outcome).toBe("pass");
+      expect(byId.get("ACP-FIXTURE-902")?.outcome).toBe("fail");
+    },
+    INNER_RUN_TIMEOUT,
+  );
+
+  it(
+    "passes the declared row and fails for an ID that no area declares",
+    () => {
+      const root = fixtureSpecRoot();
+      const ledger = join(temporaryDir(), "ledger.tsv");
+      const unknownId = "ACP-NOT-A-ROW";
+      const source = [
+        'import { expect } from "vitest";',
+        'import { specTest } from "./test-support/spec-rows.js";',
+        "",
+        `specTest.each(["ACP-FIXTURE-901", "${unknownId}"])("reads the case %s", (row) => {`,
+        '  expect(row.id).toBe("ACP-FIXTURE-901");',
+        "});",
+      ].join("\n");
+
+      const run = runInnerSpecTests(source, root, ledger);
+
+      expect(run.status).not.toBe(0);
+      expect(run.output).toContain(unknownId);
+      const results = assertionResults(parseInnerReport(run.output));
+      expect(results.find((result) => result.title.includes(unknownId))?.status).toBe("failed");
+
+      const byId = ledgerById(readLedger(ledger));
+      expect(byId.get("ACP-FIXTURE-901")?.outcome).toBe("pass");
+    },
+    INNER_RUN_TIMEOUT,
+  );
+
+  it(
+    "still registers one test per ID when the name has no placeholder",
+    () => {
+      const root = fixtureSpecRoot();
+      const ledger = join(temporaryDir(), "ledger.tsv");
+      const source = [
+        'import { expect } from "vitest";',
+        'import { specTest } from "./test-support/spec-rows.js";',
+        "",
+        'specTest.each(["ACP-FIXTURE-901", "ACP-FIXTURE-902"])("reads the case", (row) => {',
+        "  expect(row.id).toBeDefined();",
+        "});",
+      ].join("\n");
+
+      const run = runInnerSpecTests(source, root, ledger);
+
+      expect(run.status).toBe(0);
+      const report = parseInnerReport(run.output);
+      expect(report.numTotalTests).toBe(2);
+      const titles = assertionTitles(report);
+      expect(titles).toHaveLength(2);
+      for (const id of ["ACP-FIXTURE-901", "ACP-FIXTURE-902"]) {
+        expect(titles.some((title) => title.includes(id) && title.trimEnd().endsWith("[spec]"))).toBe(true);
+      }
+    },
+    INNER_RUN_TIMEOUT,
+  );
 });

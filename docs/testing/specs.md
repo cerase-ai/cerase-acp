@@ -22,6 +22,17 @@ test fails when the row's ID is unknown or when the specs tree cannot be read;
 it is never skipped, because a suite that skips every row looks as green as one
 that ran them.
 
+`specTest.each(ids)(name, body)` registers one test per ID. Every test uses
+`name`, with `%s` replaced by the row's ID, or the ID appended when `name` has no
+`%s`; each title still ends in `[spec]`. Each test loads its own row and appends
+its own ledger line, so one row's failure does not stop the others.
+
+```ts
+specTest.each(["ACP-FIXTURE-001", "ACP-FIXTURE-002"])("renders the words of %s", (row) => {
+  expect(`the reader hands back ${row.quoted("when").join(" and ")}`).toBe(row.expect);
+});
+```
+
 ## The ledger
 
 When `CERASE_SPEC_LEDGER` names a file, each citing test appends exactly one
