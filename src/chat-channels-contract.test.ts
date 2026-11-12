@@ -1,5 +1,6 @@
 // Every chat channel the console offers an organisation has an adapter here
-// that sends a message and draws a platform notice.
+// that sends a message and draws a platform notice. Each channel's row in
+// specs/turns.tsv names the adapter the bridge must build for it.
 //
 // The list is cerase-core's, the file its console suite holds the console's
 // choices to, vendored here and pinned in scripts/TOOLING.sha256. A channel
@@ -14,12 +15,14 @@ import { describe, expect, it } from "vitest";
 import { createChatAdapter } from "./chat-adapter.js";
 import { type AgentConfig, ChatChannelSchema } from "./config.js";
 import type { Dispatcher } from "./dispatcher.js";
-import { specTest } from "./test-support/spec-rows.js";
+import { specRow, specTest } from "./test-support/spec-rows.js";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const FIXTURE = "control-plane/tests/fixtures/chat-channels.json";
 
 const contract = JSON.parse(readFileSync(join(repoRoot, FIXTURE), "utf8")) as { channels: string[] };
+
+const CHANNEL_ROW_IDS = ["ACP-TURN-035", "ACP-TURN-036", "ACP-TURN-037", "ACP-TURN-038"] as const;
 
 /** The credentials each channel's configuration requires, with values that are not real. */
 const CREDENTIALS: Record<string, Partial<AgentConfig>> = {
@@ -49,12 +52,17 @@ describe("the channels an organisation may choose", () => {
     expect(observed).toBe(row.expect);
   });
 
-  it.each(contract.channels)(
+  specTest.each(CHANNEL_ROW_IDS)(
     "%s has an adapter that sends a message, draws a notice and closes it",
-    async (channel) => {
+    async (row) => {
+      const [agentId, channel] = row.quoted("when");
+      if (agentId === undefined || channel === undefined) {
+        throw new Error("the row does not name an agent and a channel");
+      }
+
       expect(CREDENTIALS[channel], `no configuration for ${channel} in this test`).toBeDefined();
       const agent = {
-        id: "agent-1",
+        id: agentId,
         channel,
         allowed_users: ["u1"],
         cwd: "/home/agent/cerase/workspace",
@@ -65,12 +73,30 @@ describe("the channels an organisation may choose", () => {
 
       const adapter = await createChatAdapter(agent, {} as unknown as Dispatcher);
 
-      expect(adapter.agentId).toBe("agent-1");
+      expect(adapter.agentId).toBe(agentId);
       expect(adapter.makeSendTarget).toBeTypeOf("function");
       expect(adapter.sendNotice).toBeTypeOf("function");
       // A decided approval's message says how it ended, on every channel core offers.
       expect(adapter.closeNotice).toBeTypeOf("function");
       expect(adapter.start).toBeTypeOf("function");
+
+      const missing = [
+        adapter.agentId === agentId ? "" : `the agent id ${agentId}`,
+        typeof adapter.makeSendTarget === "function" ? "" : "makeSendTarget",
+        typeof adapter.sendNotice === "function" ? "" : "sendNotice",
+        typeof adapter.closeNotice === "function" ? "" : "closeNotice",
+        typeof adapter.start === "function" ? "" : "start",
+      ].filter((part) => part !== "");
+      const observed =
+        missing.length === 0
+          ? `the bridge builds an adapter for ${adapter.agentId} that sends a message, draws a notice, closes it and starts`
+          : `the bridge builds an adapter for ${adapter.agentId} that is missing ${missing.join(", ")}`;
+      expect(observed).toBe(row.expect);
     },
   );
+
+  it("are the channels the four rows quote", () => {
+    const quoted = CHANNEL_ROW_IDS.map((id) => specRow(id).quoted("when")[1] ?? "");
+    expect(quoted.sort()).toEqual([...contract.channels].sort());
+  });
 });
