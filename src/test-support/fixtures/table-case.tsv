@@ -1,0 +1,4 @@
+id	when	expect	file	dec
+ACP-TABLE-FIXTURE-001	the text "Matilde" is read backwards	the reader answers "edlitaM"	src/test-support/spec-rows.ts	
+ACP-TABLE-FIXTURE-002	the text "Ferri e figli" is read backwards	the reader answers "ilgif e irreF"	src/test-support/spec-rows.ts	
+ACP-TABLE-FIXTURE-003	the text "Lucia" is read backwards	the reader answers "aicuL"	src/test-support/spec-rows.ts	

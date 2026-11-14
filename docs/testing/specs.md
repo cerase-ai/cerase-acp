@@ -47,6 +47,13 @@ hex characters of the SHA-256 of `when + "\t" + expect`, so a row edited without
 re-running its test is caught. The line is written on failure as well as on
 success.
 
+`src/test-support/a-changed-expect-reds-its-table-case.test.ts` is the proof
+that a changed `expect` reds its case: it copies the rows of
+`src/test-support/fixtures/table-case.tsv` into a throwaway specs tree, runs
+them through a real inner vitest run, then changes only one row's `expect` in
+the copy and checks that exactly that case fails and its ledger fingerprint
+moves with it.
+
 ## Running conformance
 
 ```

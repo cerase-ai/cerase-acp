@@ -1,17 +1,24 @@
-import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  assertionResults,
+  assertionTitles,
+  fingerprint,
+  INNER_RUN_TIMEOUT,
+  ledgerById,
+  parseInnerReport,
+  readLedger,
+  removeTemporaryDirs,
+  runInnerSpecTests,
+  temporaryDir,
+} from "./inner-spec-run.js";
 import { recordSpecOutcome, specRow, specTest } from "./spec-rows.js";
 
 const FIXTURE_ID = "ACP-FIXTURE-001";
 const FIXTURE_FILE = "src/test-support/spec-rows.ts";
 
 const savedEnv = new Map<string, string | undefined>();
-const temporaryDirs: string[] = [];
 
 function rememberEnv(name: string): void {
   savedEnv.set(name, process.env[name]);
@@ -26,16 +33,6 @@ function restoreEnv(name: string): void {
   }
 }
 
-function temporaryDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "cerase-spec-"));
-  temporaryDirs.push(dir);
-  return dir;
-}
-
-function fingerprint(when: string, expect: string): string {
-  return createHash("sha256").update(`${when}\t${expect}`, "utf8").digest("hex").slice(0, 16);
-}
-
 beforeEach(() => {
   rememberEnv("CERASE_SPEC_ROOT");
   rememberEnv("CERASE_SPEC_LEDGER");
@@ -44,9 +41,7 @@ beforeEach(() => {
 afterEach(() => {
   restoreEnv("CERASE_SPEC_ROOT");
   restoreEnv("CERASE_SPEC_LEDGER");
-  for (const dir of temporaryDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  removeTemporaryDirs();
 });
 
 describe("specRow", () => {
@@ -103,35 +98,6 @@ describe("spec ledger", () => {
   });
 });
 
-const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const INNER_RUN_TIMEOUT = 60_000;
-
-interface InnerAssertionResult {
-  title: string;
-  status: string;
-}
-
-interface InnerTestResult {
-  assertionResults: InnerAssertionResult[];
-}
-
-interface InnerReport {
-  numTotalTests: number;
-  testResults: InnerTestResult[];
-}
-
-interface InnerRun {
-  status: number | null;
-  output: string;
-}
-
-interface LedgerLine {
-  id: string;
-  outcome: string;
-  testName: string;
-  fingerprint: string;
-}
-
 function fixtureSpecRoot(): string {
   const root = temporaryDir();
   mkdirSync(join(root, "specs"), { recursive: true });
@@ -147,71 +113,6 @@ function fixtureSpecRoot(): string {
     "utf8",
   );
   return root;
-}
-
-function runInnerSpecTests(source: string, root: string, ledger: string): InnerRun {
-  const testFile = join(REPOSITORY_ROOT, "src", `__spec-each-${randomUUID()}.test.ts`);
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of Object.keys(env)) {
-    if (name.startsWith("VITEST")) {
-      delete env[name];
-    }
-  }
-  env.CERASE_SPEC_ROOT = root;
-  env.CERASE_SPEC_LEDGER = ledger;
-
-  try {
-    writeFileSync(testFile, source, "utf8");
-    const result = spawnSync(
-      join(REPOSITORY_ROOT, "node_modules", ".bin", "vitest"),
-      ["run", testFile, "--reporter=json"],
-      {
-        cwd: REPOSITORY_ROOT,
-        env,
-        encoding: "utf8",
-        timeout: INNER_RUN_TIMEOUT - 5_000,
-      },
-    );
-    return {
-      status: result.status,
-      output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
-    };
-  } finally {
-    rmSync(testFile, { force: true });
-  }
-}
-
-function parseInnerReport(output: string): InnerReport {
-  return JSON.parse(output) as InnerReport;
-}
-
-function readLedger(path: string): LedgerLine[] {
-  let content: string;
-  try {
-    content = readFileSync(path, "utf8");
-  } catch {
-    return [];
-  }
-
-  return content
-    .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => {
-      const [id = "", outcome = "", testName = "", lineFingerprint = ""] = line.split("\t");
-      return { id, outcome, testName, fingerprint: lineFingerprint };
-    });
-}
-
-function ledgerById(lines: LedgerLine[]): Map<string, LedgerLine> {
-  return new Map(lines.map((line) => [line.id, line]));
-}
-
-function assertionResults(report: InnerReport): InnerAssertionResult[] {
-  return report.testResults.flatMap((result) => result.assertionResults);
-}
-
-function assertionTitles(report: InnerReport): string[] {
-  return assertionResults(report).map((assertion) => assertion.title);
 }
 
 describe("specTest.each", () => {
