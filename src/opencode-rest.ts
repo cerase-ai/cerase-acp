@@ -15,8 +15,11 @@
 // See OpenAPI spec at GET /doc for the full schema. Two endpoints are used
 // here: `GET /session/{sessionID}/message/{messageID}` →
 // `{ info: AssistantMessage, parts: Part[] }` for the reconciliation, and
-// `GET /session/{sessionID}/message?limit=1` → the newest message alone, to
-// learn which model call the session holds open (see OpenCall).
+// `GET /session/{sessionID}/message?limit=N` → the newest messages, to learn
+// which model call the session holds open (see OpenCall). It reads the newest
+// assistant message, past the person's messages that followed it, because a
+// message the person sends into the work in progress is appended to the
+// session while the call is still open.
 
 import { execFile } from "node:child_process";
 import { makeLogger } from "./logger.js";
@@ -131,15 +134,18 @@ export function execFetcher(exec: SlotExec = dockerExec): CanonicalFetcher {
 }
 
 /**
- * The model call a session's newest message holds open: a summary of its
- * history when `summary`, otherwise an answer.
+ * The model call a session's newest assistant message holds open: a summary of
+ * its history when `summary`, otherwise an answer.
  *
  * opencode writes an assistant message at the start of every model call and
  * stamps `time.completed` on it when the call ends, or `error` when it is
  * aborted. Its ACP layer sends no update until the first token, and a large
  * prompt can take minutes to its first token, so until then the only place
- * that says a call is under way is the session's newest message, which
- * `GET /session/{id}/message?limit=1` returns.
+ * that says a call is under way is the session's newest assistant message,
+ * which `GET /session/{id}/message?limit=N` returns. It is the newest
+ * assistant message and not simply the newest message because a message the
+ * person sends into the work in progress is appended to the session while the
+ * call is still open.
  */
 export interface OpenCall {
   messageId: string;
@@ -147,24 +153,43 @@ export interface OpenCall {
 }
 
 /**
- * Asks which model call a session's newest message holds open, or `null` when
- * it holds none or the slot could not say.
+ * Asks which model call a session's newest assistant message holds open, or
+ * `null` when it holds none or the slot could not say.
  */
 export type OpenCallProbe = (container: string, sessionId: string) => Promise<OpenCall | null>;
+
+/** How far back to walk past the person's messages: a person sends at most a few while a call is open. */
+const OPEN_CALL_LOOKBACK = 20;
+
+interface OpenCallMessage {
+  info?: { id?: unknown; role?: unknown; summary?: unknown; error?: unknown; time?: { completed?: unknown } };
+}
+
+/** The call an assistant message holds open, or `null` when it is finished, failed or unidentifiable. */
+function openCallOf(info: OpenCallMessage["info"]): OpenCall | null {
+  if (!info) return null;
+  if (typeof info.time?.completed === "number") return null;
+  if (info.error) return null;
+  if (typeof info.id !== "string" || info.id.length === 0) return null;
+  return { messageId: info.id, summary: info.summary === true };
+}
 
 /** The probe that asks the slot's opencode server: see OpenCall. */
 export function execOpenCallProbe(exec: SlotExec = dockerExec): OpenCallProbe {
   return async (container, sessionId) => {
-    const body = await readSlot(exec, container, `/session/${encodeURIComponent(sessionId)}/message?limit=1`);
+    const path = `/session/${encodeURIComponent(sessionId)}/message`;
+    const body = await readSlot(exec, container, `${path}?limit=1`);
     if (!Array.isArray(body)) return null;
-    const info = (body.at(-1) as { info?: unknown } | undefined)?.info as
-      | { id?: unknown; role?: unknown; summary?: unknown; error?: unknown; time?: { completed?: unknown } }
-      | undefined;
-    if (info?.role !== "assistant") return null;
-    if (typeof info.time?.completed === "number") return null;
-    if (info.error) return null;
-    if (typeof info.id !== "string" || info.id.length === 0) return null;
-    return { messageId: info.id, summary: info.summary === true };
+    const newest = (body.at(-1) as OpenCallMessage | undefined)?.info;
+    if (newest?.role === "assistant") return openCallOf(newest);
+    if (newest?.role !== "user") return null;
+    const window = await readSlot(exec, container, `${path}?limit=${OPEN_CALL_LOOKBACK}`);
+    if (!Array.isArray(window)) return null;
+    for (let i = window.length - 1; i >= 0; i--) {
+      const info = (window[i] as OpenCallMessage | undefined)?.info;
+      if (info?.role === "assistant") return openCallOf(info);
+    }
+    return null;
   };
 }
 

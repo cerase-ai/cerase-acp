@@ -118,13 +118,17 @@ export interface SessionManagerOptions {
    * `task` tool sends this session nothing until it returns, and then only
    * the ceiling applies. Nor does it fire while the session is writing the
    * summary of its history (see COMPACTION_SILENCE_MS), nor while its newest
-   * message is a model call still open (see turnModelWaitMs).
+   * assistant message is a model call still open (see turnModelWaitMs). It
+   * reads the newest assistant message, past the person's messages that
+   * followed it, because a message the person sends into the work in progress
+   * is appended to the session while the call is still open.
    */
   turnSilenceMs?: number;
   /**
-   * The silence a turn may keep while its session's newest message is a model
-   * call still open (no `time.completed`, no `error`), in place of the silence
-   * limit; the ceiling still applies.
+   * The silence a turn may keep while its session's newest assistant message
+   * is a model call still open (no `time.completed`, no `error`), in place of
+   * the silence limit; the ceiling still applies. The person's messages
+   * appended after it do not close it.
    */
   turnModelWaitMs?: number;
   /**
@@ -147,11 +151,14 @@ export interface SessionManagerOptions {
    */
   stateDir?: string;
   /**
-   * Asks which model call a session's newest message holds open: a summary of
-   * its history or an answer, or null. Tests pass one. Without it the slot's
-   * opencode server is asked (execOpenCallProbe), for an agent whose spawn is
-   * a `docker exec` into a slot; an agent with no slot has nothing to ask, and
-   * its silent turns end at the silence limit.
+   * Asks which model call a session's newest assistant message holds open: a
+   * summary of its history or an answer, or null. It reads the newest
+   * assistant message, past the person's messages that followed it, because a
+   * message the person sends into the work in progress is appended to the
+   * session while the call is still open. Tests pass one. Without it the
+   * slot's opencode server is asked (execOpenCallProbe), for an agent whose
+   * spawn is a `docker exec` into a slot; an agent with no slot has nothing
+   * to ask, and its silent turns end at the silence limit.
    */
   openCallProbe?: (agent: AgentConfig, sessionId: string) => Promise<OpenCall | null>;
   /**

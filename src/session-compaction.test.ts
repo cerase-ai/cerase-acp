@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { untilChild, useBridgeClock } from "./__tests__/fake-clock.js";
 import type { AgentConfig, BridgeConfig } from "./config.js";
+import { execOpenCallProbe, type SlotExec } from "./opencode-rest.js";
 import { COMPACTION_SILENCE_MS, SessionManager, type SessionUpdateHandler } from "./session-manager.js";
 import { specTest } from "./test-support/spec-rows.js";
 
@@ -47,6 +48,15 @@ function watch(turn: Promise<unknown>) {
     (error: unknown) => Object.assign(state, { settled: true, error }),
   );
   return { state, done };
+}
+
+// A slot that answers `GET /session/{id}/message?limit=N` with the last N
+// messages of a stored list, oldest first, the way opencode does.
+function slotAnsweringByLimit(messages: unknown[]): SlotExec {
+  return async (args) => {
+    const limit = Number(/limit=(\d+)/.exec(args.at(-1) ?? "")?.[1] ?? messages.length);
+    return { stdout: `${JSON.stringify(messages.slice(-limit))}\n200`, ok: true };
+  };
 }
 
 describe("a turn whose session is summarising its history", () => {
@@ -171,6 +181,60 @@ describe("a turn whose session is summarising its history", () => {
       const error = turn.state.error as { name?: string; reason?: string } | undefined;
       const endedAsSilent = error?.name === "TurnWatchdogError" && error?.reason === "silent";
       const observed = `the turn is ${endedAsSilent ? "ended by the watchdog as" : "not ended by the watchdog as"} ${error?.reason ?? "unknown"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest(
+    "ACP-TURN-041",
+    "is not killed while the session writes its summary and the person's messages wait behind it",
+    async (row) => {
+      const summary = {
+        id: "msg_summary",
+        role: "assistant",
+        mode: "compaction",
+        agent: "compaction",
+        summary: true,
+        time: { created: 1 },
+      };
+      const personMessage = (id: string, created: number) => ({
+        info: { id, role: "user", time: { created } },
+        parts: [{ id: `prt_${id}`, type: "text", text: "a message written while the summary is written" }],
+      });
+      const fakeExec = slotAnsweringByLimit([
+        {
+          info: { id: "msg_marker", role: "user", time: { created: 0 } },
+          parts: [{ id: "prt_marker", type: "compaction", auto: true }],
+        },
+        { info: summary, parts: [] },
+        personMessage("msg_person_1", 2),
+        personMessage("msg_person_2", 3),
+      ]);
+      m = new SessionManager(config(["FAKE_HANG_PROMPT=1"]), undefined, {
+        openCallProbe: (_agent, sessionId) => execOpenCallProbe(fakeExec)("cerase-agent-1", sessionId),
+      });
+      const mm = m;
+      const turn = watch(mm.prompt("doc-qa", "111", "ciao"));
+      await untilChild(() => expect(mm.activeSessionCount()).toBe(1));
+
+      // The summary has been writing for twice the usual silence limit. The
+      // person's messages that arrived after it are the session's newest, but
+      // they do not end the summary, so its own longer limit still applies.
+      await vi.advanceTimersByTimeAsync(2 * SILENCE_MS);
+      expect(turn.state.settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(COMPACTION_SILENCE_MS);
+      await turn.done;
+      expect(turn.state.error).toMatchObject({
+        name: "TurnWatchdogError",
+        reason: "silent",
+        ms: COMPACTION_SILENCE_MS,
+      });
+
+      const error = turn.state.error as { name?: string; reason?: string; ms?: number } | undefined;
+      const endedAsSilent = error?.name === "TurnWatchdogError" && error?.reason === "silent";
+      const onlyAtSummaryLimit = endedAsSilent && error?.ms === COMPACTION_SILENCE_MS;
+      const observed = `the turn is ${endedAsSilent ? "ended by the watchdog as" : "not ended by the watchdog as"} ${error?.reason ?? "unknown"}${onlyAtSummaryLimit ? " only after 15 minutes" : ""}`;
       expect(observed).toBe(row.expect);
     },
   );

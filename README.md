@@ -124,7 +124,10 @@ allowlist gates `/internal/inject`.
   the summary of its history: opencode sends nothing over ACP until the
   summary's first words, so a turn silent for 10 seconds asks the slot every 10
   seconds for the session's newest message
-  (`GET /session/{id}/message?limit=1` from inside the slot). An assistant
+  (`GET /session/{id}/message?limit=1` from inside the slot). When that is a
+  message the person sent into the work in progress, it reads the last 20 and
+  decides on the newest assistant message before it, because a person's
+  message does not end a call already open. An assistant
   message with `summary: true` and no `time.completed` is a summary under way,
   and such a turn may stay silent up to 15 minutes (`COMPACTION_SILENCE_MS`).
   An assistant message with no `time.completed` and no `error` that is not a

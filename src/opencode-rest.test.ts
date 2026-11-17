@@ -26,6 +26,18 @@ function recording(stdout: string, ok = true): { exec: SlotExec; calls: string[]
   return { exec, calls };
 }
 
+// A slot that answers `GET /session/{id}/message?limit=N` with the last N
+// messages of a stored list, oldest first, the way opencode does.
+function answeringByLimit(messages: unknown[]): { exec: SlotExec; calls: string[][] } {
+  const calls: string[][] = [];
+  const exec: SlotExec = async (args) => {
+    calls.push(args);
+    const limit = Number(/limit=(\d+)/.exec(args.at(-1) ?? "")?.[1] ?? messages.length);
+    return { stdout: `${JSON.stringify(messages.slice(-limit))}\n200`, ok: true };
+  };
+  return { exec, calls };
+}
+
 const message = JSON.stringify({
   info: { id: "msg_1" },
   parts: [{ id: "prt_0", type: "text", text: "whole reply" }],
@@ -152,6 +164,64 @@ describe("execOpenCallProbe", () => {
     expect(await probe("denied\n401")).toBeNull();
     expect(await probe("", false)).toBeNull();
     expect(await probe("<html>\n200")).toBeNull();
+  });
+
+  // opencode appends the person's messages to the session's history as they
+  // arrive, so the newest entry can be the person's even while a model call
+  // started earlier is still open. The call is the newest assistant message,
+  // and the person's messages after it do not close it.
+  const marker = { id: "msg_marker", role: "user", time: { created: 0 } };
+  const summaryMarker = { info: marker, parts: [{ id: "prt_marker", type: "compaction", auto: true }] };
+  const personMessage = (id: string, created: number) => ({
+    info: { id, role: "user", time: { created } },
+    parts: [{ id: `prt_${id}`, type: "text", text: "a message written while the call is open" }],
+  });
+
+  it("still reports the open summary when the person's messages were written after it", async () => {
+    const { exec } = answeringByLimit([
+      summaryMarker,
+      { info: summary, parts: [] },
+      personMessage("msg_person_1", 3),
+      personMessage("msg_person_2", 4),
+    ]);
+
+    expect(await execOpenCallProbe(exec)("cerase-agent-1", "ses_a")).toEqual({
+      messageId: "msg_sum",
+      summary: true,
+    });
+  });
+
+  it("still reports an open answer when a person's message was written after it", async () => {
+    const { exec } = answeringByLimit([summaryMarker, { info: answer, parts: [] }, personMessage("msg_person_1", 3)]);
+
+    expect(await execOpenCallProbe(exec)("cerase-agent-1", "ses_a")).toEqual({
+      messageId: "msg_ans",
+      summary: false,
+    });
+  });
+
+  it("finds no open call when the person's message follows a finished answer", async () => {
+    const { exec } = answeringByLimit([
+      { info: { ...answer, time: { created: 1, completed: 2 } }, parts: [] },
+      personMessage("msg_person_1", 3),
+    ]);
+
+    expect(await execOpenCallProbe(exec)("cerase-agent-1", "ses_a")).toBeNull();
+  });
+
+  it("reads only the newest message when that message is the assistant's", async () => {
+    const { exec, calls } = answeringByLimit([
+      summaryMarker,
+      personMessage("msg_person_1", 2),
+      { info: summary, parts: [] },
+    ]);
+
+    expect(await execOpenCallProbe(exec)("cerase-agent-1", "ses_a")).toEqual({
+      messageId: "msg_sum",
+      summary: true,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.at(-1)).toBe("/session/ses_a/message?limit=1");
   });
 });
 
