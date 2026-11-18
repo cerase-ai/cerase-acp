@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { specTest } from "./test-support/spec-rows.js";
 import { detectLanguage, formatGap, makeTurnMetaBlock, personWords, TURN_RULE, TurnMetaTracker } from "./turn-meta.js";
 
 describe("formatGap", () => {
@@ -83,16 +84,28 @@ describe("a transcribed voice message", () => {
 });
 
 describe("makeTurnMetaBlock", () => {
-  it("states the rule the assistant must follow before its first tool call", () => {
+  it("asks for the one-line statement only when a tool call follows and the message does not set the reply's form", () => {
     expect(TURN_RULE).toBe(
-      "before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise",
+      "if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise",
     );
+  });
+
+  specTest("ACP-TURN-044", "writes the one-line statement's condition as the rule's first clause", (row) => {
+    const block = makeTurnMetaBlock({ gap: "first", lang: "it" });
+    const afterGap = block.slice(block.indexOf("; ") + 2);
+    const addressAt = afterGap.indexOf("; address the person");
+    const clause = addressAt === -1 ? afterGap.slice(0, afterGap.lastIndexOf("]")) : afterGap.slice(0, addressAt);
+    const continues = addressAt !== -1;
+
+    const observed = `the line's rule is "${clause}", ${continues ? "before" : "after"} the clause on how to address the person`;
+    expect(observed).toBe(row.expect);
+    expect(block).toContain(row.quoted("expect")[0]!);
   });
 
   it("formats the [turn_meta: ...] prefix with gap + lang", () => {
     const block = makeTurnMetaBlock({ gap: "first", lang: "it" });
     expect(block).toBe(
-      "[turn_meta: gap=first, lang=it; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=first, lang=it; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 
@@ -104,21 +117,21 @@ describe("makeTurnMetaBlock", () => {
       writtenAgo: "1m",
     });
     expect(block).toBe(
-      "[turn_meta: gap=2m, lang=it, now=2026-10-22 09:12 (Europe/Rome), written_during_previous_work=1m ago; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=2m, lang=it, now=2026-10-22 09:12 (Europe/Rome), written_during_previous_work=1m ago; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 
   it("puts the written-during-previous-work age after lang when there is no clock", () => {
     const block = makeTurnMetaBlock({ gap: "2m", lang: "it", writtenAgo: "1m" });
     expect(block).toBe(
-      "[turn_meta: gap=2m, lang=it, written_during_previous_work=1m ago; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=2m, lang=it, written_during_previous_work=1m ago; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 
   it("leaves the block unchanged without the written-during-previous-work age", () => {
     const block = makeTurnMetaBlock({ gap: "2m", lang: "it", now: "2026-10-22 09:12 (Europe/Rome)" });
     expect(block).toBe(
-      "[turn_meta: gap=2m, lang=it, now=2026-10-22 09:12 (Europe/Rome); before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=2m, lang=it, now=2026-10-22 09:12 (Europe/Rome); if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 
@@ -161,22 +174,22 @@ describe("TurnMetaTracker", () => {
     const t0 = 1_700_000_000_000;
     const first = t.prefix("doc-qa", "user-A", "ciao", t0);
     expect(first).toBe(
-      "[turn_meta: gap=first, lang=it; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=first, lang=it; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
     // One English word does not move an Italian conversation; a sentence in
     // another language is `unknown` the first time — it could be pasted — and
     // the next one in a row moves the conversation.
     const second = t.prefix("doc-qa", "user-A", "hello", t0 + 5 * 60 * 1000);
     expect(second).toBe(
-      "[turn_meta: gap=5m, lang=it; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=5m, lang=it; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
     const third = t.prefix("doc-qa", "user-A", "hello, can you help me with this?", t0 + 6 * 60 * 1000);
     expect(third).toBe(
-      "[turn_meta: gap=1m, lang=unknown; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=1m, lang=unknown; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
     const fourth = t.prefix("doc-qa", "user-A", "thanks, that is everything for now", t0 + 7 * 60 * 1000);
     expect(fourth).toBe(
-      "[turn_meta: gap=1m, lang=en; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=1m, lang=en; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 
@@ -188,7 +201,7 @@ describe("TurnMetaTracker", () => {
     // since user-A's turn.
     const userB = t.prefix("doc-qa", "user-B", "hello", t0 + 60 * 1000);
     expect(userB).toBe(
-      "[turn_meta: gap=first, lang=en; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=first, lang=en; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 
@@ -200,7 +213,7 @@ describe("TurnMetaTracker", () => {
       writtenAt: now - 90 * 1000,
     });
     expect(block).toBe(
-      "[turn_meta: gap=first, lang=it, written_during_previous_work=1m ago; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
+      "[turn_meta: gap=first, lang=it, written_during_previous_work=1m ago; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n",
     );
   });
 });

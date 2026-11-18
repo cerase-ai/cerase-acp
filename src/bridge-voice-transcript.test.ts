@@ -221,7 +221,7 @@ describe("a voice message reaches the assistant as words", () => {
       );
       await ended(run, "succeeded");
 
-      const expectedPrompt = `[turn_meta: gap=first, lang=unknown; before your first tool call, say in one line what you understood and will do; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n${VOICE_MESSAGE}`;
+      const expectedPrompt = `[turn_meta: gap=first, lang=unknown; if you will call a tool and this message does not set your reply's form, say in one line what you understood and will do before the first call; else start with the answer; address the person as this message addresses you, and switch if your earlier replies did otherwise]\n\n${VOICE_MESSAGE}`;
       expect(run.prompt()).toBe(expectedPrompt);
       expect(run.prompt()).not.toContain("[Voice message");
       expect(run.transcripts).toHaveLength(1);
