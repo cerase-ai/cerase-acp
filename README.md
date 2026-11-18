@@ -33,7 +33,7 @@ Ports it listens on:
 | Port | Listener | When |
 |---|---|---|
 | 7475 (`WORKSPACE_CHAT_PORT`) | Workspace Chat webhook, `POST /chat/event` | while at least one `workspace_chat` agent is registered |
-| 7476 (`CERASE_ACP_INTERNAL_PORT`) | `/internal/inject`, `/internal/status`, `/healthz` | when `CERASE_ACP_INTERNAL_SECRET` is set |
+| 7476 (`CERASE_ACP_INTERNAL_PORT`) | `/internal/inject`, `/internal/summarise`, `/internal/status`, `/healthz` | when `CERASE_ACP_INTERNAL_SECRET` is set |
 | 7474, on 127.0.0.1 | test injection, `/_test/inject` and `/_test/last-reply` | only when `BRIDGE_E2E_TEST=1`; never in production |
 
 ```
@@ -51,7 +51,7 @@ Ports it listens on:
             ▼
        stream buffer → egress filters → send queue → channel adapter → person
 
- control-plane ──► :7476  /internal/inject · /internal/status · /healthz
+ control-plane ──► :7476  /internal/inject · /internal/summarise · /internal/status · /healthz
  bridge ────────► control-plane /api/internal/*  (credits, turn context, approval link, summaries)
 ```
 
@@ -496,6 +496,7 @@ Every route but `/healthz` requires `Authorization: Bearer <CERASE_ACP_INTERNAL_
 | `GET /healthz` | Unauthenticated liveness for the container healthcheck. `200 {status: "ok", adapters, ready, readyOf}`; `503 {status: "no_chat_transport"}` when every adapter reports itself down. Compare `ready` with `readyOf`: an agent whose channel has no readiness signal (Telegram, Slack, `web`) is counted in neither. |
 | `GET /internal/status` | Per agent: `id`, `channel`, `attached`, `ready` (`true`, `false`, or `null` for a channel with no readiness signal), `lastContactAgeMs`, `turnsInFlight`, and `failure` when the bridge has stopped trying. Plus `inject` (in flight, succeeded, failed, last failure) and `session` (the limits in force). |
 | `POST /internal/inject` | `{agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, outcome_ref?}`. Runs `text` as a message from that user and answers 202 as soon as it is accepted; the turn's outcome is in the log and the `inject` block of `/internal/status`. With `outcome_ref`, the turn's outcome is posted to the control-plane's `POST /api/internal/inject-outcome` as `{ref, ok, error?, notice?}` once it ends; 400 for an `outcome_ref` that is not a string of 1 to 200 characters. With `surface_in_chat` (default `true`) a heads-up is posted first: `heads_up` when given, otherwise a fixed Italian line quoting the scheduled message. With `system_message_only` the text is delivered as it is and no turn runs, and a failed delivery answers 409 `{error: "no_shared_server", detail}` when Discord refuses it because the bot shares no server with the person, 503 `{error: "channel_not_ready", detail}` when the channel's client has not logged in yet, and 500 for any other failure. A Discord send that arrives while its client is logging in waits up to 10 s for the login before answering 503. With `system_message_only` and `notice: {title, body, link?: {url, label}}` the message is a platform notice, drawn in the channel's own box (below), and `text` is the same notice spelled out. 400 on a missing field, on a malformed notice and on a notice without `system_message_only`, 401 without the bearer, 403 for a user not in the agent's allowlist. |
+| `POST /internal/summarise` | `{agent_id, user_id, session_id}`. Asks the bridge to summarise that person's session while it is idle. Refused with 409 `{error: "busy"}` while a turn of the conversation runs, while a message of it waits for its turn or is still being prepared, and while the bridge is stopping; nothing then reaches the assistant, and the caller asks again later. Otherwise 202 `{status: "accepted"}`: the bridge holds the conversation's order until the summary is written, so a message sent meanwhile waits for it. 404 `{error: "unknown_session"}` when `session_id` is not the session the bridge holds for that agent and user, live or remembered to resume; 400 on a missing or empty field, 401 without the bearer, 403 for a user not in the agent's allowlist. |
 
 ## Configuration
 

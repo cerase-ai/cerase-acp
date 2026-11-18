@@ -998,6 +998,17 @@ export class SessionManager {
   }
 
   /**
+   * Whether the session a request names is the one this pair is talking
+   * through, live or remembered to resume. Reads memory only, so a caller can
+   * ask it without waiting on the session.
+   */
+  holdsSession(agentId: string, userId: string, sessionId: string): boolean {
+    if (sessionId === "") return false;
+    const key = sessionKey(agentId, userId);
+    return this.entries.get(key)?.sessionId === sessionId || this.resumableSessions.get(key) === sessionId;
+  }
+
+  /**
    * Whether this pair's next message goes to a conversation that already
    * exists: a live session, one being started, or one remembered to resume.
    * False means the next prompt starts a new conversation.

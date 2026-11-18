@@ -219,6 +219,13 @@ export interface DispatcherDeps {
    * says the bridge's own plain sentence.
    */
   toolStep?: (agentId: string, step: ToolStep) => Promise<string>;
+  /**
+   * Writes the summary of a person's session that `askForSummary` accepted,
+   * while the conversation's order is held for it. Optional: only tests pass
+   * it, and without it an accepted summary writes nothing and gives the order
+   * back at once.
+   */
+  writeSummary?: (agentId: string, userId: string) => Promise<void>;
 }
 
 /**
@@ -468,6 +475,14 @@ interface PreparedPrompt {
   instructionsChanged: boolean;
   platformNotes: number;
 }
+
+/**
+ * What `askForSummary` answered: the request was refused for a named reason,
+ * or it was accepted and the write to wait on was started.
+ */
+export type SummaryRequest =
+  | { accepted: false; reason: "unknown_session" | "busy" }
+  | { accepted: true; written: Promise<void> };
 
 export class Dispatcher {
   // Per conversation, the end of the turns being held through a restart. A
@@ -962,16 +977,52 @@ export class Dispatcher {
   }
 
   /**
-   * Wait for every turn of this conversation that came before this one, and
-   * hold the place of this one until `release` is called. `waited` says an
-   * earlier turn was in progress, so a message that could not join it was
-   * written during that work. While it waits the turn is in no queue of the
-   * session manager, so it is counted for the agent as a held turn is.
+   * A summary of a session is asked of the bridge because only the bridge sees
+   * a turn before its message reaches the assistant. It is refused while a turn
+   * of the conversation runs or a message of it waits, including one still
+   * being prepared, or while the bridge is stopping; otherwise it holds the
+   * conversation's order until the summary is written, so a message arriving
+   * meanwhile waits for it.
+   *
+   * Not async: the check and the taking of the order happen in one synchronous
+   * call, with nothing able to run in between.
    */
-  private async turnInOrder(agentId: string, userId: string): Promise<{ release: () => void; waited: boolean }> {
+  askForSummary(agentId: string, userId: string, sessionId: string): SummaryRequest {
+    if (!this.deps.sessionManager.holdsSession(agentId, userId, sessionId)) {
+      return { accepted: false, reason: "unknown_session" };
+    }
     const key = `${agentId}:${userId}`;
+    const received = this.running.get(key)?.size ?? 0;
+    if (this.stopping || this.inOrder.has(key) || received > 0) {
+      logger.info({ agentId, userId }, "summary refused: the conversation has a turn running or a message waiting");
+      return { accepted: false, reason: "busy" };
+    }
+    const { release } = this.takeOrder(key);
+    logger.info({ agentId, userId }, "summary accepted: the conversation's order is held until it is written");
+    const written = Promise.resolve()
+      .then(() => this.writeSummary(agentId, userId))
+      .finally(release);
+    return { accepted: true, written };
+  }
+
+  /**
+   * Write the summary an accepted request asked for. Without the dependency
+   * there is nothing to write, and the order is given back at once.
+   */
+  private writeSummary(agentId: string, userId: string): Promise<void> {
+    const write = this.deps.writeSummary;
+    if (!write) return Promise.resolve();
+    return write(agentId, userId);
+  }
+
+  /**
+   * Take this conversation's place in order, synchronously: read the turn
+   * before, set this one as the new tail, and return both. `release` ends this
+   * place and clears the tail only if it is still this one, so a turn that
+   * released late never removes the place of one that came after it.
+   */
+  private takeOrder(key: string): { before: Promise<void> | undefined; release: () => void } {
     const before = this.inOrder.get(key);
-    const waited = before !== undefined;
     let done: () => void = () => {};
     const mine = new Promise<void>((resolve) => {
       done = resolve;
@@ -982,6 +1033,20 @@ export class Dispatcher {
       done();
       if (this.inOrder.get(key) === tail) this.inOrder.delete(key);
     };
+    return { before, release };
+  }
+
+  /**
+   * Wait for every turn of this conversation that came before this one, and
+   * hold the place of this one until `release` is called. `waited` says an
+   * earlier turn was in progress, so a message that could not join it was
+   * written during that work. While it waits the turn is in no queue of the
+   * session manager, so it is counted for the agent as a held turn is.
+   */
+  private async turnInOrder(agentId: string, userId: string): Promise<{ release: () => void; waited: boolean }> {
+    const key = `${agentId}:${userId}`;
+    const { before, release } = this.takeOrder(key);
+    const waited = before !== undefined;
     if (before) {
       const sm = this.deps.sessionManager;
       const waiting = typeof sm.holdTurn === "function" ? sm.holdTurn(agentId) : () => {};

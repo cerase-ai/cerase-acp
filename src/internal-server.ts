@@ -5,8 +5,19 @@
 //     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
 //     { agent_id, user_id, text, surface_in_chat?, heads_up?, system_message_only?, notice?, from_person?, outcome_ref?, label? }  → 202 · 409 · 503 · 500
 //
-// It runs `dispatcher.handleMessage(agent_id, user_id, text)` as if the
-// user had sent it, optionally posting a deterministic heads-up first. The
+//   POST /internal/summarise
+//     Authorization: Bearer <CERASE_ACP_INTERNAL_SECRET>
+//     { agent_id, user_id, session_id }  → 401 · 400 · 403 · 404 · 409 · 202
+//
+// The summarise route asks the bridge to summarise a person's idle session. It
+// is refused beside a turn of that conversation, or beside a message of it
+// still being prepared, because only the bridge sees a turn before its message
+// reaches the assistant and a summary written beside one would race it. An
+// accepted summary holds the conversation's order until it is written, so a
+// message arriving meanwhile waits for it.
+//
+// The inject route runs `dispatcher.handleMessage(agent_id, user_id, text)` as
+// if the user had sent it, optionally posting a deterministic heads-up first. The
 // console's chat sets `from_person` for what a person typed; a scheduled
 // message does not. A platform note that arrives while a turn of its
 // conversation runs waits for that turn with the other notes, and they share
@@ -274,6 +285,51 @@ async function closeNotice(dispatcher: Dispatcher, body: unknown, res: ServerRes
   }
 }
 
+/**
+ * `POST /internal/summarise`: `{agent_id, user_id, session_id}`. Asks the
+ * bridge to summarise the person's idle session. 400 for a body missing one of
+ * the three non-empty strings, 403 for a user outside the agent's allowlist,
+ * 404 when the pair is not talking through that session, 409 while a turn of
+ * the conversation runs or a message of it waits, and 202 once accepted. The
+ * write runs after the answer, and its failure is logged here because the
+ * caller has already been told the summary was accepted.
+ */
+async function summarise(opts: InternalServerOptions, body: unknown, res: ServerResponse): Promise<void> {
+  const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const agentId = rec.agent_id;
+  const userId = rec.user_id;
+  const sessionId = rec.session_id;
+  if (
+    typeof agentId !== "string" ||
+    agentId === "" ||
+    typeof userId !== "string" ||
+    userId === "" ||
+    typeof sessionId !== "string" ||
+    sessionId === ""
+  ) {
+    sendJson(res, 400, { error: "agent_id, user_id and session_id are required non-empty strings" });
+    return;
+  }
+  if (opts.isAllowed && !opts.isAllowed(agentId, userId)) {
+    logger.info({ agentId, userId }, "summarise rejected: user not in agent allowlist");
+    sendJson(res, 403, { error: "user not allowed for this agent" });
+    return;
+  }
+  const asked = opts.dispatcher.askForSummary(agentId, userId, sessionId);
+  if (!asked.accepted) {
+    if (asked.reason === "unknown_session") {
+      sendJson(res, 404, { error: "unknown_session" });
+      return;
+    }
+    sendJson(res, 409, { error: "busy" });
+    return;
+  }
+  sendJson(res, 202, { status: "accepted" });
+  asked.written.catch((err) => {
+    logger.error({ agentId, userId, err }, "the summary could not be written");
+  });
+}
+
 /** The heads-up posted before processing when surface_in_chat is set. */
 export function headsUpText(body: string): string {
   // The user must see exactly which scheduled message fired and that the
@@ -442,6 +498,15 @@ async function handleRequest(
       return;
     }
     await closeNotice(opts.dispatcher, await readJsonBody(req), res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/internal/summarise") {
+    if (!authorized) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    await summarise(opts, await readJsonBody(req), res);
     return;
   }
 

@@ -1182,7 +1182,10 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
         }
       },
     });
-    logger.info({ port: internalServer.port() }, "internal endpoints started (/internal/inject, /internal/status)");
+    logger.info(
+      { port: internalServer.port() },
+      "internal endpoints started (/internal/inject, /internal/status, /internal/summarise)",
+    );
   }
 
   // Test-mode: start the test server BEFORE the adapters so it's
