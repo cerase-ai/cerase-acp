@@ -204,7 +204,10 @@ allowlist gates `/internal/inject`.
    moment, as at a turn's end, so what the work asked so far reaches the person
    on its own approval page. One that finds no prompt in flight, or a turn a
    scheduled message or a platform note started, waits for the turn to end and
-   goes as its own. Both carry
+   goes as its own. So does one written while the bridge has the session
+   summarise before the turn's message (a summary left unfinished, under
+   Sessions): an answer given inside that summary would be kept as its text and
+   never reach the chat (`PromptOptions.writesSummary`). Both carry
    `written_during_previous_work=<age> ago` in the block. A scheduled message
    (`/internal/inject` without `from_person`), a platform note and a message
    replayed after a restart wait as before, unmarked.

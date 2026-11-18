@@ -369,6 +369,13 @@ export interface PromptOptions {
    * withheld one is, for the assistant's rolling summary.
    */
   onSummary?: (text: string) => void;
+  /**
+   * The prompt is the bridge's own request for a summary of the session's
+   * history. Its updates are summary text, so it is not a turn's work in
+   * progress: a message arriving while it runs waits for its turn rather than
+   * join it (see `workInProgress`).
+   */
+  writesSummary?: boolean;
 }
 
 /**
@@ -425,7 +432,9 @@ interface SessionEntry {
    * A prompt of a turn is in flight on this session: from just before
    * `connection.prompt` until that prompt, and every prompt sent alongside it,
    * have been answered. A message arriving meanwhile may go into the work in
-   * progress rather than wait (see `promptAlongside`).
+   * progress rather than wait (see `promptAlongside`). The bridge's own summary
+   * (`PromptOptions.writesSummary`) does not set it, because an answer given
+   * inside that summary would be kept as summary text and never reach the chat.
    */
   running: boolean;
   /**
@@ -639,7 +648,7 @@ export class SessionManager {
           summary += update.content.text;
         }
       },
-      { onCompaction: options.onCompaction },
+      { onCompaction: options.onCompaction, writesSummary: true },
     );
     const after = await entry.queue.enqueue(readSafely);
     if (after?.kind === "stranded" || after?.kind === "writing") throw new SummaryNotSettledError(entry.sessionId);
@@ -1000,7 +1009,8 @@ export class SessionManager {
 
   /**
    * Whether a turn's prompt is in flight on the pair's session, on a connection
-   * the bridge is not ending: what `promptAlongside` needs to send.
+   * the bridge is not ending: what `promptAlongside` needs to send. Never the
+   * bridge's own summary.
    */
   workInProgress(agentId: string, userId: string): boolean {
     const entry = this.entries.get(sessionKey(agentId, userId));
@@ -1325,7 +1335,7 @@ export class SessionManager {
         if (options?.context) {
           prompt.unshift({ type: "text", text: options.context, annotations: { audience: ["assistant"] } });
         }
-        entry!.running = true;
+        entry!.running = options?.writesSummary !== true;
         try {
           response = await Promise.race([
             (async () => {

@@ -1,3 +1,4 @@
 id	when	expect	file	dec
 ACP-TURN-041	a session writes its summary and the person's messages written during it are its newest messages	the turn is ended by the watchdog as silent only after 15 minutes	src/opencode-rest.ts	
 ACP-TURN-042	a person's message joins a turn, and after the turn's answer opencode writes a summary under that message and stops	the message is sent again once, after the turn's answer, and the person receives its answer	src/dispatcher.ts	
+ACP-TURN-043	a person's message arrives while the bridge has the session summarise before the turn's message	the message waits for its turn, the person receives its own answer, and the rolling summary holds none of it	src/session-manager.ts	

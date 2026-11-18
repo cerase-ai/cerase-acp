@@ -3,6 +3,9 @@
 // opencode writes the summary of the session under it and stops, so the
 // message gets no answer of its own. The bridge withholds the summary from the
 // chat and must send the person's message again, once, as a prompt of its own.
+// A message written while the bridge has the session write its own summary
+// before a message must wait for its turn, because an answer given inside that
+// summary is kept as summary text and never reaches the chat.
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,13 +78,16 @@ interface Harness {
   dispatcher: Dispatcher;
   manager: SessionManager;
   sent: string[];
+  summaries: string[];
   readLog: () => ModelLogEntry[];
   readSession: () => SessionMessage[];
   waitFor: (predicate: (entries: ModelLogEntry[]) => boolean, what: string) => Promise<ModelLogEntry[]>;
   shutdown: () => Promise<void>;
 }
 
-function makeHarness(options: Pick<SessionManagerOptions, "sessionMessages"> = {}): Harness {
+function makeHarness(
+  options: Pick<SessionManagerOptions, "sessionMessages" | "summaryState"> & { summaryAfterAnswer?: boolean } = {},
+): Harness {
   const dir = mkdtempSync(join(tmpdir(), "cerase-written-during-summary-"));
   const modelLog = join(dir, "model.log");
   const sessionLog = join(dir, "session.json");
@@ -102,7 +108,7 @@ function makeHarness(options: Pick<SessionManagerOptions, "sessionMessages"> = {
             `FAKE_STEP_MS=${STEP_MS}`,
             `FAKE_MODEL_LOG=${modelLog}`,
             `FAKE_SESSION_LOG=${sessionLog}`,
-            "FAKE_SUMMARY_AFTER_ANSWER=1",
+            ...(options.summaryAfterAnswer === false ? [] : ["FAKE_SUMMARY_AFTER_ANSWER=1"]),
             "FAKE_SUMMARY_ID=msg_summary",
             "node",
             FAKE_CHILD,
@@ -123,9 +129,11 @@ function makeHarness(options: Pick<SessionManagerOptions, "sessionMessages"> = {
         const messages = parseSessionLog(sessionLog);
         return messages === null ? null : messages.slice(-limit);
       }),
+    summaryState: options.summaryState,
   };
   const manager = new SessionManager(config, undefined, sessionOptions);
   const sent: string[] = [];
+  const summaries: string[] = [];
   const dispatcher = new Dispatcher({
     config,
     sessionManager: manager,
@@ -134,6 +142,7 @@ function makeHarness(options: Pick<SessionManagerOptions, "sessionMessages"> = {
       sent.push(text);
       return { ok: true };
     },
+    onSummaryWithheld: (_agentId, summary) => summaries.push(summary),
   });
 
   const readLog = (): ModelLogEntry[] => {
@@ -171,6 +180,7 @@ function makeHarness(options: Pick<SessionManagerOptions, "sessionMessages"> = {
     dispatcher,
     manager,
     sent,
+    summaries,
     readLog,
     readSession: () => parseSessionLog(sessionLog) ?? [],
     waitFor,
@@ -292,4 +302,54 @@ describe("a message written while the previous work runs and opencode ends on a 
     expect(answers(harness.sent)).toEqual(["answer to: first"]);
     expect(harness.readLog().some((entry) => entry.loop === 2)).toBe(false);
   });
+});
+
+describe("a message written while the bridge has the session summarise before the turn's message", () => {
+  let harness: Harness | undefined;
+
+  afterEach(async () => {
+    await harness?.shutdown();
+    harness = undefined;
+  });
+
+  specTest(
+    "ACP-TURN-043",
+    "waits for its turn and gets its own answer, and the rolling summary holds none of it",
+    async (row) => {
+      let reads = 0;
+      harness = makeHarness({
+        summaryState: async () => {
+          reads += 1;
+          return reads === 1 ? { kind: "stranded", markerId: "c1" } : { kind: "settled" };
+        },
+        summaryAfterAnswer: false,
+      });
+      const { dispatcher } = harness;
+
+      const first = dispatcher.handleMessage("doc-qa", "111", "first");
+      await harness.waitFor(
+        (entries) => entries.some((entry) => entry.taken.includes("/compact")),
+        "the summary's first step",
+      );
+      const second = dispatcher.handleMessage("doc-qa", "111", "second");
+
+      expect(await Promise.all([first, second])).toEqual([{ ok: true }, { ok: true }]);
+
+      expect(answers(harness.sent)).toEqual(["answer to: first", "answer to: second"]);
+      expect(harness.summaries.some((summary) => summary.includes("second"))).toBe(false);
+      expect(harness.summaries).toHaveLength(1);
+
+      const entries = harness.readLog();
+      const summaryLoop = entries.find((entry) => entry.taken.includes("/compact"))!.loop;
+      const secondSteps = entries.filter((entry) => entry.taken.some((taken) => personPart(taken) === "second"));
+      expect(secondSteps).toHaveLength(1);
+      expect(secondSteps.every((entry) => entry.loop !== summaryLoop)).toBe(true);
+
+      const joined = secondSteps.some((entry) => entry.loop === summaryLoop);
+      const received = answers(harness.sent).includes("answer to: second");
+      const kept = harness.summaries.some((summary) => summary.includes("second"));
+      const observed = `the message ${joined ? "joins the summary" : "waits for its turn"}, the person ${received ? "receives its own answer" : "receives no answer to it"}, and the rolling summary ${kept ? "holds its answer" : "holds none of it"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
 });
