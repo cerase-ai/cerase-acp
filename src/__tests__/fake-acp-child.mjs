@@ -145,8 +145,22 @@
 //                              the full text of the last text block of each
 //                              prompt taken at that step. `loop` numbers each
 //                              work from 1 in this child.
+//   FAKE_SUMMARY_AFTER_ANSWER — set to "1" to make the first work's answer
+//                              step wait up to 5 s for a prompt to arrive,
+//                              send its answer as usual, then send one summary
+//                              chunk under FAKE_SUMMARY_ID and end the turn on
+//                              it: the prompt that arrived during the answer
+//                              gets no answer of its own. Every answer chunk
+//                              then carries the messageId `msg_answer_<loop>`.
+//   FAKE_SESSION_LOG        — a file the loop keeps the session's messages in,
+//                              as one JSON array, oldest first, in the shape
+//                              opencode's GET /session/{id}/message serves. A
+//                              prompt appends its user message, an answer step
+//                              appends its answer, and the summary appends
+//                              itself under the prompt it summarises. Written
+//                              whole through a temporary file and a rename.
 
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const SLOT_DOWN_FILE = process.env.FAKE_SLOT_DOWN_FILE;
@@ -211,6 +225,18 @@ const ECHO_MODEL = process.env.FAKE_ECHO_MODEL === "1";
 const LOOP_STEPS = parseInt(process.env.FAKE_LOOP_STEPS ?? "0", 10);
 const STEP_MS = parseInt(process.env.FAKE_STEP_MS ?? "100", 10);
 const MODEL_LOG = process.env.FAKE_MODEL_LOG;
+// The first work ends on a summary written under the prompt that arrived
+// during its answer, instead of a second work taking that prompt: what
+// opencode's loop does when it finds a summary's marker pending after the
+// answer.
+const SUMMARY_AFTER_ANSWER = process.env.FAKE_SUMMARY_AFTER_ANSWER === "1";
+const SUMMARY_ID = process.env.FAKE_SUMMARY_ID ?? "msg_summary";
+const SUMMARY_TEXT = "## Goal\n- the person's request";
+// Where the loop keeps the session's messages, in the shape opencode's
+// GET /session/{id}/message serves. Off unless a test asks for it.
+const SESSION_LOG = process.env.FAKE_SESSION_LOG;
+// How many prompts this child has received, numbering their user messages.
+let sessionPrompts = 0;
 
 // The mode this fixture is in. Starts at the first advertised one, the way a
 // real agent starts at its default rather than at nothing.
@@ -285,6 +311,46 @@ function personWordsOf(text) {
   return text;
 }
 
+/** The session's messages as stored, or [] when there are none yet. */
+function readSessionLog() {
+  if (!SESSION_LOG || !existsSync(SESSION_LOG)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(SESSION_LOG, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Replace the session log in one step, so a reader never sees half a file. */
+function writeSessionLog(messages) {
+  if (!SESSION_LOG) return;
+  const temporary = `${SESSION_LOG}.tmp`;
+  writeFileSync(temporary, JSON.stringify(messages));
+  renameSync(temporary, SESSION_LOG);
+}
+
+function appendSessionMessage(message) {
+  if (!SESSION_LOG) return;
+  const messages = readSessionLog();
+  messages.push(message);
+  writeSessionLog(messages);
+}
+
+/** The user message a prompt appends, with one part per prompt block. */
+function userMessageFor(n, blocks) {
+  return {
+    info: { id: `msg_user_${n}`, role: "user", time: { created: Date.now() } },
+    parts: blocks.map((block) => {
+      const audience = block.annotations?.audience;
+      const synthetic = Array.isArray(audience) && audience.length === 1 && audience[0] === "assistant";
+      return synthetic
+        ? { type: "text", text: block.text ?? "", synthetic: true }
+        : { type: "text", text: block.text ?? "" };
+    }),
+  };
+}
+
 function sendUpdate(sessionId, update) {
   send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
 }
@@ -332,13 +398,58 @@ async function runLoop(sessionId, state) {
           sendUpdate(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
           continue;
         }
-        await sleep(STEP_MS);
         const words = taken.map((p) => personWordsOf(p.text));
-        sendUpdate(sessionId, {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: `answer to: ${words.join(" + ")}` },
+        const answerText = `answer to: ${words.join(" + ")}`;
+        // The answer step opens with the answer as the newest assistant
+        // message; the summary that follows the wait is appended after it.
+        appendSessionMessage({
+          info: {
+            id: `msg_answer_${loop}`,
+            role: "assistant",
+            parentID: taken[taken.length - 1]?.userId,
+            finish: "stop",
+            time: { created: Date.now(), completed: Date.now() },
+          },
+          parts: [{ type: "text", text: answerText }],
         });
-        for (const prompt of taken) {
+        const summaryUnder = SUMMARY_AFTER_ANSWER && loop === 1;
+        if (summaryUnder) {
+          // opencode reads a prompt written during the answer step into the
+          // same turn, so the answer step keeps the door open for it.
+          const deadline = Date.now() + 5_000;
+          while (state.queue.length === 0 && Date.now() < deadline) await sleep(10);
+        }
+        await sleep(STEP_MS);
+        const answer = {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: answerText },
+        };
+        if (SUMMARY_AFTER_ANSWER) answer.messageId = `msg_answer_${loop}`;
+        sendUpdate(sessionId, answer);
+        // The prompts that arrived during the answer step are the summary's
+        // parent, and get no work of their own: the turn ends on the summary.
+        const summarised = summaryUnder ? state.queue.splice(0) : [];
+        if (summarised.length > 0) {
+          sendUpdate(sessionId, {
+            sessionUpdate: "agent_message_chunk",
+            messageId: SUMMARY_ID,
+            content: { type: "text", text: SUMMARY_TEXT },
+          });
+          appendSessionMessage({
+            info: {
+              id: SUMMARY_ID,
+              role: "assistant",
+              summary: true,
+              mode: "compaction",
+              agent: "compaction",
+              parentID: summarised[summarised.length - 1]?.userId,
+              finish: "stop",
+              time: { created: Date.now(), completed: Date.now() },
+            },
+            parts: [{ type: "text", text: SUMMARY_TEXT }],
+          });
+        }
+        for (const prompt of [...taken, ...summarised]) {
           send({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
         }
         break;
@@ -354,7 +465,12 @@ async function runLoop(sessionId, state) {
 function takeForLoop(sessionId, msg) {
   const state = loopStateOf(sessionId);
   const blocks = msg.params?.prompt ?? [];
-  state.queue.push({ id: msg.id, text: blocks[blocks.length - 1]?.text ?? "" });
+  sessionPrompts += 1;
+  const n = sessionPrompts;
+  // The user message is stored with the prompt, so the answer and the summary
+  // can name it as their parent.
+  appendSessionMessage(userMessageFor(n, blocks));
+  state.queue.push({ id: msg.id, text: blocks[blocks.length - 1]?.text ?? "", userId: `msg_user_${n}` });
   if (!state.running) {
     state.running = true;
     runLoop(sessionId, state).catch(() => {});

@@ -222,6 +222,89 @@ export function execMessageKindProbe(exec: SlotExec = dockerExec): MessageKindPr
   };
 }
 
+/** A message of the person's that a summary left without an answer, and the text to send again. */
+export interface UnansweredMessage {
+  id: string;
+  text: string;
+}
+
+interface UnansweredRestMessage {
+  info?: {
+    id?: unknown;
+    role?: unknown;
+    summary?: unknown;
+    mode?: unknown;
+    agent?: unknown;
+  };
+  parts?: Array<{ type?: unknown; text?: unknown; synthetic?: unknown }>;
+}
+
+/** Whether an assistant message is a summary, by whichever signal opencode stamped on it. */
+function isSummaryMessage(info: UnansweredRestMessage["info"]): boolean {
+  return info?.summary === true || info?.mode === "compaction" || info?.agent === "compaction";
+}
+
+/** The person's words in a message, or null when the message holds none. */
+function personTextOf(message: UnansweredRestMessage): string | null {
+  const parts = message.parts ?? [];
+  if (parts.some((part) => part?.type === "compaction")) return null;
+  const texts = parts
+    .filter(
+      (part) =>
+        part?.type === "text" && part.synthetic !== true && typeof part.text === "string" && part.text.trim() !== "",
+    )
+    .map((part) => part.text as string);
+  return texts.length === 0 ? null : texts.join("\n\n");
+}
+
+/**
+ * The person's messages that a summary left without an answer, oldest first.
+ *
+ * A summary asked for while a turn runs can be written after the turn's answer
+ * under the newest user message, a message the person sent into the work in
+ * progress, and the loop then stops, so that message is never answered. A summary is skipped and an answer ends the search, because every
+ * message before an answer has one. A marker and a synthetic-only message are
+ * skipped too: neither is something the person wrote.
+ */
+export function unansweredAfterSummaryOf(messages: unknown): UnansweredMessage[] {
+  if (!Array.isArray(messages)) return [];
+  const list = messages.filter((m): m is UnansweredRestMessage => typeof m === "object" && m !== null);
+  let newestAssistant: UnansweredRestMessage | undefined;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i]?.info?.role === "assistant") {
+      newestAssistant = list[i];
+      break;
+    }
+  }
+  if (!newestAssistant || !isSummaryMessage(newestAssistant.info)) return [];
+  const unanswered: UnansweredMessage[] = [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const message = list[i] as UnansweredRestMessage;
+    const info = message.info ?? {};
+    if (info.role === "assistant") {
+      if (isSummaryMessage(info)) continue;
+      break;
+    }
+    if (info.role !== "user") continue;
+    if (typeof info.id !== "string" || info.id.length === 0) continue;
+    const text = personTextOf(message);
+    if (text === null) continue;
+    unanswered.push({ id: info.id, text });
+  }
+  return unanswered.reverse();
+}
+
+/** Reads a session's newest messages, oldest first; null when the slot cannot say. */
+export type SessionMessagesRead = (container: string, sessionId: string, limit: number) => Promise<unknown[] | null>;
+
+/** The reader that asks the slot's opencode server: see SessionMessagesRead. */
+export function execSessionMessages(exec: SlotExec = dockerExec): SessionMessagesRead {
+  return async (container, sessionId, limit) => {
+    const body = await readSlot(exec, container, `/session/${encodeURIComponent(sessionId)}/message?limit=${limit}`);
+    return Array.isArray(body) ? body : null;
+  };
+}
+
 /** Production fetcher: `docker exec` through the bridge's docker proxy. */
 export const defaultFetcher: CanonicalFetcher = execFetcher();
 

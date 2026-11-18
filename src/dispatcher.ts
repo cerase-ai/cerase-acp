@@ -424,6 +424,8 @@ interface ReplyStream {
   discard: () => void;
   endedInMarkup: () => boolean;
   endedInOtherScript: () => boolean;
+  /** True when the last message the stream judged by its message id was a summary. */
+  endedOnSummary: () => boolean;
 }
 
 /** One message whose kind a reply stream is deciding: see `Dispatcher.replyStream`. */
@@ -1149,6 +1151,42 @@ export class Dispatcher {
       this.deps.attachOutcomes?.take(agentId, userId);
       return this.keepForNextBridge(agentId, userId, text, receivedAt);
     }
+    // A summary asked for while the turn ran can be written after the turn's
+    // answer, under a message the person sent into the work in progress, and
+    // the loop then stops: that message has no answer of its own. Each such
+    // message is sent again, in order and once, as a prompt of its own; these
+    // prompts are not checked again, so a summary under one of them does not
+    // start the search over.
+    const sm = this.deps.sessionManager;
+    if (!failed && !this.stopping && reply.endedOnSummary() && typeof sm.unansweredAfterSummary === "function") {
+      const unanswered = await sm.unansweredAfterSummary(agentId, userId);
+      for (const message of unanswered) {
+        if (this.stopping || failed) break;
+        logger.warn(
+          { agentId, userId, messageId: message.id },
+          "the turn ended on a summary written under a message of the person's — sending that message again",
+        );
+        ({ queue, reply } = this.openReply(agentId, userId, send, text, judgeScript));
+        // Only text this prompt delivers counts: text it pushed and the stream
+        // withheld whole, another summary, answers nobody.
+        const producedBefore: boolean = produced;
+        produced = false;
+        try {
+          await sm.prompt(agentId, userId, message.text, onUpdate, { onCompaction });
+        } catch (err) {
+          failed = true;
+          turnError = err instanceof Error ? err : new Error(String(err));
+          creditExhausted = isCreditExhaustedError(err);
+          restartOutlasted = err instanceof SessionRestartError;
+          logger.error({ err, agentId, userId, creditExhausted }, "the try after an unanswered message failed");
+        } finally {
+          await reply.end();
+          const drained = await queue.drain();
+          if (drainResult.ok) drainResult = drained;
+          produced = producedBefore || (produced && this.spoke(queue, drained, reply));
+        }
+      }
+    }
     // A turn that ended with no text and no tool call is asked again at once,
     // on the same session, with a note telling the assistant to answer. Nothing
     // is sent to the person between tries, so the typing indicator the adapter
@@ -1690,6 +1728,9 @@ export class Dispatcher {
     // True while the last text of the turn was held back for its writing
     // system; anything sent after it answers the person and clears it.
     let endedInOtherScript = false;
+    // True when the last message the stream judged by its message id was a
+    // summary, which is the message the turn ended on.
+    let endedOnSummary = false;
     // On a whole-answer channel, what has been delivered of the answer and not
     // yet sent. Every cut inside one answer falls at the start of a line — the
     // heading or the tool-call block a hold starts at — or at the end of an
@@ -1855,6 +1896,7 @@ export class Dispatcher {
       }
       // An answer goes on to the buffer as it was pushed. A summary is kept
       // whole and dropped when its message ends.
+      endedOnSummary = message.kind === "summary";
       if (message.kind === "summary") message.text += text;
       else buffer.push(text);
     };
@@ -1862,9 +1904,15 @@ export class Dispatcher {
     return {
       push: (update) => {
         if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+          // A tool call after a message is the turn past it, so the message the
+          // turn ends on is no longer that summary.
+          endedOnSummary = false;
           if (kindProbe && queued > 0) {
             enqueue(() => {
               if (discarded) return;
+              // After the messages still being judged, so a summary they settle
+              // does not outlive the tool call that came after it.
+              endedOnSummary = false;
               buffer.flush();
               if (whole) sendAnswer();
             });
@@ -1927,6 +1975,7 @@ export class Dispatcher {
       },
       endedInMarkup: () => endedInMarkup,
       endedInOtherScript: () => endedInOtherScript,
+      endedOnSummary: () => endedOnSummary,
     };
   }
 

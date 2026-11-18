@@ -9,14 +9,18 @@ import {
   defaultFetcher,
   execMessageKindProbe,
   execOpenCallProbe,
+  execSessionMessages,
   execSummaryStateProbe,
   type MessageKind,
   type MessageKindProbe,
   type OpenCall,
   type OpenCallProbe,
   type RestEndpoint,
+  type SessionMessagesRead,
   type SummaryState,
   type SummaryStateProbe,
+  type UnansweredMessage,
+  unansweredAfterSummaryOf,
 } from "./opencode-rest.js";
 import { decidePermissionOutcome } from "./permission-policy.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -175,6 +179,13 @@ export interface SessionManagerOptions {
    * for an agent whose spawn is a `docker exec` into a slot.
    */
   summaryState?: (agent: AgentConfig, sessionId: string) => Promise<SummaryState | null>;
+  /**
+   * Reads a session's newest `limit` messages as the slot's opencode server
+   * serves them, oldest first; null when they could not be read. Tests pass
+   * one. Without it the slot's opencode server is asked, for an agent whose
+   * spawn is a `docker exec` into a slot.
+   */
+  sessionMessages?: (agent: AgentConfig, sessionId: string, limit: number) => Promise<unknown[] | null>;
 }
 
 /**
@@ -422,6 +433,11 @@ interface SessionEntry {
    * queue, which that turn waits for before it drains: see `promptAlongside`.
    */
   alongside: Set<Promise<unknown>>;
+  /**
+   * The ids of the person's messages already sent again on this session, so a
+   * message a summary left unanswered is sent at most once.
+   */
+  askedAgain: Set<string>;
 }
 
 const sessionKey = (agentId: string, userId: string) => `${agentId}:${userId}`;
@@ -442,6 +458,9 @@ function currentModelOf(res: { configOptions?: unknown } | undefined): string | 
   }
   return undefined;
 }
+
+// How many of the newest messages are read: the person's unanswered ones are the last few.
+const UNANSWERED_AFTER_SUMMARY_WINDOW = 20;
 
 // How many sessions stay resumable. One short string per (agent,user) that has
 // ever talked, so the map would otherwise grow for the life of the process and
@@ -515,6 +534,26 @@ export class SessionManager {
     this.openCallProbe = options?.openCallProbe;
     this.messageKindProbe = options?.messageKindProbe;
     this.summaryState = options?.summaryState;
+    this.sessionMessages = options?.sessionMessages;
+  }
+
+  // See SessionManagerOptions.sessionMessages.
+  private readonly sessionMessages?: (
+    agent: AgentConfig,
+    sessionId: string,
+    limit: number,
+  ) => Promise<unknown[] | null>;
+  private readonly slotSessionMessages: SessionMessagesRead = execSessionMessages();
+
+  /** How this agent's sessions are read for messages a summary left unanswered; undefined when they cannot be. */
+  private sessionMessagesFor(
+    agent: AgentConfig,
+  ): ((sessionId: string, limit: number) => Promise<unknown[] | null>) | undefined {
+    const injected = this.sessionMessages;
+    if (injected) return (sessionId, limit) => injected(agent, sessionId, limit);
+    const container = slotContainerOf(agent.spawn);
+    if (container === null) return undefined;
+    return (sessionId, limit) => this.slotSessionMessages(container, sessionId, limit);
   }
 
   // See SessionManagerOptions.summaryState.
@@ -656,6 +695,36 @@ export class SessionManager {
         "could not ask the slot what kind of message this is — taken as unknown",
       );
       return null;
+    }
+  }
+
+  /**
+   * The person's messages this session's summary left without an answer, each
+   * once per session. A summary asked for while a turn runs can be written
+   * after the turn's answer under a message the person sent into the work in
+   * progress, and the loop then stops, so that message gets no answer of its
+   * own. Never throws: a failed read leaves nothing to send
+   * again.
+   */
+  async unansweredAfterSummary(agentId: string, userId: string): Promise<UnansweredMessage[]> {
+    const entry = this.entries.get(sessionKey(agentId, userId));
+    if (!entry || entry.closed) return [];
+    const agent = this.agentsById.get(agentId);
+    if (!agent) return [];
+    const read = this.sessionMessagesFor(agent);
+    if (!read) return [];
+    try {
+      const messages = await read(entry.sessionId, UNANSWERED_AFTER_SUMMARY_WINDOW);
+      if (messages === null) return [];
+      const unanswered = unansweredAfterSummaryOf(messages).filter((message) => !entry.askedAgain.has(message.id));
+      for (const message of unanswered) entry.askedAgain.add(message.id);
+      return unanswered;
+    } catch (err) {
+      logger.warn(
+        { agentId, userId, reason: err instanceof Error ? err.message : String(err) },
+        "could not read the messages a summary left unanswered — none are sent again",
+      );
+      return [];
     }
   }
 
@@ -1706,6 +1775,7 @@ export class SessionManager {
       outgrown: false,
       running: false,
       alongside: new Set(),
+      askedAgain: new Set(),
     };
     entryRef = entry;
     // Recorded now, while the session is alive, and not only when its child

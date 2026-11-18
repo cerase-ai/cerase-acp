@@ -164,6 +164,18 @@ allowlist gates `/internal/inject`.
   unfinished summary after that is not sent the message, and the turn fails with
   its notice. Code: `summaryStateOf` in `src/opencode-rest.ts`,
   `SessionManager.settleSummary`.
+- **A message the summary left unanswered.** A summary asked for while a turn
+  runs (the `opencode serve` process and the `opencode acp` process each loop on
+  the session) can be written after the turn's answer under the newest user
+  message, and the loop then stops. When that is a message the person sent into
+  the work in progress, opencode takes the summary as its answer and the message
+  gets none of its own. When the turn's last message is a
+  summary, the bridge reads the session's newest 20 messages and sends again, in
+  order and once each, every message of the person's with no answer after it,
+  each as a prompt of its own. Those prompts are not checked again, so a summary
+  under one of them cannot start the same search over. Code:
+  `unansweredAfterSummaryOf` in `src/opencode-rest.ts`,
+  `SessionManager.unansweredAfterSummary`, `Dispatcher.answer`.
 
 ### Each turn
 

@@ -7,8 +7,10 @@ import {
   defaultEndpointForAgent,
   execFetcher,
   execOpenCallProbe,
+  execSessionMessages,
   SLOT_REST_SCRIPT,
   type SlotExec,
+  unansweredAfterSummaryOf,
 } from "./opencode-rest.js";
 
 // The bridge reads a slot's canonical message from INSIDE the slot. It used to
@@ -222,6 +224,95 @@ describe("execOpenCallProbe", () => {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.at(-1)).toBe("/session/ses_a/message?limit=1");
+  });
+});
+
+describe("unansweredAfterSummaryOf", () => {
+  const answer = (id: string) => ({ info: { id, role: "assistant" }, parts: [] });
+  const summary = (info: Record<string, unknown> = {}) => ({
+    info: { id: "msg_sum", role: "assistant", summary: true, ...info },
+    parts: [],
+  });
+  const person = (id: string, text: string, parts: unknown[] = []) => ({
+    info: { id, role: "user" },
+    parts: [{ type: "text", text }, ...parts],
+  });
+
+  it("returns nothing when the newest assistant message is an answer", () => {
+    expect(unansweredAfterSummaryOf([person("msg_1", "first"), answer("msg_a")])).toEqual([]);
+  });
+
+  it("returns nothing when there is no assistant message", () => {
+    expect(unansweredAfterSummaryOf([person("msg_1", "first")])).toEqual([]);
+  });
+
+  it("returns the person's messages after the last answer, oldest first, with their text", () => {
+    const messages = [
+      person("msg_1", "first"),
+      answer("msg_a"),
+      person("msg_2", "second"),
+      person("msg_3", "third"),
+      summary(),
+    ];
+    expect(unansweredAfterSummaryOf(messages)).toEqual([
+      { id: "msg_2", text: "second" },
+      { id: "msg_3", text: "third" },
+    ]);
+  });
+
+  it("skips a compaction marker and a synthetic-only message, and leaves a synthetic part out of the text", () => {
+    const messages = [
+      person("msg_1", "first"),
+      answer("msg_a"),
+      { info: { id: "msg_marker", role: "user" }, parts: [{ type: "compaction", auto: true }] },
+      { info: { id: "msg_synthetic", role: "user" }, parts: [{ type: "text", text: "internal", synthetic: true }] },
+      {
+        info: { id: "msg_2", role: "user" },
+        parts: [
+          { type: "text", text: "internal", synthetic: true },
+          { type: "text", text: "second" },
+        ],
+      },
+      summary(),
+    ];
+    expect(unansweredAfterSummaryOf(messages)).toEqual([{ id: "msg_2", text: "second" }]);
+  });
+
+  it("does not list a message followed by an answer and then a summary", () => {
+    const messages = [person("msg_1", "first"), answer("msg_a"), person("msg_2", "second"), answer("msg_b"), summary()];
+    expect(unansweredAfterSummaryOf(messages)).toEqual([]);
+  });
+
+  it("recognises each of the three summary signals", () => {
+    for (const info of [
+      { id: "msg_sum", role: "assistant", summary: true },
+      { id: "msg_sum", role: "assistant", mode: "compaction" },
+      { id: "msg_sum", role: "assistant", agent: "compaction" },
+    ]) {
+      const messages = [person("msg_1", "first"), answer("msg_a"), person("msg_2", "second"), { info, parts: [] }];
+      expect(unansweredAfterSummaryOf(messages)).toEqual([{ id: "msg_2", text: "second" }]);
+    }
+  });
+
+  it("returns nothing when the messages are not an array, and ignores non-object entries", () => {
+    expect(unansweredAfterSummaryOf(null)).toEqual([]);
+    expect(unansweredAfterSummaryOf({ messages: [] })).toEqual([]);
+    expect(unansweredAfterSummaryOf([null, "a string", 4, summary()])).toEqual([]);
+  });
+});
+
+describe("execSessionMessages", () => {
+  it("asks for the limit on the encoded session id and returns the messages", async () => {
+    const messages = [
+      { info: { id: "msg_1", role: "user" }, parts: [{ type: "text", text: "first" }] },
+      { info: { id: "msg_sum", role: "assistant", summary: true }, parts: [] },
+    ];
+    const { exec, calls } = answeringByLimit(messages);
+
+    expect(await execSessionMessages(exec)("cerase-agent-3", "ses_$(id)", 20)).toEqual(messages);
+    expect(calls).toEqual([
+      ["exec", "cerase-agent-3", "sh", "-c", SLOT_REST_SCRIPT, "sh", "/session/ses_%24(id)/message?limit=20"],
+    ]);
   });
 });
 

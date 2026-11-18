@@ -1,0 +1,295 @@
+// A message a person writes while their assistant is writing the answer to the
+// previous one. The message joins the work in progress, and after the answer
+// opencode writes the summary of the session under it and stops, so the
+// message gets no answer of its own. The bridge withholds the summary from the
+// chat and must send the person's message again, once, as a prompt of its own.
+
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import type { AgentConfig, BridgeConfig } from "./config.js";
+import { Dispatcher } from "./dispatcher.js";
+import { SessionManager, type SessionManagerOptions } from "./session-manager.js";
+import { specTest } from "./test-support/spec-rows.js";
+import { TurnMetaTracker } from "./turn-meta.js";
+
+const FAKE_CHILD = fileURLToPath(new URL("./__tests__/fake-acp-child.mjs", import.meta.url));
+
+// Three tool steps before the answer leave room to write during the work, and
+// 150 ms is long enough for the second message to arrive without a fixed sleep.
+const LOOP_STEPS = 3;
+const STEP_MS = 150;
+const WAIT_MS = 6_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** What the fake agent logged at the start of one loop step. */
+interface ModelLogEntry {
+  loop: number;
+  step: number;
+  answer: boolean;
+  taken: string[];
+}
+
+/** One part of a message in the session log. */
+interface SessionPart {
+  type?: string;
+  text?: string;
+  synthetic?: boolean;
+}
+
+/** One message in the session log, as opencode stores it. */
+interface SessionMessage {
+  info?: { id?: string; role?: string; parentID?: string; summary?: boolean };
+  parts?: SessionPart[];
+}
+
+/** The session log's messages, or null when it is missing or does not parse. */
+function parseSessionLog(path: string): SessionMessage[] | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as SessionMessage[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The person's words in a prompt, after the bridge's [turn_meta:] block. */
+function personPart(taken: string): string {
+  if (taken.startsWith("[turn_meta:")) {
+    const blank = taken.indexOf("\n\n");
+    if (blank >= 0) return taken.slice(blank + 2);
+  }
+  return taken;
+}
+
+interface Harness {
+  dispatcher: Dispatcher;
+  manager: SessionManager;
+  sent: string[];
+  readLog: () => ModelLogEntry[];
+  readSession: () => SessionMessage[];
+  waitFor: (predicate: (entries: ModelLogEntry[]) => boolean, what: string) => Promise<ModelLogEntry[]>;
+  shutdown: () => Promise<void>;
+}
+
+function makeHarness(options: Pick<SessionManagerOptions, "sessionMessages"> = {}): Harness {
+  const dir = mkdtempSync(join(tmpdir(), "cerase-written-during-summary-"));
+  const modelLog = join(dir, "model.log");
+  const sessionLog = join(dir, "session.json");
+  const config: BridgeConfig = {
+    agents: [
+      {
+        id: "doc-qa",
+        channel: "discord",
+        cwd: "/home/agent/cerase/workspace",
+        mode: "cerase",
+        bot_token: "irrelevant",
+        allowed_users: ["111"],
+        spawn: {
+          command: "env",
+          args: [
+            "--",
+            `FAKE_LOOP_STEPS=${LOOP_STEPS}`,
+            `FAKE_STEP_MS=${STEP_MS}`,
+            `FAKE_MODEL_LOG=${modelLog}`,
+            `FAKE_SESSION_LOG=${sessionLog}`,
+            "FAKE_SUMMARY_AFTER_ANSWER=1",
+            "FAKE_SUMMARY_ID=msg_summary",
+            "node",
+            FAKE_CHILD,
+          ],
+        },
+      },
+    ],
+    session: { idle_timeout_minutes: 60, max_concurrent: 16 },
+  };
+  // The session is read from the fake child's log unless a test fixes what it shows.
+  const sessionOptions: SessionManagerOptions = {
+    endpointResolver: () => null,
+    messageKindProbe: async (_agent: AgentConfig, _sessionId: string, messageId: string) =>
+      messageId === "msg_summary" ? "summary" : "answer",
+    sessionMessages:
+      options.sessionMessages ??
+      (async (_agent: AgentConfig, _sessionId: string, limit: number) => {
+        const messages = parseSessionLog(sessionLog);
+        return messages === null ? null : messages.slice(-limit);
+      }),
+  };
+  const manager = new SessionManager(config, undefined, sessionOptions);
+  const sent: string[] = [];
+  const dispatcher = new Dispatcher({
+    config,
+    sessionManager: manager,
+    turnMeta: new TurnMetaTracker(),
+    resolveSendTarget: () => async (text) => {
+      sent.push(text);
+      return { ok: true };
+    },
+  });
+
+  const readLog = (): ModelLogEntry[] => {
+    let raw: string;
+    try {
+      raw = readFileSync(modelLog, "utf8");
+    } catch {
+      return [];
+    }
+    const entries: ModelLogEntry[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line) as ModelLogEntry);
+      } catch {
+        // A line still being appended: the next poll reads it whole.
+      }
+    }
+    return entries;
+  };
+
+  const waitFor = async (predicate: (entries: ModelLogEntry[]) => boolean, what: string): Promise<ModelLogEntry[]> => {
+    const deadline = Date.now() + WAIT_MS;
+    for (;;) {
+      const entries = readLog();
+      if (predicate(entries)) return entries;
+      if (Date.now() > deadline) {
+        throw new Error(`timed out waiting for ${what}; the model log held:\n${JSON.stringify(entries, null, 2)}`);
+      }
+      await sleep(10);
+    }
+  };
+
+  return {
+    dispatcher,
+    manager,
+    sent,
+    readLog,
+    readSession: () => parseSessionLog(sessionLog) ?? [],
+    waitFor,
+    shutdown: async () => {
+      await manager.shutdown();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** The separate answers the channel received, in order. */
+function answers(sent: string[]): string[] {
+  return sent.map((text) => text.replace(/ ⏎$/u, "")).filter((text) => text.includes("answer to:"));
+}
+
+/** The user messages whose non-synthetic text is the person's words. */
+function personMessages(messages: SessionMessage[], words: string): SessionMessage[] {
+  return messages.filter(
+    (message) =>
+      message.info?.role === "user" &&
+      (message.parts ?? []).some(
+        (part) => part.type === "text" && part.synthetic !== true && personPart(part.text ?? "") === words,
+      ),
+  );
+}
+
+describe("a message written while the previous work runs and opencode ends on a summary", () => {
+  let harness: Harness | undefined;
+
+  afterEach(async () => {
+    await harness?.shutdown();
+    harness = undefined;
+  });
+
+  specTest(
+    "ACP-TURN-042",
+    "is sent again after the turn's answer when the summary ends it, and is answered",
+    async (row) => {
+      harness = makeHarness();
+      const { dispatcher } = harness;
+
+      const first = dispatcher.handleMessage("doc-qa", "111", "first");
+      await harness.waitFor(
+        (entries) => entries.some((entry) => entry.loop === 1 && entry.answer),
+        "the first work's answer step",
+      );
+      const second = dispatcher.handleMessage("doc-qa", "111", "second");
+
+      const results = await Promise.all([first, second]);
+      expect(results).toEqual([{ ok: true }, { ok: true }]);
+
+      expect(answers(harness.sent)).toEqual(["answer to: first", "answer to: second"]);
+      expect(harness.sent.some((text) => text.includes("## Goal"))).toBe(false);
+
+      const entries = harness.readLog();
+      const secondSteps = entries.filter((entry) => entry.taken.some((t) => personPart(t) === "second"));
+      expect(secondSteps).toHaveLength(1);
+      expect(secondSteps[0]!.loop).toBe(2);
+
+      const sentAgainMessages = personMessages(harness.readSession(), "second");
+      expect(sentAgainMessages).toHaveLength(2);
+
+      const order = answers(harness.sent);
+      const received = order.includes("answer to: second");
+      const sentAgain = sentAgainMessages.length - 1;
+      const afterAnswer = received && order.indexOf("answer to: second") > order.indexOf("answer to: first");
+      const observed = `the message is ${sentAgain === 1 ? "sent again once" : `sent again ${sentAgain} times`}, ${afterAnswer ? "after the turn's answer" : "not after the turn's answer"}, and the person ${received ? "receives its answer" : "receives no answer to it"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  it("sends the message again once even when the session never shows it answered", async () => {
+    const fixed: SessionMessage[] = [
+      { info: { id: "msg_user_first", role: "user" }, parts: [{ type: "text", text: "first" }] },
+      { info: { id: "msg_answer", role: "assistant" }, parts: [{ type: "text", text: "answer to: first" }] },
+      { info: { id: "msg_user_second", role: "user" }, parts: [{ type: "text", text: "second" }] },
+      { info: { id: "msg_summary", role: "assistant", summary: true }, parts: [] },
+    ];
+    harness = makeHarness({ sessionMessages: async () => fixed });
+    const { dispatcher } = harness;
+
+    const first = dispatcher.handleMessage("doc-qa", "111", "first");
+    await harness.waitFor(
+      (entries) => entries.some((entry) => entry.loop === 1 && entry.answer),
+      "the first work's answer step",
+    );
+    const second = dispatcher.handleMessage("doc-qa", "111", "second");
+
+    const results = await Promise.all([first, second]);
+    expect(results).toEqual([{ ok: true }, { ok: true }]);
+
+    expect(answers(harness.sent)).toEqual(["answer to: first", "answer to: second"]);
+
+    const secondSteps = harness.readLog().filter((entry) => entry.taken.some((text) => personPart(text) === "second"));
+    expect(secondSteps).toHaveLength(1);
+    expect(secondSteps[0]!.loop).toBe(2);
+  });
+
+  it("sends nothing again when the message is followed by an answer before the summary", async () => {
+    const fixed: SessionMessage[] = [
+      { info: { id: "msg_user_first", role: "user" }, parts: [{ type: "text", text: "first" }] },
+      { info: { id: "msg_user_second", role: "user" }, parts: [{ type: "text", text: "second" }] },
+      { info: { id: "msg_answer_second", role: "assistant" }, parts: [{ type: "text", text: "answer to: second" }] },
+      { info: { id: "msg_summary", role: "assistant", summary: true }, parts: [] },
+    ];
+    harness = makeHarness({ sessionMessages: async () => fixed });
+    const { dispatcher } = harness;
+
+    const first = dispatcher.handleMessage("doc-qa", "111", "first");
+    await harness.waitFor(
+      (entries) => entries.some((entry) => entry.loop === 1 && entry.answer),
+      "the first work's answer step",
+    );
+    const second = dispatcher.handleMessage("doc-qa", "111", "second");
+
+    const results = await Promise.all([first, second]);
+    expect(results).toEqual([{ ok: true }, { ok: true }]);
+
+    expect(answers(harness.sent)).toEqual(["answer to: first"]);
+    expect(harness.readLog().some((entry) => entry.loop === 2)).toBe(false);
+  });
+});
