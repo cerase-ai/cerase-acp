@@ -30,7 +30,7 @@
 # patch release, so the same Dockerfile would build a different image the next
 # day. The slot image (cerase-core, agent-runtime/slot/Dockerfile) is pinned to
 # the same node release; refresh the digests of both when the node line moves.
-FROM node:22.23.4@sha256:63538dfe497cc29dfafdda25ada09b46db68a3f4cc205abf1f5d6bf0913f3384 AS build
+FROM node:22.23.5@sha256:e13726ca604184d7a91fcacab1fc09eefd642dc28e79ac34e85540dd93b78cfb AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -43,7 +43,7 @@ RUN npm prune --omit=dev
 # ---------- runtime stage ----------
 # Digest-pinned, the same digest the slot image runs: one node across the
 # fleet, and a base that cannot change under either image.
-FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+FROM node:22.23.5-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime
 # The digest-pinned base lags the debian security feed, so this stage applies
 # the published security upgrades before installing anything. The blocking
 # Trivy scan in the publish workflow holds the image to that, and it can only
