@@ -998,14 +998,44 @@ export class SessionManager {
   }
 
   /**
-   * Whether the session a request names is the one this pair is talking
-   * through, live or remembered to resume. Reads memory only, so a caller can
+   * Whether the session a request names is the pair's live session: an entry
+   * exists and is not closed, not closed by the bridge, its connection is not
+   * aborted, and its id is the one named. Reads memory only, so a caller can
    * ask it without waiting on the session.
+   *
+   * A session only remembered to resume is not held: summarising it would mean
+   * resuming it, and a failed resume would summarise a fresh empty session.
    */
   holdsSession(agentId: string, userId: string, sessionId: string): boolean {
     if (sessionId === "") return false;
-    const key = sessionKey(agentId, userId);
-    return this.entries.get(key)?.sessionId === sessionId || this.resumableSessions.get(key) === sessionId;
+    const entry = this.entries.get(sessionKey(agentId, userId));
+    if (!entry) return false;
+    if (entry.closed || entry.closedByBridge || entry.connection.signal.aborted) return false;
+    return entry.sessionId === sessionId;
+  }
+
+  /**
+   * Have the pair's live session write the summary of its history, through
+   * opencode's own command, queued behind any prompt on it, and resolve with
+   * the summary's text. Never starts or resumes a session to do it: when the
+   * pair's live session is not `sessionId` it rejects and sends nothing.
+   */
+  writeSummary(agentId: string, userId: string, sessionId: string): Promise<string> {
+    if (!this.holdsSession(agentId, userId, sessionId)) {
+      return Promise.reject(new Error(`the pair's session ${sessionId} is no longer live`));
+    }
+    let summary = "";
+    return this.prompt(
+      agentId,
+      userId,
+      SUMMARY_COMMAND,
+      (update) => {
+        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+          summary += update.content.text;
+        }
+      },
+      { writesSummary: true },
+    ).then(() => summary);
   }
 
   /**

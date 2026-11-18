@@ -14,7 +14,11 @@
 // still being prepared, because only the bridge sees a turn before its message
 // reaches the assistant and a summary written beside one would race it. An
 // accepted summary holds the conversation's order until it is written, so a
-// message arriving meanwhile waits for it.
+// message arriving meanwhile waits for it; after the 202 the bridge has the
+// session write the summary through `/compact` in the session's queue, and its
+// text goes to the rolling summary, never to the chat. The route answers 404
+// when the bridge holds no live session with that id, a session it only
+// remembers to resume included.
 //
 // The inject route runs `dispatcher.handleMessage(agent_id, user_id, text)` as
 // if the user had sent it, optionally posting a deterministic heads-up first. The
@@ -289,10 +293,13 @@ async function closeNotice(dispatcher: Dispatcher, body: unknown, res: ServerRes
  * `POST /internal/summarise`: `{agent_id, user_id, session_id}`. Asks the
  * bridge to summarise the person's idle session. 400 for a body missing one of
  * the three non-empty strings, 403 for a user outside the agent's allowlist,
- * 404 when the pair is not talking through that session, 409 while a turn of
- * the conversation runs or a message of it waits, and 202 once accepted. The
- * write runs after the answer, and its failure is logged here because the
- * caller has already been told the summary was accepted.
+ * 404 when the bridge holds no live session with that id, a session it only
+ * remembers to resume included, 409 while a turn of the conversation runs or a
+ * message of it waits, and 202 once accepted. After the 202 the bridge has the
+ * session write the summary through `/compact` in the session's queue, and its
+ * text goes to the rolling summary, never to the chat. The write's failure is
+ * logged here because the caller has already been told the summary was
+ * accepted.
  */
 async function summarise(opts: InternalServerOptions, body: unknown, res: ServerResponse): Promise<void> {
   const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};

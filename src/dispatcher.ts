@@ -222,8 +222,8 @@ export interface DispatcherDeps {
   /**
    * Writes the summary of a person's session that `askForSummary` accepted,
    * while the conversation's order is held for it. Optional: only tests pass
-   * it, and without it an accepted summary writes nothing and gives the order
-   * back at once.
+   * it; without it the dispatcher has the session write the summary through
+   * `/compact` and hands its text to `onSummaryWithheld`.
    */
   writeSummary?: (agentId: string, userId: string) => Promise<void>;
 }
@@ -494,6 +494,13 @@ export class Dispatcher {
   // `turnInOrder`. Every turn waits for the one before it to end, follow-ups
   // included.
   private inOrder = new Map<string, Promise<void>>();
+  // Every summary being written now: a stopping bridge waits for them before it
+  // ends any session, so no summary is cut halfway.
+  private summaries = new Set<Promise<void>>();
+  // The place in a conversation's order held by a summary rather than a turn. A
+  // message that waited only behind one did not wait for earlier work of the
+  // person's, so it is not marked as written during that work.
+  private summaryPlaces = new WeakSet<Promise<void>>();
   /** The conversations whose running turn a person asked for, by agent and user. */
   private byPersonNow = new Set<string>();
 
@@ -535,11 +542,13 @@ export class Dispatcher {
    * sent to the assistant. So is every message received earlier whose prompt
    * has not been sent yet: one whose session is still starting, one queued
    * behind a turn of its conversation, one held through a slot restart. The
-   * turns the assistant is already working on go on, for up to `limitMs`. The
-   * ones still running then are cut off: their sessions are ended through
-   * `endSessions`, and each tells its person that an update interrupted the
-   * answer. Such a turn is not kept, because the assistant may already have
-   * acted on it; only a message the assistant never saw is answered again.
+   * turns the assistant is already working on go on, for up to `limitMs`. A
+   * summary being written is never cut: the bridge waits for it before it ends
+   * any session. The turns still running after that are cut off: their sessions
+   * are ended through `endSessions`, and each tells its person that an update
+   * interrupted the answer. Such a turn is not kept, because the assistant may
+   * already have acted on it; only a message the assistant never saw is
+   * answered again.
    */
   async stop(opts: { limitMs: number; noticeMs: number; endSessions: () => Promise<void> }): Promise<StopReport> {
     this.stopping = true;
@@ -550,8 +559,22 @@ export class Dispatcher {
       { turnsInFlight: turnsAtStop, limitMs: opts.limitMs },
       "the bridge is stopping — waiting for the turns in flight to end; a message arriving meanwhile is kept for the next bridge",
     );
-    let still = await this.turnsEnd(opts.limitMs);
+    await this.turnsEnd(opts.limitMs);
     const waitedMs = Date.now() - startedAt;
+    // A summary is bounded by the session manager's own watchdog, so it gets no
+    // limit of its own here. No session is ended before it is written.
+    if (this.summaries.size > 0) {
+      logger.info(
+        { summaries: this.summaries.size },
+        "the bridge is stopping — waiting for the summaries being written before it ends any session",
+      );
+      await Promise.allSettled([...this.summaries]);
+    }
+    // The messages that waited behind a summary are now kept for the next
+    // bridge, and end on their own: let their callbacks run before counting the
+    // turns still running.
+    await new Promise((resolve) => setImmediate(resolve));
+    let still = this.turnsInFlight().length;
     const turnsInterrupted = still;
     if (still > 0) {
       this.interrupting = true;
@@ -997,37 +1020,57 @@ export class Dispatcher {
       logger.info({ agentId, userId }, "summary refused: the conversation has a turn running or a message waiting");
       return { accepted: false, reason: "busy" };
     }
-    const { release } = this.takeOrder(key);
+    const { release } = this.takeOrder(key, true);
     logger.info({ agentId, userId }, "summary accepted: the conversation's order is held until it is written");
     const written = Promise.resolve()
-      .then(() => this.writeSummary(agentId, userId))
+      .then(() => this.writeSummary(agentId, userId, sessionId))
       .finally(release);
+    this.summaries.add(written);
+    const forget = () => {
+      this.summaries.delete(written);
+    };
+    written.then(forget, forget);
     return { accepted: true, written };
   }
 
   /**
-   * Write the summary an accepted request asked for. Without the dependency
-   * there is nothing to write, and the order is given back at once.
+   * Write the summary an accepted request asked for. Without the dependency the
+   * session writes it through opencode's own command, and the text goes to the
+   * rolling summary rather than to the chat.
    */
-  private writeSummary(agentId: string, userId: string): Promise<void> {
+  private async writeSummary(agentId: string, userId: string, sessionId: string): Promise<void> {
     const write = this.deps.writeSummary;
-    if (!write) return Promise.resolve();
-    return write(agentId, userId);
+    if (write) {
+      await write(agentId, userId);
+      return;
+    }
+    const summary = await this.deps.sessionManager.writeSummary(agentId, userId, sessionId);
+    if (summary.trim() !== "") {
+      try {
+        this.deps.onSummaryWithheld?.(agentId, summary);
+      } catch (err) {
+        logger.warn({ err, agentId, userId }, "onSummaryWithheld threw — the summary is not kept");
+      }
+    }
+    logger.info({ agentId, userId, summaryLen: summary.length }, "the summary was written");
   }
 
   /**
    * Take this conversation's place in order, synchronously: read the turn
    * before, set this one as the new tail, and return both. `release` ends this
    * place and clears the tail only if it is still this one, so a turn that
-   * released late never removes the place of one that came after it.
+   * released late never removes the place of one that came after it. A place
+   * taken for a summary is marked, so a message waiting behind it knows it did
+   * not wait for earlier work of the person's.
    */
-  private takeOrder(key: string): { before: Promise<void> | undefined; release: () => void } {
+  private takeOrder(key: string, summary = false): { before: Promise<void> | undefined; release: () => void } {
     const before = this.inOrder.get(key);
     let done: () => void = () => {};
     const mine = new Promise<void>((resolve) => {
       done = resolve;
     });
     const tail = (before ?? Promise.resolve()).then(() => mine);
+    if (summary) this.summaryPlaces.add(tail);
     this.inOrder.set(key, tail);
     const release = () => {
       done();
@@ -1040,13 +1083,15 @@ export class Dispatcher {
    * Wait for every turn of this conversation that came before this one, and
    * hold the place of this one until `release` is called. `waited` says an
    * earlier turn was in progress, so a message that could not join it was
-   * written during that work. While it waits the turn is in no queue of the
-   * session manager, so it is counted for the agent as a held turn is.
+   * written during that work. A place held by a summary is not earlier work of
+   * the person's: a message that waited only behind it is not marked. While it
+   * waits the turn is in no queue of the session manager, so it is counted for
+   * the agent as a held turn is.
    */
   private async turnInOrder(agentId: string, userId: string): Promise<{ release: () => void; waited: boolean }> {
     const key = `${agentId}:${userId}`;
     const { before, release } = this.takeOrder(key);
-    const waited = before !== undefined;
+    const waited = before !== undefined && !this.summaryPlaces.has(before);
     if (before) {
       const sm = this.deps.sessionManager;
       const waiting = typeof sm.holdTurn === "function" ? sm.holdTurn(agentId) : () => {};

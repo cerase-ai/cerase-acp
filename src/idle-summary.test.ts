@@ -1,10 +1,12 @@
 // The control-plane asks the bridge to summarise a person's idle session
 // through POST /internal/summarise. The bridge refuses while a turn of that
 // conversation runs, while one of its messages waits for its turn, or while a
-// message is still being checked; otherwise it accepts, writes the summary,
-// and holds the conversation's order until the summary settles.
+// message is still being checked; otherwise it accepts, holds the
+// conversation's order until the summary settles, and writes the summary
+// itself by sending opencode's /compact to the session, keeping the summary's
+// text out of the chat.
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +15,8 @@ import { isAllowed } from "./allowlist.js";
 import type { BridgeConfig } from "./config.js";
 import { Dispatcher, type DispatcherDeps } from "./dispatcher.js";
 import { type InternalServer, startInternalServer } from "./internal-server.js";
-import { SessionManager } from "./session-manager.js";
+import { PendingMessages } from "./pending-messages.js";
+import { SessionManager, SUMMARY_COMMAND } from "./session-manager.js";
 import { specTest } from "./test-support/spec-rows.js";
 import { TurnMetaTracker } from "./turn-meta.js";
 
@@ -48,6 +51,35 @@ interface SummaryResponse {
   body: SummaryBody;
 }
 
+/** One part of a message in the session log. */
+interface SessionPart {
+  type?: string;
+  text?: string;
+  synthetic?: boolean;
+}
+
+/** One message in the session log, as opencode stores it. */
+interface SessionMessage {
+  info?: { id?: string; role?: string; parentID?: string; summary?: boolean };
+  parts?: SessionPart[];
+}
+
+/** The session log's messages, or null when it is missing or does not parse. */
+function parseSessionLog(path: string): SessionMessage[] | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as SessionMessage[]) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The person's words in a prompt, after the bridge's [turn_meta:] block. */
 function personPart(taken: string): string {
   if (taken.startsWith("[turn_meta:")) {
@@ -62,14 +94,30 @@ function answers(sent: string[]): string[] {
   return sent.map((text) => text.replace(/ ⏎$/u, "")).filter((text) => text.includes("answer to:"));
 }
 
+/** The user messages whose non-synthetic text is the person's words. */
+function personMessages(messages: SessionMessage[], words: string): SessionMessage[] {
+  return messages.filter(
+    (message) =>
+      message.info?.role === "user" &&
+      (message.parts ?? []).some(
+        (part) => part.type === "text" && part.synthetic !== true && personPart(part.text ?? "") === words,
+      ),
+  );
+}
+
 interface Harness {
   dispatcher: Dispatcher;
   manager: SessionManager;
   base: string;
   sent: string[];
   summaryCalls: Array<[string, string]>;
+  summaries: Array<[string, string]>;
+  events: string[];
   readLog: () => ModelLogEntry[];
+  readSession: () => SessionMessage[];
   prompts: () => string[];
+  rawPrompts: () => string[];
+  kept: () => string[];
   waitFor: (predicate: (entries: ModelLogEntry[]) => boolean, what: string) => Promise<ModelLogEntry[]>;
   waitUntil: (predicate: () => boolean, what: string) => Promise<void>;
   summarise: (body: unknown, auth?: string | null) => Promise<SummaryResponse>;
@@ -82,12 +130,16 @@ interface Harness {
 
 interface HarnessOptions {
   allowedUsers?: string[];
+  realSummary?: boolean;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "cerase-idle-summary-"));
   const modelLog = join(dir, "model.log");
   const promptLog = join(dir, "prompts.log");
+  const sessionLog = join(dir, "session.json");
+  const pendingDir = join(dir, "pending");
+  mkdirSync(pendingDir, { recursive: true });
   const config: BridgeConfig = {
     agents: [
       {
@@ -105,6 +157,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
             `FAKE_STEP_MS=${STEP_MS}`,
             `FAKE_MODEL_LOG=${modelLog}`,
             `FAKE_PROMPT_LOG=${promptLog}`,
+            `FAKE_SESSION_LOG=${sessionLog}`,
             "node",
             FAKE_CHILD,
           ],
@@ -117,7 +170,10 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
 
   const sent: string[] = [];
   const summaryCalls: Array<[string, string]> = [];
+  const summaries: Array<[string, string]> = [];
+  const events: string[] = [];
   const summaryResolvers: Array<() => void> = [];
+  const pending = new PendingMessages(pendingDir);
 
   let creditArmed = false;
   let creditCalled = false;
@@ -152,7 +208,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     while (summaryResolvers.length > 0) summaryResolvers.shift()!();
   };
 
-  const deps: DispatcherDeps & { writeSummary: (agentId: string, userId: string) => Promise<void> } = {
+  const deps: DispatcherDeps = {
     config,
     sessionManager: manager,
     turnMeta: new TurnMetaTracker(),
@@ -161,7 +217,12 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       return { ok: true };
     },
     creditCheck,
-    writeSummary,
+    onSummaryWithheld: (agentId, summary) => {
+      summaries.push([agentId, summary]);
+      events.push("summary");
+    },
+    pendingMessages: pending,
+    ...(options.realSummary ? {} : { writeSummary }),
   };
   const dispatcher = new Dispatcher(deps);
 
@@ -218,6 +279,25 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     return out;
   };
 
+  const rawPrompts = (): string[] => {
+    let raw: string;
+    try {
+      raw = readFileSync(promptLog, "utf8");
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line) as string);
+      } catch {
+        // A line still being appended: the next read sees it whole.
+      }
+    }
+    return out;
+  };
+
   const waitFor = async (predicate: (entries: ModelLogEntry[]) => boolean, what: string): Promise<ModelLogEntry[]> => {
     const deadline = Date.now() + WAIT_MS;
     for (;;) {
@@ -257,8 +337,13 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     base,
     sent,
     summaryCalls,
+    summaries,
+    events,
     readLog,
+    readSession: () => parseSessionLog(sessionLog) ?? [],
     prompts,
+    rawPrompts,
+    kept: () => pending.list().map((message) => message.text),
     waitFor,
     waitUntil,
     summarise,
@@ -500,5 +585,190 @@ describe("a summary the control-plane asks of the bridge", () => {
 
     expect(harness.summaryCalls).toEqual([]);
     expect(harness.prompts()).toEqual(["first"]);
+  });
+});
+
+describe("a summary the bridge writes for the control-plane", { timeout: 15_000 }, () => {
+  let harness: Harness | undefined;
+
+  afterEach(async () => {
+    await harness?.shutdown();
+    harness = undefined;
+  });
+
+  specTest("ACP-TURN-049", "writes the summary through /compact once and keeps it out of the chat", async (row) => {
+    harness = await makeHarness({ realSummary: true });
+    const h = harness;
+    const { dispatcher, manager } = h;
+
+    expect(await dispatcher.handleMessage("doc-qa", "111", "first")).toEqual({ ok: true });
+    const sessionId = manager.currentSessionId("doc-qa", "111");
+
+    const { status, body } = await h.summarise({
+      agent_id: "doc-qa",
+      user_id: "111",
+      session_id: sessionId,
+    });
+    expect(status).toBe(202);
+    expect(body).toEqual({ status: "accepted" });
+    // The answer does not wait for the summary.
+    expect(h.summaries).toEqual([]);
+
+    await h.waitUntil(() => h.summaries.length === 1, "the summary to reach the rolling summary");
+
+    expect(h.prompts()).toEqual(["first", SUMMARY_COMMAND]);
+    const compactSteps = h
+      .readLog()
+      .filter((entry) => entry.taken.some((taken) => personPart(taken) === SUMMARY_COMMAND));
+    expect(compactSteps).toHaveLength(1);
+    expect(h.summaries).toEqual([["doc-qa", "answer to: /compact"]]);
+    expect(h.sent.some((text) => text.includes(SUMMARY_COMMAND))).toBe(false);
+    expect(answers(h.sent)).toEqual(["answer to: first"]);
+    expect(manager.currentSessionId("doc-qa", "111")).toBe(sessionId);
+
+    expect(await dispatcher.handleMessage("doc-qa", "111", "second")).toEqual({ ok: true });
+    expect(h.prompts()).toEqual(["first", SUMMARY_COMMAND, "second"]);
+
+    const n = h.prompts().filter((text) => text === SUMMARY_COMMAND).length;
+    const kept = h.summaries.some(([, summary]) => summary === "answer to: /compact");
+    const inChat = h.sent.some((text) => text.includes(SUMMARY_COMMAND));
+    const observed = `the session is sent /compact ${n === 1 ? "once" : `${n} times`}, the summary ${kept ? "reaches the rolling summary" : "does not reach the rolling summary"}, and the chat ${inChat ? "receives it" : "receives none of it"}`;
+    expect(observed).toBe(row.expect);
+  });
+
+  specTest(
+    "ACP-TURN-050",
+    "lets a message written during the summary wait for it, and answers it once, unmarked",
+    async (row) => {
+      harness = await makeHarness({ realSummary: true });
+      const h = harness;
+      const { dispatcher, manager } = h;
+
+      expect(await dispatcher.handleMessage("doc-qa", "111", "first")).toEqual({ ok: true });
+      const sessionId = manager.currentSessionId("doc-qa", "111");
+      const { status, body } = await h.summarise({
+        agent_id: "doc-qa",
+        user_id: "111",
+        session_id: sessionId,
+      });
+      expect(status).toBe(202);
+      expect(body).toEqual({ status: "accepted" });
+
+      await h.waitFor(
+        (entries) => entries.some((entry) => entry.taken.some((taken) => personPart(taken) === SUMMARY_COMMAND)),
+        "the summary to take /compact",
+      );
+
+      const second = dispatcher.handleMessage("doc-qa", "111", "second");
+      expect(await second).toEqual({ ok: true });
+
+      expect(h.prompts()).toEqual(["first", SUMMARY_COMMAND, "second"]);
+      expect(personMessages(h.readSession(), "second")).toHaveLength(1);
+      expect(answers(h.sent)).toEqual(["answer to: first", "answer to: second"]);
+
+      const entries = h.readLog();
+      const summaryLoop = entries.find((entry) =>
+        entry.taken.some((taken) => personPart(taken) === SUMMARY_COMMAND),
+      )!.loop;
+      const secondSteps = entries.filter((entry) => entry.taken.some((taken) => personPart(taken) === "second"));
+      expect(secondSteps).toHaveLength(1);
+      expect(secondSteps[0]!.loop).toBeGreaterThan(summaryLoop);
+
+      const rawSecond = h.rawPrompts().find((line) => personPart(line) === "second");
+      expect(rawSecond).toBeDefined();
+      expect(rawSecond).not.toContain("written_during_previous_work=");
+      expect(h.summaries).toEqual([["doc-qa", "answer to: /compact"]]);
+
+      const joined = entries.some(
+        (entry) => entry.loop === summaryLoop && entry.taken.some((taken) => personPart(taken) === "second"),
+      );
+      const waited = !joined && secondSteps[0]!.loop > summaryLoop;
+      const n = answers(h.sent).filter((text) => text === "answer to: second").length;
+      const marked = (rawSecond ?? "").includes("written_during_previous_work=");
+      const observed = `the message ${waited ? "waits for the summary" : "joins the summary"}, is answered ${n === 1 ? "once" : `${n} times`} after it, and ${marked ? "is marked as written during earlier work" : "is not marked as written during earlier work"}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest("ACP-TURN-051", "refuses a session it only remembers to resume", async (row) => {
+    harness = await makeHarness({ realSummary: true });
+    const h = harness;
+    const { dispatcher, manager } = h;
+
+    expect(await dispatcher.handleMessage("doc-qa", "111", "first")).toEqual({ ok: true });
+    const sessionId = manager.currentSessionId("doc-qa", "111");
+    manager.killAgentSessions("doc-qa");
+
+    expect(manager.currentSessionId("doc-qa", "111")).toBeUndefined();
+    expect(manager.activeSessionCount()).toBe(0);
+    expect(manager.resumableSessionCount()).toBe(1);
+
+    const { status, body } = await h.summarise({
+      agent_id: "doc-qa",
+      user_id: "111",
+      session_id: sessionId,
+    });
+    expect(status).toBe(404);
+    expect(body).toEqual({ error: "unknown_session" });
+
+    await sleep(300);
+    expect(manager.activeSessionCount()).toBe(0);
+    expect(h.prompts()).toEqual(["first"]);
+    expect(h.summaries).toEqual([]);
+
+    const started = manager.activeSessionCount() > 0 || h.prompts().length > 1;
+    const observed = `the bridge answers ${status} ${body.error} and ${started ? "starts a session" : "starts no session"}`;
+    expect(observed).toBe(row.expect);
+  });
+
+  specTest("ACP-TURN-052", "ends no session before the summary is written when the bridge stops", async (row) => {
+    harness = await makeHarness({ realSummary: true });
+    const h = harness;
+    const { dispatcher, manager } = h;
+
+    expect(await dispatcher.handleMessage("doc-qa", "111", "first")).toEqual({ ok: true });
+    const sessionId = manager.currentSessionId("doc-qa", "111");
+    const { status, body } = await h.summarise({
+      agent_id: "doc-qa",
+      user_id: "111",
+      session_id: sessionId,
+    });
+    expect(status).toBe(202);
+    expect(body).toEqual({ status: "accepted" });
+    await h.waitFor(
+      (entries) => entries.some((entry) => entry.taken.some((taken) => personPart(taken) === SUMMARY_COMMAND)),
+      "the summary to take /compact",
+    );
+
+    const second = dispatcher.handleMessage("doc-qa", "111", "second");
+    await h.waitUntil(() => manager.turnsInFlight("doc-qa") >= 2, "the second message to wait behind the summary");
+
+    const report = await dispatcher.stop({
+      limitMs: 50,
+      noticeMs: 2_000,
+      endSessions: async () => {
+        h.events.push("endSessions");
+        await manager.shutdown();
+      },
+    });
+
+    // Before anything else: the summary is written when stop returns.
+    expect(h.summaries).toEqual([["doc-qa", "answer to: /compact"]]);
+
+    await manager.shutdown();
+    expect(await second).toEqual({ ok: true });
+
+    const endedAt = h.events.indexOf("endSessions");
+    const writtenAt = h.events.indexOf("summary");
+    expect(writtenAt).toBeGreaterThanOrEqual(0);
+    expect(endedAt === -1 || endedAt > writtenAt).toBe(true);
+    expect(h.prompts()).toEqual(["first", SUMMARY_COMMAND]);
+    expect(h.kept()).toEqual(["second"]);
+    expect(report).toBeDefined();
+
+    const endedBefore = endedAt !== -1 && (writtenAt === -1 || endedAt < writtenAt);
+    const written = h.summaries.some(([, summary]) => summary === "answer to: /compact");
+    const observed = `the bridge ${endedBefore ? "ends a session before the summary is written" : "ends no session before the summary is written"}, and the summary ${written ? "reaches the rolling summary" : "is lost"}`;
+    expect(observed).toBe(row.expect);
   });
 });
