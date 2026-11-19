@@ -6,10 +6,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // attach suite depends on a REAL docker exec failing against a container that
 // does not exist, and a module-wide mock would take that evidence away.
 vi.mock("./workspace-files.js", () => ({
-  readAgentWorkspaceFile: async (_container: string, relPath: string) => ({
-    name: relPath.split("/").pop() ?? relPath,
-    bytes: Buffer.from("not a real pdf"),
-  }),
+  readAgentWorkspaceFile: async (_container: string, relPath: string) => {
+    const name = relPath.split("/").pop() ?? relPath;
+    // A name that says the file is missing stands for the non-zero exit a real
+    // `docker exec cat` answers with: the read throws, and the bridge must
+    // still carry the words that introduced the file. Every other path reads,
+    // so the ordering cases keep the file they need.
+    if (name.includes("mancante")) throw new Error(`docker exec failed: no such file ${relPath}`);
+    return { name, bytes: Buffer.from("not a real pdf") };
+  },
 }));
 
 import { type RunBridgeHandle, runBridge } from "./bridge.js";
@@ -27,13 +32,20 @@ const REPLY = "Certo, te lo rimando: [[attach: outputs/foto.png]]";
 // expected to carry instead of a message of its own.
 const REPLY_TEXT = "Certo, te lo rimando:";
 
+// A short sentence that fits any caption limit, so the caption path is the one
+// the cases below exercise.
+const INTRO = "Certo, te lo mando subito:";
+
 interface Run {
   events: string[];
 }
 
 interface ConverseOptions {
-  /** The caption limit the fake channel declares; defaults to 2000, Discord's message content limit. */
-  captionLimit?: number;
+  /**
+   * The caption limit the fake channel declares; defaults to 2000, Discord's
+   * message content limit. `null` stands for a channel that declares none.
+   */
+  captionLimit?: number | null;
   /** Decides whether an upload succeeds; the default accepts every one. */
   sendFile?: (userId: string, file: OutgoingFile) => Promise<DeliveryResult>;
 }
@@ -45,7 +57,8 @@ interface ConverseOptions {
  * for an upload, caption and all, so a case can assert where the words went.
  * `opts.sendFile` decides whether the upload succeeds; its result is handed back
  * to the bridge unchanged. `opts.captionLimit` is what the fake channel says it
- * can carry on a file, and defaults to 2000, Discord's message content limit.
+ * can carry on a file, and defaults to 2000, Discord's message content limit;
+ * `null` declares no limit at all.
  */
 async function converse(
   id: string,
@@ -76,7 +89,7 @@ async function converse(
     agentId: id,
     async start() {},
     async stop() {},
-    captionLimit,
+    captionLimit: captionLimit ?? undefined,
     makeSendTarget: () => async (chunk: string) => {
       events.push(`text:${chunk}`);
       return { ok: true };
@@ -423,5 +436,145 @@ describe("a file travels with the sentence that introduces it", () => {
       { timeout: 8000, interval: 50 },
     );
     expect(events.filter((e) => e.startsWith("text:"))).toEqual([]);
+  });
+});
+
+describe("a sentence that introduces a file the bridge cannot deliver", () => {
+  let handle: RunBridgeHandle | undefined;
+
+  afterEach(async () => {
+    if (handle) await handle.shutdown();
+    handle = undefined;
+    vi.unstubAllEnvs();
+  });
+
+  /** How many times `sentence` reached the person, as a message or as a caption. */
+  const copiesOf = (run: Run, sentence: string): number =>
+    texts(run).filter((t) => t === sentence).length +
+    files(run).filter((e) => e.endsWith(`|caption:${sentence}`)).length;
+
+  /** Where the sentence as its own message and the failure notice sit in the run, in order. */
+  const order = (run: Run, sentence: string) => ({
+    sentenceAt: run.events.indexOf(`text:${sentence}`),
+    noticeAt: run.events.findIndex((e) => e.startsWith("text:") && /Non sono riuscita a recuperare/.test(e)),
+  });
+
+  specTest("ACP-REPLY-026", "sends the sentence before the notice when the only file cannot be read", async (row) => {
+    // The caption path used to leave the words inside a file that never left
+    // the workspace: the read threw and only the notice went out. The person
+    // must read the sentence first, once, and the failed upload must not add
+    // a file event.
+    const fileName = row.quoted("when")[0]!;
+    const run = await converse(
+      "caption-unreadable",
+      `${INTRO} [[attach: outputs/${fileName}]]`,
+      {},
+      (h) => (handle = h),
+    );
+    await told(run, /Non sono riuscita a recuperare/);
+
+    const copies = copiesOf(run, INTRO);
+    const { sentenceAt, noticeAt } = order(run, INTRO);
+    expect(copies).toBe(1);
+    expect(sentenceAt).toBeGreaterThanOrEqual(0);
+    expect(noticeAt).toBeGreaterThan(sentenceAt);
+    expect(files(run).some((e) => e.endsWith(`|caption:${INTRO}`))).toBe(false);
+    expect(files(run)).toEqual([]);
+
+    const once = copies === 1;
+    const before = sentenceAt >= 0 && noticeAt > sentenceAt;
+    const noFile = files(run).length === 0;
+    const observed = `the sentence is sent ${once ? "once" : `${copies} times`} as its own message ${before ? "before" : "after"} the notice that the file could not be retrieved, and ${noFile ? "no file is uploaded" : `${files(run).length} files are uploaded`}`;
+    expect(observed).toBe(row.expect);
+  });
+
+  specTest(
+    "ACP-REPLY-027",
+    "sends the sentence before the notice when the marker names a path outside the workspace",
+    async (row) => {
+      // A refused marker never reaches a file read, so the sentence goes out as
+      // text and the notice follows it. This is the order the caption path must
+      // preserve when no file can carry the words.
+      const marker = row.quoted("when")[0]!;
+      const run = await converse("caption-outside", `${INTRO} ${marker}`, {}, (h) => (handle = h));
+      await told(run, /Non sono riuscita a recuperare/);
+
+      const copies = copiesOf(run, INTRO);
+      const { sentenceAt, noticeAt } = order(run, INTRO);
+      expect(copies).toBe(1);
+      expect(sentenceAt).toBeGreaterThanOrEqual(0);
+      expect(noticeAt).toBeGreaterThan(sentenceAt);
+      expect(files(run).some((e) => e.endsWith(`|caption:${INTRO}`))).toBe(false);
+      expect(files(run)).toEqual([]);
+
+      const once = copies === 1;
+      const before = sentenceAt >= 0 && noticeAt > sentenceAt;
+      const noFile = files(run).length === 0;
+      const observed = `the sentence is sent ${once ? "once" : `${copies} times`} as its own message ${before ? "before" : "after"} the notice that the file could not be retrieved, and ${noFile ? "no file is uploaded" : `${files(run).length} files are uploaded`}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  specTest(
+    "ACP-REPLY-028",
+    "sends the sentence before the notice and leaves the readable second file bare",
+    async (row) => {
+      // The first file cannot carry the caption, and the second may not take it:
+      // a caption on the second would put the words under a file they did not
+      // introduce. The sentence therefore goes out alone, before the notice,
+      // exactly once, and foto.png follows without one.
+      const [missing, readable] = row.quoted("when");
+      const run = await converse(
+        "caption-mixed",
+        `${INTRO} [[attach: outputs/${missing}]] [[attach: outputs/${readable}]]`,
+        {},
+        (h) => (handle = h),
+      );
+      await told(run, /Non sono riuscita a recuperare/);
+      await uploaded(run);
+
+      const copies = copiesOf(run, INTRO);
+      const { sentenceAt, noticeAt } = order(run, INTRO);
+      const fileEvents = files(run);
+      expect(copies).toBe(1);
+      expect(sentenceAt).toBeGreaterThanOrEqual(0);
+      expect(noticeAt).toBeGreaterThan(sentenceAt);
+      expect(fileEvents).toEqual([`file:${readable}|caption:`]);
+
+      const once = copies === 1;
+      const before = sentenceAt >= 0 && noticeAt > sentenceAt;
+      const bareSecond = fileEvents.length === 1 && fileEvents[0] === `file:${readable}|caption:`;
+      const observed = `the sentence is sent ${once ? "alone" : `${copies} times`} ${before ? "before" : "after"} the notice, and ${bareSecond ? `"${readable}" is uploaded with no caption` : `"${readable}" is not uploaded bare`}, so the sentence arrives ${once ? "once" : `${copies} times`}`;
+      expect(observed).toBe(row.expect);
+    },
+  );
+
+  it("sends the sentence as a message before the notice when the channel has no caption limit", async () => {
+    // Without a caption limit the sentence never rides the file, so the older
+    // order is the only one: text first, then the failure notice. A missing
+    // file must not change it.
+    const run = await converse(
+      "caption-no-limit",
+      `${INTRO} [[attach: outputs/mancante.pdf]]`,
+      { captionLimit: null },
+      (h) => (handle = h),
+    );
+    await told(run, /Non sono riuscita a recuperare/);
+
+    const { sentenceAt, noticeAt } = order(run, INTRO);
+    expect(sentenceAt).toBeGreaterThanOrEqual(0);
+    expect(noticeAt).toBeGreaterThan(sentenceAt);
+    expect(copiesOf(run, INTRO)).toBe(1);
+    expect(files(run)).toEqual([]);
+  });
+
+  it("puts the sentence on a readable file's caption and never also as a message", async () => {
+    // The ordinary caption path: the first file carries the words, so a text
+    // event with the same words would repeat them.
+    const run = await converse("caption-readable", `${INTRO} [[attach: outputs/foto.png]]`, {}, (h) => (handle = h));
+    await uploaded(run);
+
+    expect(files(run)).toEqual([`file:foto.png|caption:${INTRO}`]);
+    expect(texts(run)).toEqual([]);
   });
 });

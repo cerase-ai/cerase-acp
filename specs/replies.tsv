@@ -24,3 +24,6 @@ ACP-REPLY-022	a reply is one paragraph of prose that ends on "[[attach: outputs/
 ACP-REPLY-023	a reply is one sentence followed by a marker for a file "foto.png"	the sentence travels as the caption of the single upload and no text message is sent	src/bridge.ts	
 ACP-REPLY-024	a reply's text is longer than the channel's caption limit and ends on its marker	the text is sent first and the file is sent bare	src/bridge.ts	
 ACP-REPLY-025	a reply ends on its marker while the channel is down	the reply is kept with its file and is sent captioned when the channel returns	src/bridge.ts	
+ACP-REPLY-026	a reply is one sentence followed by a marker for a file "mancante.pdf" that cannot be read	the sentence is sent once as its own message before the notice that the file could not be retrieved, and no file is uploaded	src/bridge.ts	
+ACP-REPLY-027	a reply is one sentence followed by a marker "[[attach: /etc/passwd]]" that names a path outside the workspace	the sentence is sent once as its own message before the notice that the file could not be retrieved, and no file is uploaded	src/bridge.ts	
+ACP-REPLY-028	a reply is one sentence followed by markers for "mancante.pdf", which cannot be read, and "foto.png"	the sentence is sent alone before the notice, and "foto.png" is uploaded with no caption, so the sentence arrives once	src/bridge.ts	

@@ -469,6 +469,9 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
           // the caller returns it, so a channel that also went down lets the
           // whole reply be kept, files and all.
           let captionFallback: DeliveryResult | undefined;
+          // Whether the caption has already been sent as its own message, so
+          // the fallback happens once and never twice.
+          let captionHandled = false;
           // The channel cannot carry this file itself, so it reaches the
           // person as a control-plane link instead. A link is a delivery, not
           // a lost attachment: nothing is recorded unless asking for it fails.
@@ -503,10 +506,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
                   ...(fileCaption !== undefined ? { caption: fileCaption } : {}),
                 });
                 if (!fileResult.ok) {
-                  // The caption was the only copy of the words, so a refused
+                  // The caption is the only copy of the words, so a refused
                   // upload has to deliver them as their own message, before
-                  // the person is told how the file went.
-                  if (fileCaption !== undefined) captionFallback = await inner(fileCaption);
+                  // the person is told how the file went. It is marked handled
+                  // first, so a throw from that send cannot make the catch
+                  // below send it a second time.
+                  if (fileCaption !== undefined) {
+                    captionHandled = true;
+                    captionFallback = await inner(fileCaption);
+                  }
                   if (fileResult.linkInstead) {
                     // The channel could not carry the file but the bridge has
                     // it whole, so the link is the delivery and the failed
@@ -528,6 +536,15 @@ export async function runBridge(opts: RunBridgeOptions): Promise<RunBridgeHandle
               }
             } catch (err) {
               logger.warn({ err, agentId, relPath }, "attach: failed to read/send workspace file");
+              // The caption is the only copy of the words, so it is delivered
+              // as its own message whenever the file that was to carry it
+              // fails, whether the upload is refused or the read throws. Only
+              // the first file ever carries it, so a later failure leaves the
+              // words alone.
+              if (index === 0 && caption !== undefined && !captionHandled) {
+                captionHandled = true;
+                captionFallback = await inner(caption);
+              }
               await inner(attachmentUnreadableNotice(fileName, lang));
               attachOutcomes.record(agentId, userId, {
                 fileName,
