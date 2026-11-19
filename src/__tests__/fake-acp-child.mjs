@@ -152,6 +152,19 @@
 //                              it: the prompt that arrived during the answer
 //                              gets no answer of its own. Every answer chunk
 //                              then carries the messageId `msg_answer_<loop>`.
+//   FAKE_AUTO_SUMMARY_AFTER_STEPS — k ≥ 1 makes the first work (loop 1), right
+//                              after its k-th tool step ends, write the summary
+//                              opencode starts on its own in the middle of a
+//                              turn: a compaction marker, the summary message
+//                              left open under it, the summary's text, then a
+//                              synthetic message that carries the work on. The
+//                              summary takes nothing from the queue; the steps
+//                              after it are numbered on from it and the loop's
+//                              counter is unchanged. Every answer chunk then
+//                              carries the messageId `msg_answer_<loop>`.
+//   FAKE_AUTO_SUMMARY_SILENT_MS — how long that summary stays silent, after its
+//                              message is appended and before its first chunk
+//                              (default 0): the model's prefill.
 //   FAKE_SESSION_LOG        — a file the loop keeps the session's messages in,
 //                              as one JSON array, oldest first, in the shape
 //                              opencode's GET /session/{id}/message serves. A
@@ -232,6 +245,12 @@ const MODEL_LOG = process.env.FAKE_MODEL_LOG;
 const SUMMARY_AFTER_ANSWER = process.env.FAKE_SUMMARY_AFTER_ANSWER === "1";
 const SUMMARY_ID = process.env.FAKE_SUMMARY_ID ?? "msg_summary";
 const SUMMARY_TEXT = "## Goal\n- the person's request";
+// The summary opencode starts on its own after a tool step of the first work,
+// as it does when the context outgrows its window. Off unless a test asks.
+const AUTO_SUMMARY_AFTER_STEPS = parseInt(process.env.FAKE_AUTO_SUMMARY_AFTER_STEPS ?? "0", 10);
+const AUTO_SUMMARY_SILENT_MS = parseInt(process.env.FAKE_AUTO_SUMMARY_SILENT_MS ?? "0", 10);
+const CONTINUE_TEXT =
+  "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 // Where the loop keeps the session's messages, in the shape opencode's
 // GET /session/{id}/message serves. Off unless a test asks for it.
 const SESSION_LOG = process.env.FAKE_SESSION_LOG;
@@ -356,6 +375,61 @@ function sendUpdate(sessionId, update) {
 }
 
 /**
+ * Write the summary opencode starts on its own in the middle of a work: a
+ * compaction marker, the summary message left open under it while it is
+ * written, its text, then its completion and the synthetic message that
+ * carries the work on. It takes nothing from the queue.
+ */
+async function writeAutoSummary(sessionId, loop, step) {
+  const markerId = `msg_compaction_${loop}`;
+  const createdAt = Date.now();
+  appendSessionMessage({
+    info: { id: markerId, role: "user", time: { created: createdAt } },
+    parts: [{ type: "compaction", auto: true }],
+  });
+  appendSessionMessage({
+    info: {
+      id: SUMMARY_ID,
+      role: "assistant",
+      summary: true,
+      mode: "compaction",
+      agent: "compaction",
+      parentID: markerId,
+      time: { created: createdAt },
+    },
+    parts: [],
+  });
+  if (MODEL_LOG) {
+    appendFileSync(MODEL_LOG, `${JSON.stringify({ loop, step, answer: false, summary: true, taken: [] })}\n`);
+  }
+  if (AUTO_SUMMARY_SILENT_MS > 0) await sleep(AUTO_SUMMARY_SILENT_MS);
+  sendUpdate(sessionId, {
+    sessionUpdate: "agent_message_chunk",
+    messageId: SUMMARY_ID,
+    content: { type: "text", text: SUMMARY_TEXT },
+  });
+  const messages = readSessionLog();
+  const summary = messages.find((message) => message.info?.id === SUMMARY_ID);
+  if (summary) {
+    summary.info.finish = "stop";
+    summary.info.time = { ...summary.info.time, completed: Date.now() };
+    summary.parts = [{ type: "text", text: SUMMARY_TEXT }];
+    writeSessionLog(messages);
+  }
+  appendSessionMessage({
+    info: { id: `msg_continue_${loop}`, role: "user", time: { created: Date.now() } },
+    parts: [
+      {
+        type: "text",
+        synthetic: true,
+        text: CONTINUE_TEXT,
+        metadata: { compaction_continue: true },
+      },
+    ],
+  });
+}
+
+/**
  * Run one work at a time for a session, taking every prompt that arrives while
  * it runs. The first work starts with the prompt that found the session idle;
  * a prompt arriving during a work waits for its next step, except during the
@@ -396,6 +470,12 @@ async function runLoop(sessionId, state) {
           });
           await sleep(STEP_MS);
           sendUpdate(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+          if (AUTO_SUMMARY_AFTER_STEPS > 0 && loop === 1 && step === AUTO_SUMMARY_AFTER_STEPS) {
+            await writeAutoSummary(sessionId, loop, step + 1);
+            // The summary is a step of its own and leaves the counter as it
+            // was, so the work resumes where it left off.
+            step += 1;
+          }
           continue;
         }
         const words = taken.map((p) => personWordsOf(p.text));
@@ -424,7 +504,7 @@ async function runLoop(sessionId, state) {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: answerText },
         };
-        if (SUMMARY_AFTER_ANSWER) answer.messageId = `msg_answer_${loop}`;
+        if (SUMMARY_AFTER_ANSWER || AUTO_SUMMARY_AFTER_STEPS > 0) answer.messageId = `msg_answer_${loop}`;
         sendUpdate(sessionId, answer);
         // The prompts that arrived during the answer step are the summary's
         // parent, and get no work of their own: the turn ends on the summary.
