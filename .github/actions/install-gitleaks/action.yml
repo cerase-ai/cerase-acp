@@ -1,0 +1,21 @@
+name: Install gitleaks
+description: >
+  Install the pinned gitleaks binary from its release tarball, or from the
+  image of the same version when the release host is down.
+
+# The tag build of v0.4.2-rc.3 failed twice because github.com answered 504 for
+# the release tarball on every retry, while ghcr.io/gitleaks/gitleaks:v<version>
+# answered. A security gate that fails on one third party's outage holds back
+# every image the repo publishes. The binary is at /usr/bin/gitleaks inside the
+# image.
+inputs:
+  version:
+    description: The gitleaks release to install, without the leading v.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GITLEAKS_VERSION: ${{ inputs.version }}
+      run: "${{ github.action_path }}/install.sh"
