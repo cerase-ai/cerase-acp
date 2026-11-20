@@ -2,6 +2,7 @@
 """Judge whether every selected spec row was executed and still holds.
 
     python3 scripts/conformance.py --ledger FILE [--root DIR] [--decisions FILE]
+                                   [--unreached REASON]
                                    (--all | PATH [PATH ...])
 
 The index at ``specs/INDEX.tsv`` names each area file, the paths its scope
@@ -13,7 +14,8 @@ ledger ID that no area declares is reported rather than silently ignored.
 
 The verdict is TAP on stdout and one JSON summary line at the end. Structural
 faults print to stderr and exit 2 without producing TAP. Green exits 0 and any
-``not ok`` line exits 1.
+``not ok`` line exits 1. With ``--unreached REASON``, a selected row with no
+ledger entry is named as not reached rather than as a row no test executes.
 """
 
 from __future__ import annotations
@@ -92,7 +94,9 @@ def _select(index, paths, full):
     return selected
 
 
-def _judge(rows, entries, unknown, full, selected_paths, remaining_paths):
+def _judge(
+    rows, entries, unknown, full, selected_paths, remaining_paths, unreached_reason=None
+):
     by_id: dict[str, list[dict[str, str]]] = {}
     for entry in entries:
         by_id.setdefault(entry["id"], []).append(entry)
@@ -100,6 +104,7 @@ def _judge(rows, entries, unknown, full, selected_paths, remaining_paths):
     lines: list[str] = []
     passed: list[str] = []
     failed: list[str] = []
+    unreached: list[str] = []
     number = 0
 
     for row in rows:
@@ -133,6 +138,12 @@ def _judge(rows, entries, unknown, full, selected_paths, remaining_paths):
                 entry for entry in found if entry["outcome"] == "pass"
             )
             reason = f"executed by {first['test']} against a different revision of the row"
+        elif unreached_reason is not None:
+            lines.append(
+                f"not ok {number} - {spec_id}: not reached: {unreached_reason}"
+            )
+            unreached.append(spec_id)
+            continue
         else:
             reason = "no test executed it"
         lines.append(f"not ok {number} - {spec_id}: {reason}")
@@ -156,9 +167,10 @@ def _judge(rows, entries, unknown, full, selected_paths, remaining_paths):
         "rows": len(rows),
         "passed": passed,
         "failed": failed,
+        "unreached": unreached,
     }
     print("# conformance " + json.dumps(summary, ensure_ascii=False))
-    return 0 if not failed else 1
+    return 0 if not failed and not unreached else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--root", default=None)
     parser.add_argument("--decisions", default=None)
+    parser.add_argument("--unreached", default=None)
     parser.add_argument("--all", action="store_true")
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args(argv)
@@ -316,7 +329,15 @@ def main(argv: list[str] | None = None) -> int:
             ledger_ids.append(entry["id"])
     unknown = [spec_id for spec_id in ledger_ids if spec_id not in declared]
 
-    return _judge(rows, entries, unknown, args.all, selected_paths, remaining_paths)
+    return _judge(
+        rows,
+        entries,
+        unknown,
+        args.all,
+        selected_paths,
+        remaining_paths,
+        args.unreached,
+    )
 
 
 if __name__ == "__main__":
